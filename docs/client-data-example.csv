@@ -1,0 +1,4 @@
+company_name,company_number,billing_email,contact_name,phone,address,vat_number,vat_registered,currency,payment_terms_days,default_lead_price,billing_workflow,status,notes
+Apex Media Ltd,12345678,billing@apexmedia.co.uk,James Wright,+44 20 7946 0958,"10 Fleet Street, London EC4Y 1AU",GB123456789,Y,GBP,30,12.50,weekly_auto,active,Key account — prefers weekly invoicing
+Brightfield Corp,87654321,accounts@brightfield.co,Sarah Chen,+44 161 555 0102,"22 Oxford Road, Manchester M1 6FQ",GB987654321,Y,GBP,14,8.00,monthly_validated,active,Needs monthly PO validation before invoice send
+Clearwater Digital,45678912,finance@clearwater.co.uk,Mike Thompson,+44 113 555 0187,"5 Park Square, Leeds LS1 2LW",,N,GBP,30,22.00,custom,active,Custom billing: per-campaign reconciliation

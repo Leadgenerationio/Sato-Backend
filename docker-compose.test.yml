@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: stato-test-postgres
+    environment:
+      POSTGRES_USER: stato
+      POSTGRES_PASSWORD: stato
+      POSTGRES_DB: stato
+    ports:
+      - "5432:5432"
+    volumes:
+      - stato-test-pg:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: stato-test-redis
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio:latest
+    container_name: stato-test-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: stato-test-key
+      MINIO_ROOT_PASSWORD: stato-test-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - stato-test-minio:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 3 &&
+      mc alias set local http://minio:9000 stato-test-key stato-test-secret &&
+      mc mb --ignore-existing local/stato-test &&
+      mc anonymous set download local/stato-test &&
+      exit 0
+      "
+
+volumes:
+  stato-test-pg:
+  stato-test-minio:

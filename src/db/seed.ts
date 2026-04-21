@@ -1,7 +1,7 @@
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import bcryptjs from 'bcryptjs';
-import { businesses, users, clients } from './schema/index.js';
+import { businesses, users, clients, notifications } from './schema/index.js';
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -69,6 +69,22 @@ async function seed() {
         clientId: sampleClient.id,
       }).onConflictDoNothing();
     }
+  }
+
+  // 5. Sample notifications
+  const sampleNotifications = [
+    { type: 'invoice_overdue', title: 'Invoice INV-2026-042 overdue', message: 'TradeFX Ltd invoice of £4,200.00 is 14 days past due.', severity: 'warning', read: false },
+    { type: 'credit_alert', title: 'Credit score drop — Apex Leads', message: 'Apex Leads credit score fell from 72 to 54. Risk rating changed to Medium.', severity: 'warning', read: false },
+    { type: 'workflow_complete', title: 'Monthly invoicing workflow finished', message: '12 invoices generated for March billing cycle.', severity: 'info', read: false },
+    { type: 'payment_received', title: 'Payment received — GreenField Marketing', message: 'GreenField Marketing paid invoice INV-2026-038 (£6,750.00).', severity: 'info', read: false },
+    { type: 'lead_delivery', title: 'Lead delivery spike — Solar UK campaign', message: 'Solar UK campaign received 342 leads today, 85% above daily average.', severity: 'info', read: true },
+    { type: 'vat_shortfall', title: 'VAT shortfall detected — Q1 2026', message: 'Estimated VAT liability exceeds collected VAT by £1,230.45.', severity: 'warning', read: false },
+    { type: 'system_error', title: 'LeadByte sync failed', message: 'Hourly LeadByte sync failed at 09:00 — connection timeout.', severity: 'error', read: false },
+    { type: 'agreement_signed', title: 'Agreement sent — Vertex Partners', message: 'Awaiting signature via DocuSign.', severity: 'info', read: true },
+  ];
+
+  for (const n of sampleNotifications) {
+    await db.insert(notifications).values(n).onConflictDoNothing();
   }
 
   console.log('Seed complete!');

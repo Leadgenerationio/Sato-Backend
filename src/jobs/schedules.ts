@@ -23,5 +23,13 @@ export async function registerSchedules() {
     data: {},
   });
 
+  // Sync Catchr ad-spend hourly (5 min offset from LeadByte to avoid spiking)
+  await syncQueue.upsertJobScheduler('catchr-sync', {
+    pattern: '5 * * * *',
+  }, {
+    name: 'catchr-hourly-sync',
+    data: {},
+  });
+
   logger.info('Scheduled jobs registered');
 }

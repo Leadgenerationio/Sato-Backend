@@ -7,6 +7,7 @@ import { generalLimiter } from './middleware/rate-limit.middleware.js';
 import { errorHandler } from './middleware/error.middleware.js';
 import { router } from './routes/index.js';
 import { seedDefaultUsers } from './data/users.js';
+import { registerSchedules } from './jobs/schedules.js';
 
 const app: Express = express();
 
@@ -43,6 +44,11 @@ app.use(errorHandler);
 // Start server
 async function start() {
   await seedDefaultUsers();
+  try {
+    await registerSchedules();
+  } catch (err) {
+    logger.error({ err }, 'Failed to register scheduled jobs');
+  }
   app.listen(env.PORT, () => {
     logger.info(`Server running on http://localhost:${env.PORT}`);
   });

@@ -14,3 +14,4 @@ export * from './landing-pages.js';
 export * from './creatives.js';
 export * from './agreements.js';
 export * from './chase-history.js';
+export * from './ad-spend.js';

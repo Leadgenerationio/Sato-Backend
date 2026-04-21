@@ -7,6 +7,8 @@ export const campaigns = pgTable('campaigns', {
   leadbyteCampaignId: varchar('leadbyte_campaign_id', { length: 100 }),
   name: varchar('name', { length: 255 }).notNull(),
   vertical: varchar('vertical', { length: 100 }),
+  // 'pay_per_lead' | 'managed' | 'internal' — matches Leadreports categorisation
+  campaignType: varchar('campaign_type', { length: 30 }).default('pay_per_lead'),
   status: varchar('status', { length: 50 }).default('active'),
   leadPrice: decimal('lead_price', { precision: 10, scale: 2 }),
   currency: varchar('currency', { length: 3 }).default('GBP'),
