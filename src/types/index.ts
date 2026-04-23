@@ -16,7 +16,7 @@ export const registerSchema = z.object({
     email: z.string().email(),
     name: z.string().min(1).max(255),
     password: z.string().min(6),
-    role: z.enum(['owner', 'finance_admin', 'ops_manager', 'readonly']).optional(),
+    role: z.enum(['finance_admin', 'ops_manager', 'readonly']).optional(),
   }),
 });
 
@@ -42,7 +42,21 @@ export interface UserResponse {
   businessId: string | null;
   clientId: string | null;
   isActive: boolean;
+  isPrimaryOwner: boolean;
 }
+
+export const updateProfileSchema = z.object({
+  body: z.object({
+    name: z.string().trim().min(1).max(255),
+  }),
+});
+
+export const changePasswordSchema = z.object({
+  body: z.object({
+    currentPassword: z.string().min(1),
+    newPassword: z.string().min(6).max(255),
+  }),
+});
 
 export interface ApiResponse<T = unknown> {
   status: 'success' | 'error';

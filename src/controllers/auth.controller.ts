@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import * as authService from '../services/auth.service.js';
+import * as userService from '../services/user.service.js';
 
 export async function register(req: Request, res: Response) {
   const { email, password, name, role } = req.body;
@@ -38,5 +39,25 @@ export async function me(req: Request, res: Response) {
   res.json({
     status: 'success',
     data: { user },
+  });
+}
+
+export function updateProfile(req: Request, res: Response) {
+  const { name } = req.body;
+  const user = userService.updateOwnProfile(req.user!.userId, name);
+
+  res.json({
+    status: 'success',
+    data: { user },
+  });
+}
+
+export async function changePassword(req: Request, res: Response) {
+  const { currentPassword, newPassword } = req.body;
+  await userService.changeOwnPassword(req.user!.userId, currentPassword, newPassword);
+
+  res.json({
+    status: 'success',
+    data: { message: 'Password updated' },
   });
 }

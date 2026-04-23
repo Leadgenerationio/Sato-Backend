@@ -38,15 +38,20 @@ export async function registerUser(
 
   const passwordHash = await bcryptjs.hash(password, SALT_ROUNDS);
 
+  // Owner role cannot be assigned via public self-registration
+  const requestedRole = (role as UserRole) ?? 'readonly';
+  const safeRole: UserRole = requestedRole === 'owner' ? 'readonly' : requestedRole;
+
   const newUser = {
     id: getNextId(),
     email,
     passwordHash,
     name,
-    role: (role as UserRole) ?? 'readonly',
+    role: safeRole,
     businessId: null,
     clientId: null,
     isActive: true,
+    isPrimaryOwner: false,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -122,6 +127,7 @@ function toUserResponse(user: {
   businessId: string | null;
   clientId: string | null;
   isActive: boolean;
+  isPrimaryOwner?: boolean;
 }): UserResponse {
   return {
     id: user.id,
@@ -131,5 +137,6 @@ function toUserResponse(user: {
     businessId: user.businessId,
     clientId: user.clientId,
     isActive: user.isActive,
+    isPrimaryOwner: user.isPrimaryOwner ?? false,
   };
 }

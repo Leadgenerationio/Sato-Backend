@@ -1,5 +1,10 @@
-import { describe, it, expect } from 'vitest';
-import { listUsers, createUser, updateUser, updateUserRole, toggleUserActive } from '../services/user.service.js';
+import { describe, it, expect, beforeAll } from 'vitest';
+import bcryptjs from 'bcryptjs';
+import {
+  listUsers, createUser, updateUser, updateUserRole, toggleUserActive,
+  updateOwnProfile, changeOwnPassword,
+} from '../services/user.service.js';
+import { findUserById, findUserByEmail } from '../data/users.js';
 import type { AuthPayload } from '../types/index.js';
 
 const ownerPayload: AuthPayload = {
@@ -117,6 +122,115 @@ describe('User Service', () => {
 
     it('throws for non-existent user', () => {
       expect(() => toggleUserActive('999', ownerPayload)).toThrow('User not found');
+    });
+  });
+
+  describe('primary-owner protection', () => {
+    // A second owner, not the primary one, trying to attack Sam (id '1')
+    let secondaryOwnerId: string;
+    let secondaryOwnerPayload: AuthPayload;
+
+    beforeAll(async () => {
+      const created = await createUser(
+        'secondary-owner@test.com',
+        'Second Owner',
+        'pass123',
+        // primary owner creates another owner — this path is allowed
+        'owner',
+        ownerPayload,
+      );
+      secondaryOwnerId = created.id;
+      secondaryOwnerPayload = {
+        userId: secondaryOwnerId,
+        email: created.email,
+        role: 'owner',
+      };
+    });
+
+    it('non-primary owner cannot change the primary owner role', () => {
+      expect(() => updateUserRole('1', 'readonly', secondaryOwnerPayload))
+        .toThrow('The primary owner account is protected');
+    });
+
+    it('non-primary owner cannot deactivate the primary owner', () => {
+      expect(() => toggleUserActive('1', secondaryOwnerPayload))
+        .toThrow('The primary owner account cannot be deactivated');
+    });
+
+    it('non-primary owner cannot rename the primary owner', () => {
+      expect(() => updateUser('1', 'Hacked Name', 'owner', secondaryOwnerPayload))
+        .toThrow('The primary owner account is protected');
+    });
+
+    it('non-primary owner cannot create another owner', async () => {
+      await expect(
+        createUser('another-owner@test.com', 'Another Owner', 'pass123', 'owner', secondaryOwnerPayload),
+      ).rejects.toThrow('Only the primary owner can create Owner users');
+    });
+
+    it('non-primary owner cannot promote a user to owner', () => {
+      // User id '2' is finance_admin
+      expect(() => updateUserRole('2', 'owner', secondaryOwnerPayload))
+        .toThrow('Only the primary owner can grant the Owner role');
+    });
+
+    it('primary owner can still manage non-primary owners', () => {
+      const updated = updateUser(secondaryOwnerId, 'Renamed Owner', 'owner', ownerPayload);
+      expect(updated.name).toBe('Renamed Owner');
+    });
+
+    it('primary owner survives own field on response', () => {
+      const users = listUsers(ownerPayload);
+      const primary = users.find((u) => u.id === '1');
+      expect(primary?.isPrimaryOwner).toBe(true);
+      const other = users.find((u) => u.id === '2');
+      expect(other?.isPrimaryOwner).toBe(false);
+    });
+  });
+
+  describe('updateOwnProfile', () => {
+    it('updates the authenticated user name', () => {
+      const before = findUserById('2')!.name;
+      const result = updateOwnProfile('2', 'Self Updated');
+      expect(result.name).toBe('Self Updated');
+      // Restore
+      updateOwnProfile('2', before);
+    });
+
+    it('trims whitespace', () => {
+      const before = findUserById('2')!.name;
+      const result = updateOwnProfile('2', '  Trimmed  ');
+      expect(result.name).toBe('Trimmed');
+      updateOwnProfile('2', before);
+    });
+
+    it('rejects empty names', () => {
+      expect(() => updateOwnProfile('2', '   ')).toThrow('Name must be between 1 and 255 characters');
+    });
+  });
+
+  describe('changeOwnPassword', () => {
+    it('changes the password when current is correct', async () => {
+      await changeOwnPassword('2', 'finance123', 'finance-new-pw');
+      const user = findUserByEmail('finance@stato.app')!;
+      expect(await bcryptjs.compare('finance-new-pw', user.passwordHash)).toBe(true);
+      // Restore
+      await changeOwnPassword('2', 'finance-new-pw', 'finance123');
+    });
+
+    it('rejects an incorrect current password', async () => {
+      await expect(changeOwnPassword('2', 'wrong', 'finance-new-pw'))
+        .rejects.toThrow('Current password is incorrect');
+    });
+
+    it('rejects a too-short new password', async () => {
+      await expect(changeOwnPassword('2', 'finance123', 'short'))
+        .rejects.toThrow('at least 6 characters');
+    });
+
+    it('rejects reusing the same password', async () => {
+      await expect(changeOwnPassword('2', 'finance123', 'finance123'))
+        .rejects.toThrow('must differ');
     });
   });
 });

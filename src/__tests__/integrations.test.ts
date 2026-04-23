@@ -7,7 +7,7 @@ import {
   getSignedDownloadUrl,
   getSignedUploadUrl,
 } from '../integrations/r2/r2-client.js';
-import { isDocuSignConfigured, createEnvelope, getEnvelopeStatus, downloadSignedPdf } from '../integrations/docusign/docusign-client.js';
+// SignNow replaces DocuSign; see `signnow-client.test.ts` for the 17-test suite.
 import { isCreditsafeConfigured, runCreditCheck as runCreditsafe } from '../integrations/creditsafe/creditsafe-client.js';
 import { getActiveProvider, runCreditCheck as runCredit } from '../integrations/credit-check/index.js';
 import { scoreToRiskRating } from '../integrations/credit-check/types.js';
@@ -136,7 +136,8 @@ describe('Creditsafe integration', () => {
 describe('Credit-check provider router', () => {
   beforeEach(() => {
     delete process.env.CREDITSAFE_API_KEY;
-    delete process.env.ENDOLE_API_KEY;
+    delete process.env.ENDOLE_APP_ID;
+    delete process.env.ENDOLE_APP_KEY;
   });
 
   it('selects mock when neither provider is configured', () => {
@@ -148,14 +149,16 @@ describe('Credit-check provider router', () => {
     expect(getActiveProvider()).toBe('creditsafe');
   });
 
-  it('selects endole when only ENDOLE_API_KEY is set', () => {
-    process.env.ENDOLE_API_KEY = 'test-key';
+  it('selects endole when both ENDOLE_APP_ID and ENDOLE_APP_KEY are set', () => {
+    process.env.ENDOLE_APP_ID = '23013';
+    process.env.ENDOLE_APP_KEY = 'test-key';
     expect(getActiveProvider()).toBe('endole');
   });
 
-  it('creditsafe beats endole when both are set', () => {
+  it('creditsafe beats endole when both providers are configured', () => {
     process.env.CREDITSAFE_API_KEY = 'token:test';
-    process.env.ENDOLE_API_KEY = 'test-key';
+    process.env.ENDOLE_APP_ID = '23013';
+    process.env.ENDOLE_APP_KEY = 'test-key';
     expect(getActiveProvider()).toBe('creditsafe');
   });
 
@@ -166,37 +169,5 @@ describe('Credit-check provider router', () => {
   });
 });
 
-describe('DocuSign integration', () => {
-  beforeEach(() => {
-    delete process.env.DOCUSIGN_INTEGRATION_KEY;
-    delete process.env.DOCUSIGN_SECRET;
-    delete process.env.DOCUSIGN_USER_ID;
-    delete process.env.DOCUSIGN_ACCOUNT_ID;
-  });
-
-  it('reports not configured without credentials', () => {
-    expect(isDocuSignConfigured()).toBe(false);
-  });
-
-  it('mock createEnvelope returns a sent envelope without network call', async () => {
-    const result = await createEnvelope({
-      signerEmail: 'sign@example.com',
-      signerName: 'Sign Er',
-      documentName: 'Agreement.pdf',
-      documentBase64: Buffer.from('%PDF').toString('base64'),
-    });
-    expect(result.envelopeId).toMatch(/^mock-/);
-    expect(result.status).toBe('sent');
-  });
-
-  it('mock getEnvelopeStatus returns sent for mock envelopes', async () => {
-    const status = await getEnvelopeStatus('mock-123');
-    expect(status).toBe('sent');
-  });
-
-  it('mock downloadSignedPdf returns a buffer with PDF signature', async () => {
-    const buf = await downloadSignedPdf('mock-123');
-    expect(buf.length).toBeGreaterThan(0);
-    expect(buf.toString('utf8', 0, 4)).toBe('%PDF');
-  });
-});
+// DocuSign integration tests were replaced by `signnow-client.test.ts` (17 cases)
+// when we swapped providers. Nothing else to test here.

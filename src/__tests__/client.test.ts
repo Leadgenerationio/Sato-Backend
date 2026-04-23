@@ -4,6 +4,9 @@ import app from '../index.js';
 
 let ownerToken: string;
 let clientToken: string;
+let realClientId: string; // UUID of an existing DB client — used in detail / update / credit tests
+let realCompanyName: string; // Company name of that client — used in search test
+const MISSING_UUID = '00000000-0000-0000-0000-000000000000';
 
 describe('Client API', () => {
   beforeAll(async () => {
@@ -12,6 +15,23 @@ describe('Client API', () => {
 
     const clientRes = await request(app).post('/api/v1/auth/login').send({ email: 'client@stato.app', password: 'client123' });
     clientToken = clientRes.body.data.tokens.accessToken;
+
+    // Create a dedicated client for ID-specific tests (detail / update /
+    // credit). Must have a companyNumber so runCreditCheck works — the
+    // Endole provider needs it. Self-contained so we don't depend on
+    // pre-seeded DB state.
+    const createRes = await request(app)
+      .post('/api/v1/clients')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        companyName: `Test Co ${Date.now()}`,
+        companyNumber: '00445790',
+        contactName: 'Test Contact',
+        contactEmail: 'contact@test.co',
+        currency: 'GBP',
+      });
+    realClientId = createRes.body.data.client.id;
+    realCompanyName = createRes.body.data.client.companyName;
   });
 
   describe('GET /api/v1/clients', () => {
@@ -33,7 +53,8 @@ describe('Client API', () => {
     });
 
     it('filters by search', async () => {
-      const res = await request(app).get('/api/v1/clients?search=apex').set('Authorization', `Bearer ${ownerToken}`);
+      const term = realCompanyName.split(' ')[0].toLowerCase();
+      const res = await request(app).get(`/api/v1/clients?search=${encodeURIComponent(term)}`).set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(200);
       expect(res.body.data.clients.length).toBeGreaterThan(0);
     });
@@ -41,15 +62,14 @@ describe('Client API', () => {
 
   describe('GET /api/v1/clients/:id', () => {
     it('returns client detail', async () => {
-      const res = await request(app).get('/api/v1/clients/c-1').set('Authorization', `Bearer ${ownerToken}`);
+      const res = await request(app).get(`/api/v1/clients/${realClientId}`).set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(200);
-      expect(res.body.data.client.companyName).toBe('Apex Media Ltd');
-      expect(res.body.data.client.creditScore).toBeDefined();
+      expect(res.body.data.client.companyName).toBe(realCompanyName);
       expect(res.body.data.client.billingWorkflow).toBeDefined();
     });
 
     it('returns 404 for non-existent client', async () => {
-      const res = await request(app).get('/api/v1/clients/c-999').set('Authorization', `Bearer ${ownerToken}`);
+      const res = await request(app).get(`/api/v1/clients/${MISSING_UUID}`).set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(404);
     });
   });
@@ -70,7 +90,7 @@ describe('Client API', () => {
 
   describe('PUT /api/v1/clients/:id', () => {
     it('updates a client', async () => {
-      const res = await request(app).put('/api/v1/clients/c-1').set('Authorization', `Bearer ${ownerToken}`).send({
+      const res = await request(app).put(`/api/v1/clients/${realClientId}`).set('Authorization', `Bearer ${ownerToken}`).send({
         notes: 'Updated via test',
       });
       expect(res.status).toBe(200);
@@ -79,25 +99,23 @@ describe('Client API', () => {
   });
 
   describe('GET /api/v1/clients/:id/credit-history', () => {
-    it('returns credit history', async () => {
-      const res = await request(app).get('/api/v1/clients/c-1/credit-history').set('Authorization', `Bearer ${ownerToken}`);
+    it('returns credit history (may be empty before any check has run)', async () => {
+      const res = await request(app).get(`/api/v1/clients/${realClientId}/credit-history`).set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(200);
-      expect(res.body.data.history.length).toBeGreaterThan(0);
-      expect(res.body.data.history[0].creditScore).toBeDefined();
-      expect(res.body.data.history[0].riskRating).toBeDefined();
+      expect(Array.isArray(res.body.data.history)).toBe(true);
     });
   });
 
   describe('POST /api/v1/clients/:id/credit-check', () => {
     it('runs a credit check', async () => {
-      const res = await request(app).post('/api/v1/clients/c-1/credit-check').set('Authorization', `Bearer ${ownerToken}`);
+      const res = await request(app).post(`/api/v1/clients/${realClientId}/credit-check`).set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(200);
       expect(res.body.data.creditCheck.creditScore).toBeDefined();
       expect(res.body.data.creditCheck.riskRating).toBeDefined();
     });
 
     it('returns 404 for non-existent client', async () => {
-      const res = await request(app).post('/api/v1/clients/c-999/credit-check').set('Authorization', `Bearer ${ownerToken}`);
+      const res = await request(app).post(`/api/v1/clients/${MISSING_UUID}/credit-check`).set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(404);
     });
   });

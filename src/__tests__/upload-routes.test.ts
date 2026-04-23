@@ -100,7 +100,7 @@ describe('LeadByte time-slice dashboard routes', () => {
   });
 });
 
-describe('Integration status routes (Resend, DocuSign, R2)', () => {
+describe('Integration status routes (Resend, SignNow, R2)', () => {
   beforeAll(async () => {
     const owner = await request(app).post('/api/v1/auth/login').send({ email: 'owner@stato.app', password: 'owner123' });
     ownerToken = owner.body.data.tokens.accessToken;
@@ -108,7 +108,7 @@ describe('Integration status routes (Resend, DocuSign, R2)', () => {
 
   it.each([
     ['resend', 'configured'],
-    ['docusign', 'configured'],
+    ['signnow', 'configured'],
     ['r2', 'configured'],
   ])('/%s/status returns a configured flag', async (name, flag) => {
     const res = await request(app)

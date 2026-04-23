@@ -57,7 +57,7 @@ const mockNotifications: Notification[] = [
   { id: 'ntf-011', type: 'credit_alert', title: 'New CCJ registered — QuickLeads Ltd', message: 'QuickLeads Ltd has a new CCJ of £8,500 registered. Immediate review recommended.', severity: 'warning', read: false, createdAt: '2026-04-13T09:20:00Z' },
   { id: 'ntf-012', type: 'lead_delivery', title: 'Low lead volume — Home Insurance campaign', message: 'Home Insurance campaign delivered only 12 leads today, 70% below target.', severity: 'info', read: true, createdAt: '2026-04-12T17:30:00Z' },
   { id: 'ntf-013', type: 'workflow_complete', title: 'Credit check batch completed', message: 'Weekly credit check workflow ran for 28 clients. 3 flagged for review.', severity: 'info', read: true, createdAt: '2026-04-12T06:00:00Z' },
-  { id: 'ntf-014', type: 'agreement_signed', title: 'Agreement sent — Vertex Partners', message: 'Vertex Partners received their service agreement via DocuSign. Awaiting signature.', severity: 'info', read: true, createdAt: '2026-04-11T14:00:00Z' },
+  { id: 'ntf-014', type: 'agreement_signed', title: 'Agreement sent — Vertex Partners', message: 'Vertex Partners received their service agreement via SignNow. Awaiting signature.', severity: 'info', read: true, createdAt: '2026-04-11T14:00:00Z' },
   { id: 'ntf-015', type: 'system_error', title: 'Xero webhook delivery failed', message: 'Xero invoice webhook returned 503. 4 invoices pending sync. Auto-retry queued.', severity: 'error', read: true, createdAt: '2026-04-11T11:15:00Z' },
 ];
 

@@ -26,6 +26,9 @@ export function updatePermission(permission: string, role: UserRole, allowed: bo
   const entry = permissions.find((p) => p.permission === permission);
   if (!entry) return null;
 
+  // Owner permissions are immutable at the data layer as a defence in depth
+  if (role === 'owner') return entry;
+
   entry.access[role] = allowed;
   return entry;
 }

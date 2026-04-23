@@ -13,3 +13,4 @@ invoiceRoutes.get('/overdue', invoiceController.getOverdue);
 invoiceRoutes.get('/clients', invoiceController.getClients);
 invoiceRoutes.get('/:id', invoiceController.getInvoice);
 invoiceRoutes.post('/', invoiceController.createInvoice);
+invoiceRoutes.post('/:id/push-to-xero', invoiceController.pushToXero);

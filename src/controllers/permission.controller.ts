@@ -13,6 +13,12 @@ export function update(req: Request, res: Response) {
     return;
   }
 
+  // Owner role permissions are immutable — Owner always has full access
+  if (role === 'owner') {
+    res.status(403).json({ status: 'error', message: 'Owner permissions are immutable' });
+    return;
+  }
+
   const entry = updatePermission(permission, role, allowed);
   if (!entry) {
     res.status(404).json({ status: 'error', message: 'Permission not found' });

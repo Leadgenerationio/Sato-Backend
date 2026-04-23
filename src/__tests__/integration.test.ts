@@ -25,18 +25,8 @@ describe('Integration API', () => {
     });
   });
 
-  describe('GET /api/v1/integrations/xero/auth-url', () => {
-    it('returns auth URL or 503 if not configured', async () => {
-      const res = await request(app).get('/api/v1/integrations/xero/auth-url').set('Authorization', `Bearer ${ownerToken}`);
-      // Either 200 with URL if Xero env vars are set, or 503 if not configured
-      expect([200, 503]).toContain(res.status);
-      if (res.status === 200) {
-        expect(res.body.data.url).toBeDefined();
-      } else {
-        expect(res.body.message).toContain('not configured');
-      }
-    });
-  });
+  // /xero/auth-url was removed when we switched to Custom Connection
+  // (server-to-server, no OAuth consent flow needed). See xero-client.test.ts.
 
   describe('POST /api/v1/integrations/xero/disconnect', () => {
     it('works for owner', async () => {
