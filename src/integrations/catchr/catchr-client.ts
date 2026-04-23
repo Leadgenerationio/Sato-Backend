@@ -1,4 +1,3 @@
-import { env } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
 import type {
   CatchrListSourcesResponse,
@@ -23,12 +22,15 @@ import type {
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
+// Read straight from process.env — the env.ts module captures values at
+// import time, so a runtime delete (in tests) wouldn't reach the cached
+// snapshot. Reading process.env every call keeps `delete process.env.X` honest.
 function token(): string {
-  return process.env.CATCHR_ACCESS_TOKEN || env.CATCHR_ACCESS_TOKEN || '';
+  return process.env.CATCHR_ACCESS_TOKEN || '';
 }
 
 function mcpUrl(): string {
-  return (process.env.CATCHR_MCP_URL || env.CATCHR_MCP_URL || 'https://api.catchr.io/mcp').replace(/\/$/, '');
+  return (process.env.CATCHR_MCP_URL || 'https://api.catchr.io/mcp').replace(/\/$/, '');
 }
 
 export function isCatchrConfigured(): boolean {
