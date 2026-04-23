@@ -12,6 +12,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
     "db:seed": "tsx src/db/seed.ts",
+    "preflight": "tsx scripts/preflight.ts",
     "worker": "tsx src/jobs/worker-entry.ts",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -43,6 +44,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/express-rate-limit": "^6.0.2",
+    "@types/express-serve-static-core": "^5.1.1",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.0.0",
     "@types/supertest": "^7.2.0",

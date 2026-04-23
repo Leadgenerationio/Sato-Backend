@@ -4,22 +4,38 @@ dotenv.config();
 
 const v = (key: string, fallback = ''): string => process.env[key] || fallback;
 
+const NODE_ENV = v('NODE_ENV', 'development');
+const isProd = NODE_ENV === 'production';
+
+const DEV_JWT_SECRET = 'dev-secret-change-me-in-production';
+const DEV_JWT_REFRESH_SECRET = 'dev-refresh-secret-change-me';
+
+const JWT_SECRET = v('JWT_SECRET', DEV_JWT_SECRET);
+const JWT_REFRESH_SECRET = v('JWT_REFRESH_SECRET', DEV_JWT_REFRESH_SECRET);
+
+if (isProd && (JWT_SECRET === DEV_JWT_SECRET || JWT_REFRESH_SECRET === DEV_JWT_REFRESH_SECRET)) {
+  // Fail fast in production rather than silently signing tokens with a known
+  // dev secret. Generate with: `openssl rand -base64 32` (one per secret).
+  throw new Error(
+    'JWT_SECRET and JWT_REFRESH_SECRET must be set to non-default values in production',
+  );
+}
+
 export const env = {
   // Core
   PORT: parseInt(v('PORT', '3001'), 10),
-  NODE_ENV: v('NODE_ENV', 'development'),
+  NODE_ENV,
   FRONTEND_URL: v('FRONTEND_URL', 'http://localhost:5173'),
-  JWT_SECRET: v('JWT_SECRET', 'dev-secret-change-me-in-production'),
-  JWT_REFRESH_SECRET: v('JWT_REFRESH_SECRET', 'dev-refresh-secret-change-me'),
+  JWT_SECRET,
+  JWT_REFRESH_SECRET,
 
   // Data stores
   DATABASE_URL: v('DATABASE_URL'),
   REDIS_URL: v('REDIS_URL'),
 
-  // Xero
+  // Xero — Custom Connection (server-to-server, client_credentials grant)
   XERO_CLIENT_ID: v('XERO_CLIENT_ID'),
   XERO_CLIENT_SECRET: v('XERO_CLIENT_SECRET'),
-  XERO_REDIRECT_URI: v('XERO_REDIRECT_URI'),
   XERO_WEBHOOK_KEY: v('XERO_WEBHOOK_KEY'),
 
   // LeadByte
@@ -27,7 +43,10 @@ export const env = {
   LEADBYTE_BASE_URL: v('LEADBYTE_BASE_URL', 'https://clinical.leadbyte.co.uk/restapi/v1.3'),
 
   // Credit checks
-  ENDOLE_API_KEY: v('ENDOLE_API_KEY'),
+  ENDOLE_APP_ID: v('ENDOLE_APP_ID'),
+  ENDOLE_APP_KEY: v('ENDOLE_APP_KEY'),
+  ENDOLE_BASE_URL: v('ENDOLE_BASE_URL', 'https://api.endole.co.uk'),
+  ENDOLE_SANDBOX: v('ENDOLE_SANDBOX'),
   CREDITSAFE_API_KEY: v('CREDITSAFE_API_KEY'),
   CREDITSAFE_BASE_URL: v('CREDITSAFE_BASE_URL', 'https://connect.creditsafe.com'),
 
@@ -44,15 +63,15 @@ export const env = {
   RESEND_FROM_EMAIL: v('RESEND_FROM_EMAIL', 'notifications@stato.local'),
   RESEND_FROM_NAME: v('RESEND_FROM_NAME', 'Stato Notifications'),
 
-  // DocuSign
-  DOCUSIGN_INTEGRATION_KEY: v('DOCUSIGN_INTEGRATION_KEY'),
-  DOCUSIGN_SECRET: v('DOCUSIGN_SECRET'),
-  DOCUSIGN_USER_ID: v('DOCUSIGN_USER_ID'),
-  DOCUSIGN_ACCOUNT_ID: v('DOCUSIGN_ACCOUNT_ID'),
-  DOCUSIGN_REDIRECT_URI: v('DOCUSIGN_REDIRECT_URI'),
-  DOCUSIGN_BASE_PATH: v('DOCUSIGN_BASE_PATH', 'https://demo.docusign.net/restapi'),
-  DOCUSIGN_OAUTH_BASE: v('DOCUSIGN_OAUTH_BASE', 'account-d.docusign.com'),
-  DOCUSIGN_WEBHOOK_SECRET: v('DOCUSIGN_WEBHOOK_SECRET'),
+  // SignNow (replaces DocuSign).
+  // Default base URL is the production endpoint — `api-eval.signnow.com` is the
+  // sandbox and must be set explicitly via SIGNNOW_BASE_URL when wanted.
+  SIGNNOW_CLIENT_ID: v('SIGNNOW_CLIENT_ID'),
+  SIGNNOW_CLIENT_SECRET: v('SIGNNOW_CLIENT_SECRET'),
+  SIGNNOW_USERNAME: v('SIGNNOW_USERNAME'),
+  SIGNNOW_PASSWORD: v('SIGNNOW_PASSWORD'),
+  SIGNNOW_BASE_URL: v('SIGNNOW_BASE_URL', 'https://api.signnow.com'),
+  SIGNNOW_WEBHOOK_SECRET: v('SIGNNOW_WEBHOOK_SECRET'),
 
   // Catchr (ad-spend aggregation via MCP)
   CATCHR_MCP_URL: v('CATCHR_MCP_URL', 'https://api.catchr.io/mcp'),
@@ -62,4 +81,30 @@ export const env = {
 
 export function isProduction(): boolean {
   return env.NODE_ENV === 'production';
+}
+
+/**
+ * Map of env vars that gate "real" behaviour (vs. mock fallbacks). Used by
+ * health checks and the deploy runbook to verify a production install before
+ * cutting over traffic.
+ */
+export const REQUIRED_FOR_PRODUCTION = [
+  'DATABASE_URL',
+  'REDIS_URL',
+  'JWT_SECRET',
+  'JWT_REFRESH_SECRET',
+  'XERO_CLIENT_ID',
+  'XERO_CLIENT_SECRET',
+  'LEADBYTE_API_KEY',
+  'SIGNNOW_CLIENT_ID',
+  'SIGNNOW_CLIENT_SECRET',
+  'SIGNNOW_USERNAME',
+  'SIGNNOW_PASSWORD',
+  'RESEND_API_KEY',
+  'RESEND_FROM_EMAIL',
+  'CATCHR_ACCESS_TOKEN',
+] as const;
+
+export function missingProductionEnv(): string[] {
+  return REQUIRED_FOR_PRODUCTION.filter((k) => !process.env[k]);
 }
