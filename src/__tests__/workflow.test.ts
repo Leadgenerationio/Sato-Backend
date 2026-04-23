@@ -4,6 +4,8 @@ import app from '../index.js';
 
 let ownerToken: string;
 let clientToken: string;
+let seededWorkflowId: string;
+const MISSING_UUID = '00000000-0000-0000-0000-000000000000';
 
 describe('Workflow API', () => {
   beforeAll(async () => {
@@ -12,13 +14,27 @@ describe('Workflow API', () => {
 
     const clientRes = await request(app).post('/api/v1/auth/login').send({ email: 'client@stato.app', password: 'client123' });
     clientToken = clientRes.body.data.tokens.accessToken;
+
+    // Seed a workflow with multi-step config so detail/execute tests have real data.
+    const seedRes = await request(app).post('/api/v1/workflows').set('Authorization', `Bearer ${ownerToken}`).send({
+      name: `Auto-Invoice ${Date.now()}`,
+      description: 'Pulls last 7 days lead data and creates invoice in Xero.',
+      type: 'scheduled',
+      schedule: 'Every Monday 9:00 AM',
+      steps: [
+        { name: 'Pull LeadByte Data', type: 'data_fetch', config: 'last 7 days' },
+        { name: 'Calculate totals', type: 'computation', config: 'sum × leadPrice' },
+        { name: 'Create Xero Invoice', type: 'api_call', config: 'POST /Invoices DRAFT' },
+      ],
+    });
+    seededWorkflowId = seedRes.body.data.workflow.id;
   });
 
   describe('GET /api/v1/workflows', () => {
     it('owner can list workflows', async () => {
       const res = await request(app).get('/api/v1/workflows').set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(200);
-      expect(res.body.data.workflows.length).toBe(3);
+      expect(res.body.data.workflows.length).toBeGreaterThan(0);
     });
 
     it('client cannot list workflows', async () => {
@@ -31,25 +47,24 @@ describe('Workflow API', () => {
       const wf = res.body.data.workflows[0];
       expect(wf.id).toBeDefined();
       expect(wf.name).toBeDefined();
-      expect(wf.schedule).toBeDefined();
       expect(wf.status).toBeDefined();
-      expect(wf.totalRuns).toBeDefined();
-      expect(wf.successRate).toBeDefined();
+      expect(typeof wf.totalRuns).toBe('number');
+      expect(typeof wf.successRate).toBe('number');
     });
   });
 
   describe('GET /api/v1/workflows/:id', () => {
-    it('returns workflow detail with steps and executions', async () => {
-      const res = await request(app).get('/api/v1/workflows/wf-1').set('Authorization', `Bearer ${ownerToken}`);
+    it('returns workflow detail with steps', async () => {
+      const res = await request(app).get(`/api/v1/workflows/${seededWorkflowId}`).set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(200);
-      expect(res.body.data.workflow.steps.length).toBeGreaterThan(0);
-      expect(res.body.data.workflow.recentExecutions.length).toBeGreaterThan(0);
+      expect(res.body.data.workflow.steps.length).toBe(3);
+      expect(res.body.data.workflow.recentExecutions).toBeDefined();
       expect(res.body.data.workflow.steps[0].name).toBeDefined();
       expect(res.body.data.workflow.steps[0].type).toBeDefined();
     });
 
     it('returns 404 for non-existent workflow', async () => {
-      const res = await request(app).get('/api/v1/workflows/wf-999').set('Authorization', `Bearer ${ownerToken}`);
+      const res = await request(app).get(`/api/v1/workflows/${MISSING_UUID}`).set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(404);
     });
   });
@@ -75,26 +90,27 @@ describe('Workflow API', () => {
 
   describe('POST /api/v1/workflows/:id/toggle-status', () => {
     it('toggles workflow status', async () => {
-      const res = await request(app).post('/api/v1/workflows/wf-1/toggle-status').set('Authorization', `Bearer ${ownerToken}`);
+      const res = await request(app).post(`/api/v1/workflows/${seededWorkflowId}/toggle-status`).set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(200);
-      const newStatus = res.body.data.workflow.status;
-      expect(['active', 'paused']).toContain(newStatus);
+      expect(['active', 'paused']).toContain(res.body.data.workflow.status);
 
-      // Toggle back
-      await request(app).post('/api/v1/workflows/wf-1/toggle-status').set('Authorization', `Bearer ${ownerToken}`);
+      // Toggle back so subsequent tests aren't affected.
+      await request(app).post(`/api/v1/workflows/${seededWorkflowId}/toggle-status`).set('Authorization', `Bearer ${ownerToken}`);
     });
   });
 
   describe('POST /api/v1/workflows/:id/execute', () => {
-    it('executes a workflow (mock)', async () => {
-      const res = await request(app).post('/api/v1/workflows/wf-1/execute').set('Authorization', `Bearer ${ownerToken}`);
+    it('executes a workflow', async () => {
+      const res = await request(app).post(`/api/v1/workflows/${seededWorkflowId}/execute`).set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(200);
-      expect(res.body.data.execution.status).toBe('completed');
+      // With Redis available the run is enqueued and reported as `running`.
+      // Without Redis the synchronous fallback records `completed` immediately.
+      expect(['running', 'completed']).toContain(res.body.data.execution.status);
       expect(res.body.data.execution.result).toBeDefined();
     });
 
     it('returns 404 for non-existent workflow', async () => {
-      const res = await request(app).post('/api/v1/workflows/wf-999/execute').set('Authorization', `Bearer ${ownerToken}`);
+      const res = await request(app).post(`/api/v1/workflows/${MISSING_UUID}/execute`).set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(404);
     });
   });

@@ -7,7 +7,9 @@ services:
       POSTGRES_PASSWORD: stato
       POSTGRES_DB: stato
     ports:
-      - "5432:5432"
+      # Mapped to 5433 on the host so tests don't collide with a local
+      # production-style Postgres install on 5432.
+      - "5433:5432"
     volumes:
       - stato-test-pg:/var/lib/postgresql/data
 
@@ -15,7 +17,7 @@ services:
     image: redis:7-alpine
     container_name: stato-test-redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
 
   minio:
     image: minio/minio:latest
