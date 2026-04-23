@@ -10,6 +10,7 @@ export interface User {
   businessId: string | null;
   clientId: string | null;
   isActive: boolean;
+  isPrimaryOwner: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -33,9 +34,10 @@ export async function seedDefaultUsers() {
       passwordHash: ownerHash,
       name: 'Sam Owner',
       role: 'owner',
-      businessId: 'biz-1',
+      businessId: '26d6b2b4-c867-460e-8473-eca2b1ffd232',
       clientId: null,
       isActive: true,
+      isPrimaryOwner: true,
       createdAt: new Date(),
       updatedAt: new Date(),
     },
@@ -45,9 +47,10 @@ export async function seedDefaultUsers() {
       passwordHash: financeHash,
       name: 'Finance Admin',
       role: 'finance_admin',
-      businessId: 'biz-1',
+      businessId: '26d6b2b4-c867-460e-8473-eca2b1ffd232',
       clientId: null,
       isActive: true,
+      isPrimaryOwner: false,
       createdAt: new Date(),
       updatedAt: new Date(),
     },
@@ -57,9 +60,10 @@ export async function seedDefaultUsers() {
       passwordHash: opsHash,
       name: 'Ops Manager',
       role: 'ops_manager',
-      businessId: 'biz-1',
+      businessId: '26d6b2b4-c867-460e-8473-eca2b1ffd232',
       clientId: null,
       isActive: true,
+      isPrimaryOwner: false,
       createdAt: new Date(),
       updatedAt: new Date(),
     },
@@ -70,8 +74,10 @@ export async function seedDefaultUsers() {
       name: 'Client User',
       role: 'client',
       businessId: null,
-      clientId: 'client-1',
+      // Matches the demo client UUID seeded by db/seed.ts when SEED_DEMO_DATA is on.
+      clientId: '00000000-0000-0000-0000-000000000001',
       isActive: true,
+      isPrimaryOwner: false,
       createdAt: new Date(),
       updatedAt: new Date(),
     },
@@ -81,9 +87,10 @@ export async function seedDefaultUsers() {
       passwordHash: readonlyHash,
       name: 'Readonly User',
       role: 'readonly',
-      businessId: 'biz-1',
+      businessId: '26d6b2b4-c867-460e-8473-eca2b1ffd232',
       clientId: null,
       isActive: true,
+      isPrimaryOwner: false,
       createdAt: new Date(),
       updatedAt: new Date(),
     },
