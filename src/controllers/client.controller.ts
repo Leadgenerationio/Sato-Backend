@@ -26,7 +26,7 @@ export async function listClients(req: Request, res: Response) {
 }
 
 export async function getClient(req: Request, res: Response) {
-  const client = await clientService.getClient(req.params.id, req.user!);
+  const client = await clientService.getClient(req.params.id as string, req.user!);
   if (!client) {
     res.status(404).json({ status: 'error', message: 'Client not found' });
     return;
@@ -40,7 +40,7 @@ export async function createClient(req: Request, res: Response) {
 }
 
 export async function updateClient(req: Request, res: Response) {
-  const client = await clientService.updateClient(req.params.id, req.body, req.user!);
+  const client = await clientService.updateClient(req.params.id as string, req.body, req.user!);
   if (!client) {
     res.status(404).json({ status: 'error', message: 'Client not found' });
     return;
@@ -49,12 +49,12 @@ export async function updateClient(req: Request, res: Response) {
 }
 
 export async function getCreditHistory(req: Request, res: Response) {
-  const history = await clientService.getCreditHistory(req.params.id, req.user!);
+  const history = await clientService.getCreditHistory(req.params.id as string, req.user!);
   res.json({ status: 'success', data: { history } });
 }
 
 export async function runCreditCheck(req: Request, res: Response) {
-  const result = await clientService.runCreditCheck(req.params.id, req.user!);
+  const result = await clientService.runCreditCheck(req.params.id as string, req.user!);
   if (!result) {
     res.status(404).json({ status: 'error', message: 'Client not found' });
     return;

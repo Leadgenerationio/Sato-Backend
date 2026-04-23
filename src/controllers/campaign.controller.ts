@@ -36,7 +36,7 @@ export async function listCampaigns(req: Request, res: Response) {
 }
 
 export async function getCampaign(req: Request, res: Response) {
-  const campaign = await campaignService.getCampaign(req.params.id, req.user!);
+  const campaign = await campaignService.getCampaign(req.params.id as string, req.user!);
 
   if (!campaign) {
     res.status(404).json({ status: 'error', message: 'Campaign not found' });
@@ -47,6 +47,6 @@ export async function getCampaign(req: Request, res: Response) {
 }
 
 export async function listTrafficSources(req: Request, res: Response) {
-  const sources = await trafficSourceService.listSourcesForCampaign(req.params.id, req.user!);
+  const sources = await trafficSourceService.listSourcesForCampaign(req.params.id as string, req.user!);
   res.json({ status: 'success', data: { sources } });
 }

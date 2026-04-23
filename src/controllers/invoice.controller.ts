@@ -29,7 +29,7 @@ export async function listInvoices(req: Request, res: Response) {
 }
 
 export async function getInvoice(req: Request, res: Response) {
-  const invoice = await invoiceService.getInvoice(req.params.id, req.user!);
+  const invoice = await invoiceService.getInvoice(req.params.id as string, req.user!);
   if (!invoice) {
     res.status(404).json({ status: 'error', message: 'Invoice not found' });
     return;
@@ -48,7 +48,21 @@ export async function createInvoice(req: Request, res: Response) {
   res.status(201).json({ status: 'success', data: { invoice } });
 }
 
-export async function getClients(_req: Request, res: Response) {
-  const clients = invoiceService.getClients();
+export async function getClients(req: Request, res: Response) {
+  const clients = await invoiceService.getInvoiceableClients(req.user!);
   res.json({ status: 'success', data: { clients } });
+}
+
+export async function pushToXero(req: Request, res: Response) {
+  try {
+    const invoice = await invoiceService.pushInvoiceToXero(req.params.id as string, req.user!);
+    res.json({ status: 'success', data: { invoice } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Push to Xero failed';
+    if (msg.includes('not found')) {
+      res.status(404).json({ status: 'error', message: msg });
+      return;
+    }
+    res.status(502).json({ status: 'error', message: msg });
+  }
 }

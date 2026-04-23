@@ -23,7 +23,7 @@ export async function listNotifications(req: Request, res: Response) {
 }
 
 export async function markAsRead(req: Request, res: Response) {
-  const notification = await notificationService.markAsRead(req.params.id, req.user!);
+  const notification = await notificationService.markAsRead(req.params.id as string, req.user!);
 
   if (!notification) {
     res.status(404).json({ status: 'error', message: 'Notification not found' });

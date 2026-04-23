@@ -7,7 +7,7 @@ export async function listWorkflows(req: Request, res: Response) {
 }
 
 export async function getWorkflow(req: Request, res: Response) {
-  const workflow = await workflowService.getWorkflow(req.params.id, req.user!);
+  const workflow = await workflowService.getWorkflow(req.params.id as string, req.user!);
   if (!workflow) {
     res.status(404).json({ status: 'error', message: 'Workflow not found' });
     return;
@@ -21,7 +21,7 @@ export async function createWorkflow(req: Request, res: Response) {
 }
 
 export async function updateWorkflow(req: Request, res: Response) {
-  const workflow = await workflowService.updateWorkflow(req.params.id, req.body, req.user!);
+  const workflow = await workflowService.updateWorkflow(req.params.id as string, req.body, req.user!);
   if (!workflow) {
     res.status(404).json({ status: 'error', message: 'Workflow not found' });
     return;
@@ -30,7 +30,7 @@ export async function updateWorkflow(req: Request, res: Response) {
 }
 
 export async function toggleStatus(req: Request, res: Response) {
-  const workflow = await workflowService.toggleWorkflowStatus(req.params.id, req.user!);
+  const workflow = await workflowService.toggleWorkflowStatus(req.params.id as string, req.user!);
   if (!workflow) {
     res.status(404).json({ status: 'error', message: 'Workflow not found' });
     return;
@@ -39,7 +39,7 @@ export async function toggleStatus(req: Request, res: Response) {
 }
 
 export async function executeWorkflow(req: Request, res: Response) {
-  const execution = await workflowService.executeWorkflow(req.params.id, req.user!);
+  const execution = await workflowService.executeWorkflow(req.params.id as string, req.user!);
   if (!execution) {
     res.status(404).json({ status: 'error', message: 'Workflow not found' });
     return;
