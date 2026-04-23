@@ -1,8 +1,10 @@
 import { Worker } from 'bullmq';
+import { eq } from 'drizzle-orm';
 import { redis } from '../config/redis.js';
 import { logger } from '../utils/logger.js';
 import { db } from '../config/database.js';
 import { campaigns } from '../db/schema/campaigns.js';
+import { workflows, workflowExecutions } from '../db/schema/workflows.js';
 import { syncAll } from '../integrations/leadbyte/leadbyte-client.js';
 import { recordLeadByteSync } from '../controllers/integration.controller.js';
 import { syncAll as catchrSyncAll } from '../services/ad-spend.service.js';
@@ -11,6 +13,8 @@ import { sendEmail } from '../integrations/resend/resend-client.js';
 import type { ResendSendRequest } from '../integrations/resend/resend-types.js';
 import { emailQueue } from './queue.js';
 import * as invoiceService from '../services/invoice.service.js';
+import { refreshWorkflowAggregates } from '../services/workflow.service.js';
+import { WORKFLOW_HANDLERS, isRegisteredHandler } from './workflow-handlers.js';
 import type { AuthPayload } from '../types/index.js';
 
 const connection = redis ?? undefined;
@@ -66,6 +70,141 @@ new Worker('invoice', async (job) => {
       logger.warn({ jobId: job.id, name: job.name }, 'Unknown invoice job — ignoring');
       return { skipped: true };
   }
+}, { connection });
+
+// Workflow worker — runs each workflow's steps sequentially, updating
+// the execution row as it progresses. Each step type has its own handler;
+// unknown step types are skipped (recorded in step_results).
+interface WorkflowStep {
+  id: string;
+  order: number;
+  name: string;
+  type: string;
+  config: string;
+  status: 'pending' | 'completed' | 'failed' | 'skipped';
+}
+interface WorkflowRunPayload {
+  executionId: string;
+  workflowId: string;
+}
+
+async function runWorkflowStep(step: WorkflowStep): Promise<{ ok: boolean; output: string }> {
+  // Step handlers are intentionally minimal in slice 1 — they record what
+  // would happen rather than triggering side-effects. Real integration calls
+  // are added per step type as the workflows surface real flows.
+  switch (step.type) {
+    case 'data_fetch':
+    case 'api_call':
+    case 'query':
+    case 'database':
+      return { ok: true, output: `${step.type}: ${step.config}` };
+    case 'computation':
+      return { ok: true, output: `computed: ${step.config}` };
+    case 'notification':
+      return { ok: true, output: `notification queued: ${step.config}` };
+    case 'wait':
+    case 'approval':
+      return { ok: true, output: `${step.type} satisfied (auto in stub)` };
+    case 'action':
+      return { ok: true, output: `action: ${step.config}` };
+    default:
+      return { ok: true, output: `unknown step type "${step.type}" — skipped` };
+  }
+}
+
+new Worker('workflow', async (job) => {
+  const { executionId, workflowId } = job.data as WorkflowRunPayload;
+  logger.info({ jobId: job.id, executionId, workflowId }, 'Processing workflow run');
+
+  if (job.name !== 'workflow.run') {
+    logger.warn({ jobId: job.id, name: job.name }, 'Unknown workflow job — ignoring');
+    return { skipped: true };
+  }
+
+  const [wf] = await db.select().from(workflows).where(eq(workflows.id, workflowId));
+  if (!wf) {
+    await db
+      .update(workflowExecutions)
+      .set({ status: 'failed', completedAt: new Date(), error: 'Workflow not found' })
+      .where(eq(workflowExecutions.id, executionId));
+    return { error: 'workflow_missing' };
+  }
+
+  // Bound handler? Run it instead of the generic step loop.
+  if (isRegisteredHandler(wf.handlerKey)) {
+    try {
+      const result = await WORKFLOW_HANDLERS[wf.handlerKey]();
+      await db
+        .update(workflowExecutions)
+        .set({
+          status: result.ok ? 'completed' : 'failed',
+          completedAt: new Date(),
+          stepsCompleted: result.ok ? 1 : 0,
+          stepsTotal: 1,
+          result: result.summary,
+        })
+        .where(eq(workflowExecutions.id, executionId));
+      await refreshWorkflowAggregates(workflowId, wf.lastRunAt ?? new Date());
+      logger.info({ executionId, handler: wf.handlerKey, summary: result.summary }, 'Workflow handler finished');
+      return { status: result.ok ? 'completed' : 'failed', summary: result.summary };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await db
+        .update(workflowExecutions)
+        .set({ status: 'failed', completedAt: new Date(), error: msg, result: `Handler threw: ${msg}` })
+        .where(eq(workflowExecutions.id, executionId));
+      await refreshWorkflowAggregates(workflowId, wf.lastRunAt ?? new Date());
+      return { error: msg };
+    }
+  }
+
+  const steps = ((wf.steps as WorkflowStep[] | null) ?? []);
+  const stepResults: Array<{ id: string; status: string; output: string }> = [];
+
+  let completed = 0;
+  let failed = false;
+  for (const step of steps) {
+    completed += 1;
+    await db
+      .update(workflowExecutions)
+      .set({ currentStep: completed, stepsCompleted: completed - 1 })
+      .where(eq(workflowExecutions.id, executionId));
+
+    try {
+      const result = await runWorkflowStep(step);
+      stepResults.push({ id: step.id, status: result.ok ? 'completed' : 'failed', output: result.output });
+      if (!result.ok) {
+        failed = true;
+        break;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      stepResults.push({ id: step.id, status: 'failed', output: msg });
+      failed = true;
+      break;
+    }
+  }
+
+  const status = failed ? 'failed' : 'completed';
+  const summary = failed
+    ? `Failed at step ${completed}/${steps.length}`
+    : `Completed ${steps.length} steps`;
+
+  await db
+    .update(workflowExecutions)
+    .set({
+      status,
+      completedAt: new Date(),
+      stepsCompleted: failed ? completed - 1 : steps.length,
+      stepResults,
+      result: summary,
+    })
+    .where(eq(workflowExecutions.id, executionId));
+
+  await refreshWorkflowAggregates(workflowId, wf.lastRunAt ?? new Date());
+
+  logger.info({ executionId, status, summary }, 'Workflow run finished');
+  return { status, summary };
 }, { connection });
 
 // Sync worker — dispatches on job.name

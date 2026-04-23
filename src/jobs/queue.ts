@@ -14,3 +14,7 @@ export const invoiceQueue = connection
 export const syncQueue = connection
   ? new Queue('sync', { connection })
   : null;
+
+export const workflowQueue = connection
+  ? new Queue('workflow', { connection })
+  : null;

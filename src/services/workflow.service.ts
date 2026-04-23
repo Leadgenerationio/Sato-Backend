@@ -1,3 +1,8 @@
+import { and, desc, eq, sql } from 'drizzle-orm';
+import { db } from '../config/database.js';
+import { workflows, workflowExecutions } from '../db/schema/workflows.js';
+import { workflowQueue } from '../jobs/queue.js';
+import { logger } from '../utils/logger.js';
 import type { AuthPayload } from '../types/index.js';
 
 export interface WorkflowSummary {
@@ -7,6 +12,7 @@ export interface WorkflowSummary {
   type: 'scheduled' | 'trigger' | 'manual';
   schedule: string | null;
   status: 'active' | 'paused' | 'draft';
+  handlerKey: string | null;
   lastRunAt: string | null;
   nextRunAt: string | null;
   totalRuns: number;
@@ -37,91 +43,19 @@ export interface WorkflowDetail extends WorkflowSummary {
   recentExecutions: WorkflowExecution[];
 }
 
-const MOCK_WORKFLOWS: WorkflowDetail[] = [
-  {
-    id: 'wf-1',
-    name: 'Weekly Auto-Invoice',
-    description: 'Every Monday 9 AM — pull 7-day LeadByte data, calculate totals, create Xero invoice, send to client, notify May.',
-    type: 'scheduled',
-    schedule: 'Every Monday 9:00 AM',
-    status: 'active',
-    lastRunAt: '2026-04-14T09:00:00Z',
-    nextRunAt: '2026-04-21T09:00:00Z',
-    totalRuns: 28,
-    successRate: 96.4,
-    steps: [
-      { id: 'ws-1', order: 1, name: 'Pull LeadByte Data', type: 'api_call', config: 'Fetch 7-day lead delivery data for all weekly_auto clients', status: 'completed' },
-      { id: 'ws-2', order: 2, name: 'Calculate Invoice Totals', type: 'computation', config: 'Sum valid leads × lead price per client, apply VAT if registered', status: 'completed' },
-      { id: 'ws-3', order: 3, name: 'Create Xero Invoice', type: 'api_call', config: 'Push invoice to Xero with line items per campaign', status: 'completed' },
-      { id: 'ws-4', order: 4, name: 'Send Invoice Email', type: 'api_call', config: 'Send via Xero email to client billing contact', status: 'completed' },
-      { id: 'ws-5', order: 5, name: 'Notify Finance Team', type: 'notification', config: 'Email May with summary of invoices created', status: 'completed' },
-    ],
-    recentExecutions: [
-      { id: 'we-1', startedAt: '2026-04-14T09:00:00Z', completedAt: '2026-04-14T09:02:15Z', status: 'completed', stepsCompleted: 5, stepsTotal: 5, result: '3 invoices created, total £8,420.00' },
-      { id: 'we-2', startedAt: '2026-04-07T09:00:00Z', completedAt: '2026-04-07T09:01:58Z', status: 'completed', stepsCompleted: 5, stepsTotal: 5, result: '3 invoices created, total £7,890.00' },
-      { id: 'we-3', startedAt: '2026-03-31T09:00:00Z', completedAt: '2026-03-31T09:03:10Z', status: 'failed', stepsCompleted: 3, stepsTotal: 5, result: 'Xero API timeout — retried manually' },
-      { id: 'we-4', startedAt: '2026-03-24T09:00:00Z', completedAt: '2026-03-24T09:01:45Z', status: 'completed', stepsCompleted: 5, stepsTotal: 5, result: '4 invoices created, total £11,200.00' },
-      { id: 'we-5', startedAt: '2026-03-17T09:00:00Z', completedAt: '2026-03-17T09:02:00Z', status: 'completed', stepsCompleted: 5, stepsTotal: 5, result: '3 invoices created, total £9,150.00' },
-    ],
-  },
-  {
-    id: 'wf-2',
-    name: 'Monthly Validated Invoice',
-    description: '1st of each month — export lead data, send to client for validation, wait for approval, create amended Xero invoice.',
-    type: 'scheduled',
-    schedule: '1st of month 9:00 AM',
-    status: 'active',
-    lastRunAt: '2026-04-01T09:00:00Z',
-    nextRunAt: '2026-05-01T09:00:00Z',
-    totalRuns: 6,
-    successRate: 100,
-    steps: [
-      { id: 'ws-6', order: 1, name: 'Export Monthly Lead Data', type: 'api_call', config: 'Pull full month LeadByte data for monthly_validated clients', status: 'completed' },
-      { id: 'ws-7', order: 2, name: 'Generate Validation Report', type: 'computation', config: 'Create CSV/PDF with daily lead breakdown per campaign', status: 'completed' },
-      { id: 'ws-8', order: 3, name: 'Send to Client for Approval', type: 'notification', config: 'Email validation report to client, wait for sign-off', status: 'completed' },
-      { id: 'ws-9', order: 4, name: 'Wait for Client Approval', type: 'approval', config: 'Pause until client confirms or requests amendments', status: 'completed' },
-      { id: 'ws-10', order: 5, name: 'Create Xero Invoice', type: 'api_call', config: 'Create invoice with approved/amended amounts', status: 'completed' },
-      { id: 'ws-11', order: 6, name: 'Send Invoice', type: 'api_call', config: 'Send via Xero email', status: 'completed' },
-    ],
-    recentExecutions: [
-      { id: 'we-6', startedAt: '2026-04-01T09:00:00Z', completedAt: '2026-04-03T14:20:00Z', status: 'completed', stepsCompleted: 6, stepsTotal: 6, result: '2 invoices created after client approval, total £6,800.00' },
-      { id: 'we-7', startedAt: '2026-03-01T09:00:00Z', completedAt: '2026-03-04T10:15:00Z', status: 'completed', stepsCompleted: 6, stepsTotal: 6, result: '2 invoices created, 1 amended, total £5,950.00' },
-    ],
-  },
-  {
-    id: 'wf-3',
-    name: 'Invoice Chasing',
-    description: 'Daily 9 AM — check overdue invoices, send graduated chase emails, escalate after thresholds, detect deteriorating payment patterns.',
-    type: 'scheduled',
-    schedule: 'Daily 9:00 AM',
-    status: 'active',
-    lastRunAt: '2026-04-16T09:00:00Z',
-    nextRunAt: '2026-04-17T09:00:00Z',
-    totalRuns: 180,
-    successRate: 100,
-    steps: [
-      { id: 'ws-12', order: 1, name: 'Check Overdue Invoices', type: 'query', config: 'Find all invoices past due date', status: 'completed' },
-      { id: 'ws-13', order: 2, name: 'Classify by Severity', type: 'computation', config: '1-3d: gentle reminder, 7d: firm follow-up, 14d: escalation, 30d: final notice', status: 'completed' },
-      { id: 'ws-14', order: 3, name: 'Send Chase Emails', type: 'notification', config: 'Send appropriate chase template per severity level', status: 'completed' },
-      { id: 'ws-15', order: 4, name: 'Log Chase History', type: 'database', config: 'Record chase attempt in chase_history table', status: 'completed' },
-      { id: 'ws-16', order: 5, name: 'Detect Payment Patterns', type: 'computation', config: 'Flag clients with 3+ late payments in 90 days', status: 'completed' },
-      { id: 'ws-17', order: 6, name: 'Escalation Alerts', type: 'notification', config: 'Notify owner if client flagged for deteriorating payments', status: 'completed' },
-    ],
-    recentExecutions: [
-      { id: 'we-8', startedAt: '2026-04-16T09:00:00Z', completedAt: '2026-04-16T09:00:45Z', status: 'completed', stepsCompleted: 6, stepsTotal: 6, result: '4 overdue invoices chased, 1 escalation sent' },
-      { id: 'we-9', startedAt: '2026-04-15T09:00:00Z', completedAt: '2026-04-15T09:00:38Z', status: 'completed', stepsCompleted: 6, stepsTotal: 6, result: '3 overdue invoices chased, 0 escalations' },
-      { id: 'we-10', startedAt: '2026-04-14T09:00:00Z', completedAt: '2026-04-14T09:00:42Z', status: 'completed', stepsCompleted: 6, stepsTotal: 6, result: '5 overdue invoices chased, 2 escalations sent' },
-    ],
-  },
-];
-
-const STEP_TYPES = ['data_fetch', 'calculation', 'approval', 'action', 'notification', 'wait', 'api_call', 'query', 'computation', 'database'];
-
 export interface ScheduleConfig {
   frequency: 'daily' | 'weekly' | 'monthly';
   day?: string;
   time: string;
 }
+
+const STEP_TYPES = [
+  'data_fetch', 'calculation', 'approval', 'action', 'notification',
+  'wait', 'api_call', 'query', 'computation', 'database',
+];
+
+type WorkflowRow = typeof workflows.$inferSelect;
+type ExecutionRow = typeof workflowExecutions.$inferSelect;
 
 function buildScheduleString(config: ScheduleConfig): string {
   const [hours, minutes] = config.time.split(':').map(Number);
@@ -139,66 +73,137 @@ function buildScheduleString(config: ScheduleConfig): string {
   return config.time;
 }
 
-let nextWfId = 4;
-let nextStepId = 20;
-let nextExecId = 20;
-
-export async function listWorkflows(_requester: AuthPayload): Promise<WorkflowSummary[]> {
-  return MOCK_WORKFLOWS.map(({ steps, recentExecutions, ...summary }) => summary);
+function summaryFromRow(row: WorkflowRow): WorkflowSummary {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description ?? '',
+    type: row.type as WorkflowSummary['type'],
+    schedule: row.schedule,
+    status: row.status as WorkflowSummary['status'],
+    handlerKey: row.handlerKey,
+    lastRunAt: row.lastRunAt ? row.lastRunAt.toISOString() : null,
+    nextRunAt: row.nextRunAt ? row.nextRunAt.toISOString() : null,
+    totalRuns: row.totalRuns,
+    successRate: Number(row.successRate ?? 0),
+  };
 }
 
-export async function getWorkflow(id: string, _requester: AuthPayload): Promise<WorkflowDetail | null> {
-  return MOCK_WORKFLOWS.find((w) => w.id === id) ?? null;
+function executionFromRow(row: ExecutionRow): WorkflowExecution {
+  return {
+    id: row.id,
+    startedAt: (row.startedAt ?? new Date()).toISOString(),
+    completedAt: row.completedAt ? row.completedAt.toISOString() : null,
+    status: row.status as WorkflowExecution['status'],
+    stepsCompleted: row.stepsCompleted,
+    stepsTotal: row.stepsTotal,
+    result: row.result,
+  };
+}
+
+function detailFromRow(row: WorkflowRow, executions: WorkflowExecution[]): WorkflowDetail {
+  return {
+    ...summaryFromRow(row),
+    steps: ((row.steps as WorkflowStep[] | null) ?? []),
+    recentExecutions: executions,
+  };
+}
+
+async function loadRecentExecutions(workflowId: string, limit = 5): Promise<WorkflowExecution[]> {
+  const rows = await db
+    .select()
+    .from(workflowExecutions)
+    .where(eq(workflowExecutions.workflowId, workflowId))
+    .orderBy(desc(workflowExecutions.startedAt))
+    .limit(limit);
+  return rows.map(executionFromRow);
+}
+
+export async function listWorkflows(requester: AuthPayload): Promise<WorkflowSummary[]> {
+  const where = requester.businessId ? eq(workflows.businessId, requester.businessId) : undefined;
+  const rows = await db.select().from(workflows).where(where).orderBy(workflows.name);
+  return rows.map(summaryFromRow);
+}
+
+export async function getWorkflow(id: string, requester: AuthPayload): Promise<WorkflowDetail | null> {
+  const [row] = await db
+    .select()
+    .from(workflows)
+    .where(
+      requester.businessId
+        ? and(eq(workflows.id, id), eq(workflows.businessId, requester.businessId))
+        : eq(workflows.id, id),
+    );
+  if (!row) return null;
+  const executions = await loadRecentExecutions(id);
+  return detailFromRow(row, executions);
 }
 
 export async function createWorkflow(
-  data: { name: string; description: string; type: WorkflowSummary['type']; schedule?: string | null; scheduleConfig?: ScheduleConfig; steps: { name: string; type: string; config: string }[] },
-  _requester: AuthPayload,
+  data: {
+    name: string;
+    description: string;
+    type: WorkflowSummary['type'];
+    schedule?: string | null;
+    scheduleConfig?: ScheduleConfig;
+    steps: { name: string; type: string; config: string }[];
+    handlerKey?: string | null;
+  },
+  requester: AuthPayload,
 ): Promise<WorkflowDetail> {
   const schedule = data.scheduleConfig
     ? buildScheduleString(data.scheduleConfig)
     : data.schedule ?? null;
 
-  const wf: WorkflowDetail = {
-    id: `wf-${nextWfId++}`,
-    name: data.name,
-    description: data.description,
-    type: data.type,
-    schedule,
-    status: 'draft',
-    lastRunAt: null,
-    nextRunAt: null,
-    totalRuns: 0,
-    successRate: 0,
-    steps: data.steps.map((s, i) => ({
-      id: `ws-${nextStepId++}`,
-      order: i + 1,
-      name: s.name,
-      type: s.type,
-      config: s.config,
-      status: 'pending' as const,
-    })),
-    recentExecutions: [],
-  };
-  MOCK_WORKFLOWS.push(wf);
-  return wf;
+  const stepsWithIds: WorkflowStep[] = data.steps.map((s, i) => ({
+    id: `ws-${Date.now()}-${i}`,
+    order: i + 1,
+    name: s.name,
+    type: s.type,
+    config: s.config,
+    status: 'pending',
+  }));
+
+  const [row] = await db
+    .insert(workflows)
+    .values({
+      businessId: requester.businessId ?? null,
+      name: data.name,
+      description: data.description,
+      type: data.type,
+      schedule,
+      steps: stepsWithIds,
+      status: 'draft',
+      handlerKey: data.handlerKey ?? null,
+    })
+    .returning();
+
+  return detailFromRow(row, []);
 }
 
 export async function updateWorkflow(
   id: string,
-  data: Partial<{ name: string; description: string; schedule: string | null; scheduleConfig: ScheduleConfig; steps: { name: string; type: string; config: string }[] }>,
-  _requester: AuthPayload,
+  data: Partial<{
+    name: string;
+    description: string;
+    schedule: string | null;
+    scheduleConfig: ScheduleConfig;
+    steps: { name: string; type: string; config: string }[];
+  }>,
+  requester: AuthPayload,
 ): Promise<WorkflowDetail | null> {
-  const wf = MOCK_WORKFLOWS.find((w) => w.id === id);
-  if (!wf) return null;
+  const [existing] = await db.select().from(workflows).where(eq(workflows.id, id));
+  if (!existing) return null;
+  if (requester.businessId && existing.businessId !== requester.businessId) return null;
 
-  if (data.name) wf.name = data.name;
-  if (data.description) wf.description = data.description;
-  if (data.scheduleConfig) wf.schedule = buildScheduleString(data.scheduleConfig);
-  else if (data.schedule !== undefined) wf.schedule = data.schedule;
+  const patch: Partial<WorkflowRow> = { updatedAt: new Date() };
+  if (data.name !== undefined) patch.name = data.name;
+  if (data.description !== undefined) patch.description = data.description;
+  if (data.scheduleConfig) patch.schedule = buildScheduleString(data.scheduleConfig);
+  else if (data.schedule !== undefined) patch.schedule = data.schedule;
   if (data.steps) {
-    wf.steps = data.steps.map((s, i) => ({
-      id: `ws-${nextStepId++}`,
+    patch.steps = data.steps.map((s, i) => ({
+      id: `ws-${Date.now()}-${i}`,
       order: i + 1,
       name: s.name,
       type: s.type,
@@ -206,37 +211,115 @@ export async function updateWorkflow(
       status: 'pending' as const,
     }));
   }
-  return wf;
+
+  const [row] = await db.update(workflows).set(patch).where(eq(workflows.id, id)).returning();
+  if (!row) return null;
+  const executions = await loadRecentExecutions(id);
+  return detailFromRow(row, executions);
 }
 
-export async function toggleWorkflowStatus(id: string, _requester: AuthPayload): Promise<WorkflowDetail | null> {
-  const wf = MOCK_WORKFLOWS.find((w) => w.id === id);
+export async function toggleWorkflowStatus(id: string, requester: AuthPayload): Promise<WorkflowDetail | null> {
+  const [existing] = await db.select().from(workflows).where(eq(workflows.id, id));
+  if (!existing) return null;
+  if (requester.businessId && existing.businessId !== requester.businessId) return null;
+  const next = existing.status === 'active' ? 'paused' : 'active';
+  const [row] = await db.update(workflows).set({ status: next, updatedAt: new Date() }).where(eq(workflows.id, id)).returning();
+  if (!row) return null;
+  const executions = await loadRecentExecutions(id);
+  return detailFromRow(row, executions);
+}
+
+/**
+ * Kick off a workflow run.
+ *
+ * If Redis is configured we enqueue a BullMQ `workflow.run` job (the worker
+ * advances the execution row through each step asynchronously). The execution
+ * row is created here in `running` state and returned immediately so the caller
+ * gets back an ID it can poll.
+ *
+ * If Redis is *not* configured (e.g. local dev without docker), we fall back
+ * to recording a synchronous `completed` execution so the UI still advances.
+ */
+export async function executeWorkflow(id: string, requester: AuthPayload): Promise<WorkflowExecution | null> {
+  const [wf] = await db.select().from(workflows).where(eq(workflows.id, id));
   if (!wf) return null;
+  if (requester.businessId && wf.businessId !== requester.businessId) return null;
 
-  wf.status = wf.status === 'active' ? 'paused' : 'active';
-  return wf;
+  const stepCount = ((wf.steps as WorkflowStep[] | null) ?? []).length;
+  const startedAt = new Date();
+
+  if (workflowQueue) {
+    const [exec] = await db
+      .insert(workflowExecutions)
+      .values({
+        workflowId: id,
+        status: 'running',
+        currentStep: 0,
+        stepsCompleted: 0,
+        stepsTotal: stepCount,
+        startedAt,
+        result: 'Enqueued',
+      })
+      .returning();
+
+    await workflowQueue.add('workflow.run', {
+      executionId: exec.id,
+      workflowId: id,
+    });
+
+    await db
+      .update(workflows)
+      .set({ lastRunAt: startedAt, updatedAt: new Date() })
+      .where(eq(workflows.id, id));
+
+    logger.info({ workflowId: id, executionId: exec.id }, 'Workflow enqueued');
+    return executionFromRow(exec);
+  }
+
+  // Fallback path — Redis not configured. Record a stub completed run so the
+  // UI shows an outcome rather than spinning forever.
+  logger.warn({ workflowId: id }, 'Redis not configured — recording stub execution');
+  const completedAt = new Date(startedAt.getTime() + 100);
+  const [exec] = await db
+    .insert(workflowExecutions)
+    .values({
+      workflowId: id,
+      status: 'completed',
+      currentStep: stepCount,
+      stepsCompleted: stepCount,
+      stepsTotal: stepCount,
+      startedAt,
+      completedAt,
+      result: `Stub execution — Redis not configured (set REDIS_URL to run for real).`,
+    })
+    .returning();
+
+  await refreshWorkflowAggregates(id, startedAt);
+  return executionFromRow(exec);
 }
 
-export async function executeWorkflow(id: string, _requester: AuthPayload): Promise<WorkflowExecution | null> {
-  const wf = MOCK_WORKFLOWS.find((w) => w.id === id);
-  if (!wf) return null;
+async function refreshWorkflowAggregates(workflowId: string, lastRunAt: Date): Promise<void> {
+  const [{ total, success }] = await db
+    .select({
+      total: sql<number>`count(*)::int`,
+      success: sql<number>`count(*) filter (where ${workflowExecutions.status} = 'completed')::int`,
+    })
+    .from(workflowExecutions)
+    .where(eq(workflowExecutions.workflowId, workflowId));
+  const successRate = total > 0 ? Math.round((success / total) * 1000) / 10 : 0;
 
-  // Mock execution — in production this would enqueue a BullMQ job
-  const exec: WorkflowExecution = {
-    id: `we-${nextExecId++}`,
-    startedAt: new Date().toISOString(),
-    completedAt: new Date(Date.now() + 2000).toISOString(),
-    status: 'completed',
-    stepsCompleted: wf.steps.length,
-    stepsTotal: wf.steps.length,
-    result: `Mock execution — ${wf.steps.length} steps completed (real execution requires LeadByte + Xero)`,
-  };
-
-  wf.recentExecutions.unshift(exec);
-  wf.totalRuns++;
-  wf.lastRunAt = exec.startedAt;
-  return exec;
+  await db
+    .update(workflows)
+    .set({
+      lastRunAt,
+      totalRuns: total,
+      successRate: String(successRate),
+      updatedAt: new Date(),
+    })
+    .where(eq(workflows.id, workflowId));
 }
+
+export { refreshWorkflowAggregates };
 
 export function getStepTypes(): string[] {
   return STEP_TYPES;
