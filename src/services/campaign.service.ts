@@ -1,25 +1,48 @@
+import { eq, sql } from 'drizzle-orm';
+import { db } from '../config/database.js';
+import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import type { AuthPayload } from '../types/index.js';
 
 export type CampaignType = 'pay_per_lead' | 'managed' | 'internal';
 
 /**
- * Sato-side metadata not tracked by LeadByte. Drives the Pay-Per-Lead /
- * Managed / Internal filter on the campaigns list (matches Leadreports.io).
+ * Sato-side campaign metadata (campaignType) lives in the campaigns table,
+ * keyed by `leadbyte_campaign_id`. Loaded once per request via
+ * `loadCampaignTypeMap`. Defaults to 'pay_per_lead' when no row exists yet.
  */
-const CAMPAIGN_TYPE_BY_ID: Record<string, CampaignType> = {
-  'lb-1': 'pay_per_lead',
-  'lb-2': 'pay_per_lead',
-  'lb-3': 'pay_per_lead',
-  'lb-4': 'managed',
-  'lb-5': 'pay_per_lead',
-  'lb-6': 'pay_per_lead',
-  'lb-7': 'internal',
-  'lb-8': 'pay_per_lead',
-};
+async function loadCampaignTypeMap(): Promise<Map<string, CampaignType>> {
+  const rows = await db
+    .select({
+      leadbyteCampaignId: campaignsTable.leadbyteCampaignId,
+      campaignType: campaignsTable.campaignType,
+    })
+    .from(campaignsTable)
+    .where(sql`${campaignsTable.leadbyteCampaignId} is not null`);
+  const map = new Map<string, CampaignType>();
+  for (const r of rows) {
+    if (r.leadbyteCampaignId) {
+      map.set(r.leadbyteCampaignId, (r.campaignType as CampaignType) ?? 'pay_per_lead');
+    }
+  }
+  return map;
+}
 
-function resolveCampaignType(id: string): CampaignType {
-  return CAMPAIGN_TYPE_BY_ID[id] ?? 'pay_per_lead';
+function resolveCampaignType(id: string, map: Map<string, CampaignType>): CampaignType {
+  return map.get(id) ?? 'pay_per_lead';
+}
+
+export async function setCampaignType(leadbyteCampaignId: string, type: CampaignType): Promise<void> {
+  const [existing] = await db
+    .select()
+    .from(campaignsTable)
+    .where(eq(campaignsTable.leadbyteCampaignId, leadbyteCampaignId));
+  if (existing) {
+    await db
+      .update(campaignsTable)
+      .set({ campaignType: type, updatedAt: new Date() })
+      .where(eq(campaignsTable.leadbyteCampaignId, leadbyteCampaignId));
+  }
 }
 
 export interface CampaignSummary {
@@ -62,7 +85,10 @@ export interface CampaignDetail extends CampaignSummary {
 }
 
 export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSummary[]> {
-  const campaigns = await leadbyte.getCampaigns();
+  const [campaigns, typeMap] = await Promise.all([
+    leadbyte.getCampaigns(),
+    loadCampaignTypeMap(),
+  ]);
 
   const summaries: CampaignSummary[] = [];
 
@@ -88,7 +114,7 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
       clientName: c.clientName,
       vertical: c.vertical,
       status: c.status,
-      campaignType: resolveCampaignType(c.id),
+      campaignType: resolveCampaignType(c.id, typeMap),
       leadPrice: c.leadPrice,
       currency: c.currency,
       totalLeads,
@@ -107,7 +133,10 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
 }
 
 export async function getCampaign(id: string, _requester: AuthPayload): Promise<CampaignDetail | null> {
-  const campaigns = await leadbyte.getCampaigns();
+  const [campaigns, typeMap] = await Promise.all([
+    leadbyte.getCampaigns(),
+    loadCampaignTypeMap(),
+  ]);
   const campaign = campaigns.find((c) => c.id === id);
   if (!campaign) return null;
 
@@ -133,7 +162,7 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
     clientName: campaign.clientName,
     vertical: campaign.vertical,
     status: campaign.status,
-    campaignType: resolveCampaignType(campaign.id),
+    campaignType: resolveCampaignType(campaign.id, typeMap),
     leadPrice: campaign.leadPrice,
     currency: campaign.currency,
     totalLeads,

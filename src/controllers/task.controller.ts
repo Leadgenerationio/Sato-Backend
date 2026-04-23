@@ -10,7 +10,7 @@ export async function listTasks(req: Request, res: Response) {
   if (assignee) filters.assignee = assignee as string;
   if (search) filters.search = search as string;
 
-  let tasks = await taskService.listTasks(req.user!, filters);
+  const tasks = await taskService.listTasks(req.user!, filters);
 
   // Pagination
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
@@ -23,7 +23,7 @@ export async function listTasks(req: Request, res: Response) {
 }
 
 export async function getTask(req: Request, res: Response) {
-  const task = await taskService.getTask(req.params.id);
+  const task = await taskService.getTask(req.params.id as string);
   if (!task) {
     res.status(404).json({ status: 'error', message: 'Task not found' });
     return;
@@ -37,7 +37,7 @@ export async function createTask(req: Request, res: Response) {
 }
 
 export async function updateTask(req: Request, res: Response) {
-  const task = await taskService.updateTask(req.params.id, req.body);
+  const task = await taskService.updateTask(req.params.id as string, req.body);
   if (!task) {
     res.status(404).json({ status: 'error', message: 'Task not found' });
     return;
@@ -51,7 +51,7 @@ export async function updateTaskStatus(req: Request, res: Response) {
     res.status(400).json({ status: 'error', message: 'Status is required' });
     return;
   }
-  const task = await taskService.updateTaskStatus(req.params.id, status);
+  const task = await taskService.updateTaskStatus(req.params.id as string, status);
   if (!task) {
     res.status(404).json({ status: 'error', message: 'Task not found' });
     return;
@@ -65,7 +65,7 @@ export async function addComment(req: Request, res: Response) {
     res.status(400).json({ status: 'error', message: 'Comment text is required' });
     return;
   }
-  const comment = await taskService.addComment(req.params.id, {
+  const comment = await taskService.addComment(req.params.id as string, {
     author: req.user!.email,
     text,
   });
@@ -88,7 +88,7 @@ export async function listTemplates(_req: Request, res: Response) {
 
 export async function createFromTemplate(req: Request, res: Response) {
   const { assignee } = req.body;
-  const task = await taskService.createFromTemplate(req.params.id, assignee || req.user!.email, req.user!);
+  const task = await taskService.createFromTemplate(req.params.id as string, assignee || req.user!.email, req.user!);
   if (!task) {
     res.status(404).json({ status: 'error', message: 'Template not found' });
     return;

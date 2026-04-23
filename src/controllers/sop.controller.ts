@@ -9,7 +9,7 @@ export async function listSops(req: Request, res: Response) {
   if (search) filters.search = search as string;
   if (status) filters.status = status as string;
 
-  let sops = await sopService.listSops(req.user!, filters);
+  const sops = await sopService.listSops(req.user!, filters);
 
   // Pagination
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
@@ -22,7 +22,7 @@ export async function listSops(req: Request, res: Response) {
 }
 
 export async function getSop(req: Request, res: Response) {
-  const sop = await sopService.getSop(req.params.id);
+  const sop = await sopService.getSop(req.params.id as string);
   if (!sop) {
     res.status(404).json({ status: 'error', message: 'SOP not found' });
     return;
@@ -36,7 +36,7 @@ export async function createSop(req: Request, res: Response) {
 }
 
 export async function updateSop(req: Request, res: Response) {
-  const sop = await sopService.updateSop(req.params.id, req.body);
+  const sop = await sopService.updateSop(req.params.id as string, req.body);
   if (!sop) {
     res.status(404).json({ status: 'error', message: 'SOP not found' });
     return;

@@ -15,3 +15,6 @@ export * from './creatives.js';
 export * from './agreements.js';
 export * from './chase-history.js';
 export * from './ad-spend.js';
+export * from './sops.js';
+export * from './tasks.js';
+export * from './staff.js';
