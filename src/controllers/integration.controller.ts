@@ -3,7 +3,7 @@ import * as xeroClient from '../integrations/xero/xero-client.js';
 import { isLeadByteConfigured } from '../integrations/leadbyte/leadbyte-client.js';
 import { getActiveProvider } from '../integrations/credit-check/index.js';
 import { isResendConfigured } from '../integrations/resend/resend-client.js';
-import { isDocuSignConfigured } from '../integrations/docusign/docusign-client.js';
+import { isSignNowConfigured } from '../integrations/signnow/signnow-client.js';
 import { isR2Configured } from '../integrations/r2/r2-client.js';
 import { syncQueue } from '../jobs/queue.js';
 import { logger } from '../utils/logger.js';
@@ -13,60 +13,28 @@ export function recordLeadByteSync(ts: string): void {
   lastLeadByteSyncAt = ts;
 }
 
-export async function xeroAuthUrl(_req: Request, res: Response) {
-  if (!xeroClient.isXeroConfigured()) {
-    res.status(503).json({ status: 'error', message: 'Xero credentials not configured' });
-    return;
+/**
+ * Xero uses a Custom Connection (server-to-server) — no user-facing OAuth
+ * consent flow. Status/disconnect are the only routes needed; authentication
+ * is implicit from config.
+ */
+export async function xeroStatus(_req: Request, res: Response) {
+  // If a token hasn't been fetched yet but creds are configured, try to
+  // authenticate now so the UI shows "Connected" right away.
+  if (xeroClient.isXeroConfigured()) {
+    try {
+      await xeroClient.getValidToken();
+    } catch (err) {
+      logger.warn({ err }, 'Xero authentication failed on /status');
+    }
   }
 
-  const url = await xeroClient.getAuthUrl();
-  res.json({ status: 'success', data: { url } });
+  const status = await xeroClient.getStatus();
+  res.json({ status: 'success', data: status });
 }
 
-export async function xeroCallback(req: Request, res: Response) {
-  const code = req.query.code as string;
-  if (!code) {
-    res.status(400).json({ status: 'error', message: 'Missing authorization code' });
-    return;
-  }
-
-  const businessId = req.user!.businessId;
-  if (!businessId) {
-    res.status(400).json({ status: 'error', message: 'No business associated with your account' });
-    return;
-  }
-
-  await xeroClient.exchangeCode(businessId, code);
-
-  // Redirect back to frontend settings page
-  res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/settings?xero=connected`);
-}
-
-export async function xeroStatus(req: Request, res: Response) {
-  const businessId = req.user!.businessId;
-  if (!businessId) {
-    res.json({ status: 'success', data: { connected: false, configured: xeroClient.isXeroConfigured() } });
-    return;
-  }
-
-  const connectionStatus = await xeroClient.getStatus(businessId);
-  res.json({
-    status: 'success',
-    data: {
-      ...connectionStatus,
-      configured: xeroClient.isXeroConfigured(),
-    },
-  });
-}
-
-export async function xeroDisconnect(req: Request, res: Response) {
-  const businessId = req.user!.businessId;
-  if (!businessId) {
-    res.status(400).json({ status: 'error', message: 'No business associated with your account' });
-    return;
-  }
-
-  await xeroClient.disconnect(businessId);
+export async function xeroDisconnect(_req: Request, res: Response) {
+  xeroClient.disconnect();
   res.json({ status: 'success', data: { connected: false } });
 }
 
@@ -119,15 +87,16 @@ export async function resendStatus(_req: Request, res: Response) {
   });
 }
 
-// ─── DocuSign ───
+// ─── SignNow (replaces DocuSign) ───
 
-export async function docusignStatus(_req: Request, res: Response) {
+export async function signnowStatus(_req: Request, res: Response) {
   res.json({
     status: 'success',
     data: {
-      configured: isDocuSignConfigured(),
-      accountId: process.env.DOCUSIGN_ACCOUNT_ID ? maskId(process.env.DOCUSIGN_ACCOUNT_ID) : null,
-      oauthBase: process.env.DOCUSIGN_OAUTH_BASE || null,
+      configured: isSignNowConfigured(),
+      baseUrl: process.env.SIGNNOW_BASE_URL || 'https://api-eval.signnow.com',
+      username: process.env.SIGNNOW_USERNAME ? maskId(process.env.SIGNNOW_USERNAME) : null,
+      sandbox: (process.env.SIGNNOW_BASE_URL || 'https://api-eval.signnow.com').includes('eval'),
     },
   });
 }

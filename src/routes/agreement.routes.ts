@@ -39,9 +39,9 @@ agreementRoutes.post(
   agreementController.refreshStatus,
 );
 
-// DocuSign webhook — unauthenticated, must be reachable by DocuSign Connect.
-// In production, verify the HMAC signature in the controller.
+// SignNow webhook — unauthenticated, must be reachable by SignNow.
+// The controller verifies HMAC signature using SIGNNOW_WEBHOOK_SECRET.
 agreementRoutes.post(
-  '/webhooks/docusign',
-  agreementController.docusignWebhook,
+  '/webhooks/signnow',
+  agreementController.signnowWebhook,
 );

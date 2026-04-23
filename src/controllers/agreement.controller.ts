@@ -1,6 +1,8 @@
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import * as agreementService from '../services/agreement.service.js';
+import { verifyWebhookSignature } from '../integrations/signnow/signnow-client.js';
+import { logger } from '../utils/logger.js';
 
 const sendSchema = z.object({
   clientId: z.string().uuid(),
@@ -22,7 +24,7 @@ export async function send(req: Request, res: Response) {
 }
 
 export async function listForClient(req: Request, res: Response) {
-  const rows = await agreementService.listAgreementsForClient(req.params.clientId);
+  const rows = await agreementService.listAgreementsForClient(req.params.clientId as string);
   res.json({ status: 'success', data: { agreements: rows } });
 }
 
@@ -32,7 +34,7 @@ export async function listAll(_req: Request, res: Response) {
 }
 
 export async function refreshStatus(req: Request, res: Response) {
-  const row = await agreementService.refreshAgreementStatus(req.params.id);
+  const row = await agreementService.refreshAgreementStatus(req.params.id as string);
   if (!row) {
     res.status(404).json({ status: 'error', message: 'Agreement not found' });
     return;
@@ -41,7 +43,7 @@ export async function refreshStatus(req: Request, res: Response) {
 }
 
 export async function getOne(req: Request, res: Response) {
-  const row = await agreementService.getAgreement(req.params.id);
+  const row = await agreementService.getAgreement(req.params.id as string);
   if (!row) {
     res.status(404).json({ status: 'error', message: 'Agreement not found' });
     return;
@@ -50,15 +52,31 @@ export async function getOne(req: Request, res: Response) {
 }
 
 /**
- * DocuSign Connect webhook. Body is JSON sent by DocuSign on envelope events.
- * For production, verify the HMAC signature using DOCUSIGN_WEBHOOK_SECRET.
+ * SignNow webhook. Body is JSON sent on document events.
+ * Verifies HMAC-SHA256 signature in `X-SignNow-Signature` using
+ * `SIGNNOW_WEBHOOK_SECRET` when configured. In dev / when secret is missing,
+ * signature check is skipped so local testing still works.
  */
-export async function docusignWebhook(req: Request, res: Response) {
+export async function signnowWebhook(req: Request, res: Response) {
   try {
-    await agreementService.handleDocuSignWebhook(req.body);
+    const secret = process.env.SIGNNOW_WEBHOOK_SECRET;
+    if (secret) {
+      const sig = req.header('x-signnow-signature') || req.header('X-SignNow-Signature') || '';
+      const rawBody = typeof (req as Request & { rawBody?: string }).rawBody === 'string'
+        ? (req as Request & { rawBody?: string }).rawBody!
+        : JSON.stringify(req.body);
+      if (!verifyWebhookSignature(rawBody, sig)) {
+        logger.warn('SignNow webhook signature verification failed — rejecting');
+        res.status(401).json({ status: 'error', message: 'Invalid signature' });
+        return;
+      }
+    }
+
+    await agreementService.handleSignNowWebhook(req.body);
     res.status(200).json({ status: 'success' });
   } catch (err) {
-    // Always 200 to avoid DocuSign retry storm; we've logged the error internally.
+    logger.error({ err }, 'SignNow webhook handler threw');
+    // Always 200 to avoid retry storms; error is logged internally.
     res.status(200).json({ status: 'received' });
   }
 }

@@ -12,8 +12,9 @@ export const agreements = pgTable('agreements', {
   signedAt: timestamp('signed_at'),
   status: varchar('status', { length: 50 }).default('pending'),
 
-  // DocuSign integration
-  docusignEnvelopeId: varchar('docusign_envelope_id', { length: 128 }),
+  // E-signature provider (was DocuSign, now SignNow) — generic name so future
+  // provider swaps don't require another migration.
+  providerEnvelopeId: varchar('provider_envelope_id', { length: 128 }),
   signerEmail: varchar('signer_email', { length: 255 }),
   signerName: varchar('signer_name', { length: 255 }),
   sentAt: timestamp('sent_at'),
@@ -27,5 +28,5 @@ export const agreements = pgTable('agreements', {
   updatedAt: timestamp('updated_at').defaultNow(),
 }, (table) => [
   index('agreements_client_idx').on(table.clientId),
-  index('agreements_envelope_idx').on(table.docusignEnvelopeId),
+  index('agreements_envelope_idx').on(table.providerEnvelopeId),
 ]);

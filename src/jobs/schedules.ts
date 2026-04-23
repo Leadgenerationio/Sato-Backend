@@ -15,9 +15,11 @@ export async function registerSchedules() {
     data: {},
   });
 
-  // Sync LeadByte data hourly
+  // Sync LeadByte data every 2 minutes for near-live reporting.
+  // (1 min is aggressive against LeadByte rate limits; 2 min is Sam's
+  // "every minute or so" with headroom.)
   await syncQueue.upsertJobScheduler('leadbyte-sync', {
-    pattern: '0 * * * *',
+    pattern: '*/2 * * * *',
   }, {
     name: 'leadbyte-hourly-sync',
     data: {},

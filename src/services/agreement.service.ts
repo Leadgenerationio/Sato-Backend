@@ -2,11 +2,11 @@ import { eq } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { agreements } from '../db/schema/agreements.js';
 import { clients } from '../db/schema/clients.js';
-import { createEnvelope, downloadSignedPdf, getEnvelopeStatus } from '../integrations/docusign/docusign-client.js';
+import { createEnvelope, downloadSignedPdf, getEnvelopeStatus } from '../integrations/signnow/signnow-client.js';
 import { uploadFile } from '../integrations/r2/r2-client.js';
 import { notify } from './notification.service.js';
 import { logger } from '../utils/logger.js';
-import type { EnvelopeStatus, DocuSignWebhookEvent } from '../integrations/docusign/docusign-types.js';
+import type { EnvelopeStatus, SignNowWebhookEvent } from '../integrations/signnow/signnow-types.js';
 
 export interface SendAgreementInput {
   clientId: string;
@@ -17,7 +17,7 @@ export interface SendAgreementInput {
 }
 
 /**
- * Create an agreement row and dispatch the DocuSign envelope.
+ * Create an agreement row and dispatch a signing envelope via SignNow.
  */
 export async function sendAgreement(input: SendAgreementInput) {
   const envelope = await createEnvelope({
@@ -31,7 +31,7 @@ export async function sendAgreement(input: SendAgreementInput) {
     .insert(agreements)
     .values({
       clientId: input.clientId,
-      docusignEnvelopeId: envelope.envelopeId,
+      providerEnvelopeId: envelope.envelopeId,
       signerEmail: input.signerEmail,
       signerName: input.signerName,
       status: 'sent',
@@ -44,20 +44,38 @@ export async function sendAgreement(input: SendAgreementInput) {
 }
 
 /**
- * Handle a DocuSign Connect webhook event.
- * Updates the agreement row. On `completed` downloads the signed PDF and archives it to R2.
+ * Handle a SignNow webhook event.
+ * Updates the agreement row. On `document.complete` downloads the signed PDF
+ * and archives it to R2.
  */
-export async function handleDocuSignWebhook(event: DocuSignWebhookEvent) {
-  const envelopeId = event.data.envelopeId;
-  const status: EnvelopeStatus = event.data.envelopeSummary.status;
+export async function handleSignNowWebhook(event: SignNowWebhookEvent) {
+  const envelopeId = event.meta?.document_id || event.meta?.id;
+  if (!envelopeId) {
+    logger.warn({ event }, 'SignNow webhook missing document id — ignoring');
+    return;
+  }
 
   const [existing] = await db
     .select()
     .from(agreements)
-    .where(eq(agreements.docusignEnvelopeId, envelopeId));
+    .where(eq(agreements.providerEnvelopeId, envelopeId));
 
   if (!existing) {
-    logger.warn({ envelopeId }, 'DocuSign webhook for unknown envelope — ignoring');
+    logger.warn({ envelopeId }, 'SignNow webhook for unknown envelope — ignoring');
+    return;
+  }
+
+  // SignNow reports status via event_type rather than a flat status field.
+  // Translate to our generic EnvelopeStatus enum.
+  let status: EnvelopeStatus;
+  if (event.event_type === 'document.complete') {
+    status = 'completed';
+  } else if (event.event_type === 'document.update' || event.event_type === 'invite.update') {
+    // A status update that isn't completion — could be decline or mid-flow.
+    // Fall back to a live status poll for accuracy.
+    status = await getEnvelopeStatus(envelopeId);
+  } else {
+    // create/delete/invite.create events — nothing to do.
     return;
   }
 
@@ -69,7 +87,7 @@ export async function handleDocuSignWebhook(event: DocuSignWebhookEvent) {
   }
 
   if (status === 'completed' || status === 'signed') {
-    patch.signedAt = new Date(event.data.envelopeSummary.completedDateTime || Date.now());
+    patch.signedAt = new Date();
     patch.signedByClient = true;
 
     // Download and archive signed PDF to R2
@@ -120,9 +138,9 @@ export async function getAgreement(id: string) {
 export async function refreshAgreementStatus(id: string) {
   const [row] = await db.select().from(agreements).where(eq(agreements.id, id));
   if (!row) return null;
-  if (!row.docusignEnvelopeId) return row;
+  if (!row.providerEnvelopeId) return row;
 
-  const current = await getEnvelopeStatus(row.docusignEnvelopeId);
+  const current = await getEnvelopeStatus(row.providerEnvelopeId);
   if (current === row.status) return row;
 
   const patch: Record<string, unknown> = { status: current, updatedAt: new Date() };
