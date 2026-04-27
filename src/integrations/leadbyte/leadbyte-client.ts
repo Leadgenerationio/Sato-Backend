@@ -320,13 +320,11 @@ export async function getCampaigns(statusFilter?: 'Active' | 'Inactive' | 'Archi
     logger.warn('LeadByte running in MOCK mode — no LEADBYTE_API_KEY configured');
     return MOCK_CAMPAIGNS;
   }
-  try {
-    const raws = await lbGet<LeadByteCampaignRaw[]>('/campaigns', { status: statusFilter });
-    return raws.map(normaliseCampaign);
-  } catch (err) {
-    logger.error({ err }, 'LeadByte getCampaigns failed — returning mocks');
-    return MOCK_CAMPAIGNS;
-  }
+  // Configured: real call. Throw on API errors (was silently falling back to
+  // mocks, which hid auth problems — discovered when a partial-perm key
+  // returned mock data instead of failing). Caller's error handler decides UX.
+  const raws = await lbGet<LeadByteCampaignRaw[]>('/campaigns', { status: statusFilter });
+  return raws.map(normaliseCampaign);
 }
 
 /**
@@ -358,29 +356,24 @@ export async function getDeliveryReports(
         })()
       : windowToQuery(windowOrDays);
 
-  try {
-    const activity = await lbGet<unknown>('/reports/leadactivity', {
-      campaignId,
-      groupBy: 'day',
-      showData: 'leads',
-      ...dateQuery,
-    });
-    // Approximate revenue/cost using mock pricing since LeadByte /reports/leadactivity returns count only.
-    // For totals use /reports/campaign in report.service.ts.
-    return unwrapReport<LeadByteLeadActivityRow>(activity).map((r) => ({
-      campaignId,
-      date: r.date,
-      leadCount: r.count,
-      validLeads: r.count,
-      invalidLeads: 0,
-      revenue: 0,
-      cost: 0,
-      reportId: `lb-${campaignId}-${r.date}`,
-    }));
-  } catch (err) {
-    logger.error({ err, campaignId }, 'LeadByte getDeliveryReports failed — returning mocks');
-    return generateMockDeliveries(campaignId, typeof windowOrDays === 'number' ? windowOrDays : 30);
-  }
+  const activity = await lbGet<unknown>('/reports/leadactivity', {
+    campaignId,
+    groupBy: 'day',
+    showData: 'leads',
+    ...dateQuery,
+  });
+  // Approximate revenue/cost using mock pricing since LeadByte /reports/leadactivity returns count only.
+  // For totals use /reports/campaign in report.service.ts.
+  return unwrapReport<LeadByteLeadActivityRow>(activity).map((r) => ({
+    campaignId,
+    date: r.date,
+    leadCount: r.count,
+    validLeads: r.count,
+    invalidLeads: 0,
+    revenue: 0,
+    cost: 0,
+    reportId: `lb-${campaignId}-${r.date}`,
+  }));
 }
 
 /**
@@ -391,29 +384,24 @@ export async function getSuppliers(campaignId?: string): Promise<LeadByteSupplie
   if (!isConfigured()) {
     return campaignId ? MOCK_SUPPLIERS.filter((s) => s.campaignId === campaignId) : MOCK_SUPPLIERS;
   }
-  try {
-    const rows = await lbGet<unknown>('/reports/supplier', {
-      campaignId: campaignId || 'all',
-      datePreset: 'last_30d',
-      groupBy: 'campaign',
-      showSupplier: 'Yes',
-    });
-    return unwrapReport<LeadByteSupplierReportRow>(rows).map((r, i) => {
-      const supplierName = flatRef(r.supplier);
-      return {
-        id: `lb-sup-${i}`,
-        name: supplierName,
-        platform: supplierName,
-        accountId: supplierName,
-        campaignId: refId(r.campaign) || flatRef(r.campaign),
-        totalSpend: r.payout,
-        totalLeads: r.leads,
-      };
-    });
-  } catch (err) {
-    logger.error({ err }, 'LeadByte getSuppliers failed — returning mocks');
-    return campaignId ? MOCK_SUPPLIERS.filter((s) => s.campaignId === campaignId) : MOCK_SUPPLIERS;
-  }
+  const rows = await lbGet<unknown>('/reports/supplier', {
+    campaignId: campaignId || 'all',
+    datePreset: 'last_30d',
+    groupBy: 'campaign',
+    showSupplier: 'Yes',
+  });
+  return unwrapReport<LeadByteSupplierReportRow>(rows).map((r, i) => {
+    const supplierName = flatRef(r.supplier);
+    return {
+      id: `lb-sup-${i}`,
+      name: supplierName,
+      platform: supplierName,
+      accountId: supplierName,
+      campaignId: refId(r.campaign) || flatRef(r.campaign),
+      totalSpend: r.payout,
+      totalLeads: r.leads,
+    };
+  });
 }
 
 /**
@@ -441,32 +429,27 @@ export async function getSupplierSpend(window: DeliveryWindow): Promise<LeadByte
     });
   }
 
-  try {
-    const res = await lbGet<unknown>('/reports/supplier', {
-      campaignId: 'all',
-      groupBy: 'campaign',
-      showSupplier: 'Yes',
-      ...windowToQuery(window),
-    });
-    return unwrapReport<LeadByteSupplierReportRow>(res).map((r, i): LeadByteSupplierSpend => {
-      const supplierName = flatRef(r.supplier);
-      const campaignName = flatRef(r.campaign);
-      return {
-        supplierId: `lb-sup-${i}-${supplierName}`,
-        supplierName,
-        platform: supplierName,
-        campaignId: refId(r.campaign) || campaignName,
-        campaignName,
-        window,
-        spend: r.payout,
-        leads: r.leads,
-        cpl: r.eCPL ?? (r.leads > 0 ? Math.round((r.payout / r.leads) * 100) / 100 : 0),
-      };
-    });
-  } catch (err) {
-    logger.error({ err, window }, 'LeadByte getSupplierSpend failed — returning []');
-    return [];
-  }
+  const res = await lbGet<unknown>('/reports/supplier', {
+    campaignId: 'all',
+    groupBy: 'campaign',
+    showSupplier: 'Yes',
+    ...windowToQuery(window),
+  });
+  return unwrapReport<LeadByteSupplierReportRow>(res).map((r, i): LeadByteSupplierSpend => {
+    const supplierName = flatRef(r.supplier);
+    const campaignName = flatRef(r.campaign);
+    return {
+      supplierId: `lb-sup-${i}-${supplierName}`,
+      supplierName,
+      platform: supplierName,
+      campaignId: refId(r.campaign) || campaignName,
+      campaignName,
+      window,
+      spend: r.payout,
+      leads: r.leads,
+      cpl: r.eCPL ?? (r.leads > 0 ? Math.round((r.payout / r.leads) * 100) / 100 : 0),
+    };
+  });
 }
 
 /**
@@ -498,24 +481,19 @@ export async function getCampaignReport(window: DeliveryWindow): Promise<LeadByt
       };
     });
   }
-  try {
-    const res = await lbGet<unknown>('/reports/campaign', {
-      campaignId: 'all',
-      groupBy: 'campaign',
-      showCampaign: 'Yes',
-      ...windowToQuery(window),
-    });
-    return unwrapReport<LeadByteCampaignReportRow & { campaign: unknown }>(res).map(
-      (r): LeadByteCampaignReportRow => ({
-        ...r,
-        campaign: flatRef(r.campaign),
-        currency: toIsoCurrency(r.currency as string | undefined),
-      }),
-    );
-  } catch (err) {
-    logger.error({ err, window }, 'LeadByte getCampaignReport failed — returning []');
-    return [];
-  }
+  const res = await lbGet<unknown>('/reports/campaign', {
+    campaignId: 'all',
+    groupBy: 'campaign',
+    showCampaign: 'Yes',
+    ...windowToQuery(window),
+  });
+  return unwrapReport<LeadByteCampaignReportRow & { campaign: unknown }>(res).map(
+    (r): LeadByteCampaignReportRow => ({
+      ...r,
+      campaign: flatRef(r.campaign),
+      currency: toIsoCurrency(r.currency as string | undefined),
+    }),
+  );
 }
 
 function windowFactor(win: DeliveryWindow): number {

@@ -1,12 +1,32 @@
 import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 import app from '../index.js';
+import { db } from '../config/database.js';
+import { clients } from '../db/schema/clients.js';
 
 let clientToken: string;
 let ownerToken: string;
 
+// In-memory user store has client@stato.app → clientId = this UUID.
+// Portal queries scope to that ID and call loadClientOrThrow → 403 if absent.
+// Self-seed so the test doesn't depend on db:seed having run.
+const DEMO_CLIENT_ID = '00000000-0000-0000-0000-000000000001';
+const LEADGEN_BUSINESS_ID = '26d6b2b4-c867-460e-8473-eca2b1ffd232';
+
 describe('Portal API', () => {
   beforeAll(async () => {
+    await db
+      .insert(clients)
+      .values({
+        id: DEMO_CLIENT_ID,
+        businessId: LEADGEN_BUSINESS_ID,
+        companyName: 'Apex Media Ltd',
+        contactEmail: 'contact@apex.test',
+        currency: 'GBP',
+        status: 'active',
+      })
+      .onConflictDoNothing();
+
     const clientRes = await request(app).post('/api/v1/auth/login').send({ email: 'client@stato.app', password: 'client123' });
     clientToken = clientRes.body.data.tokens.accessToken;
 
