@@ -17,6 +17,7 @@ export const invoices = pgTable('invoices', {
   chaseCount: integer('chase_count').default(0),
   lastChasedAt: timestamp('last_chased_at'),
   lineItems: jsonb('line_items'),
+  attachments: jsonb('attachments').notNull().default([]),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 }, (table) => [

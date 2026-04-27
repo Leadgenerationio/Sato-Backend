@@ -17,6 +17,7 @@ import { agreementRoutes } from './agreement.routes.js';
 import { leadbyteRoutes } from './leadbyte.routes.js';
 import { adSpendRoutes } from './ad-spend.routes.js';
 import { uploadRoutes } from './upload.routes.js';
+import { creativeRoutes } from './creative.routes.js';
 export const router: RouterType = Router();
 
 router.use('/auth', authRoutes);
@@ -37,3 +38,4 @@ router.use('/', agreementRoutes);
 router.use('/leadbyte', leadbyteRoutes);
 router.use('/ad-spend', adSpendRoutes);
 router.use('/uploads', uploadRoutes);
+router.use('/', creativeRoutes);

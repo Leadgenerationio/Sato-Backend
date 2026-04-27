@@ -112,6 +112,51 @@ function withBusinessFilter(requester: AuthPayload | undefined, column: PgColumn
   return requester?.businessId ? eq(column, requester.businessId) : undefined;
 }
 
+export interface StaffDocument {
+  key: string;
+  name: string;
+  size: number;
+  contentType: string;
+  category?: string;
+  uploadedAt: string;
+  uploadedBy?: string;
+}
+
+export async function listStaffDocuments(staffId: string): Promise<StaffDocument[]> {
+  const [row] = await db.select().from(staff).where(eq(staff.id, staffId));
+  if (!row) return [];
+  return (row.documents as StaffDocument[] | null) ?? [];
+}
+
+export async function addStaffDocument(
+  staffId: string,
+  doc: Omit<StaffDocument, 'uploadedAt' | 'uploadedBy'>,
+  requester: AuthPayload,
+): Promise<StaffDocument[] | null> {
+  const [row] = await db.select().from(staff).where(eq(staff.id, staffId));
+  if (!row) return null;
+
+  const existing = (row.documents as StaffDocument[] | null) ?? [];
+  const next: StaffDocument = {
+    ...doc,
+    uploadedAt: new Date().toISOString(),
+    uploadedBy: requester.userId,
+  };
+  const updated = [...existing, next];
+  await db.update(staff).set({ documents: updated, updatedAt: new Date() }).where(eq(staff.id, staffId));
+  return updated;
+}
+
+export async function removeStaffDocument(staffId: string, key: string): Promise<StaffDocument[] | null> {
+  const [row] = await db.select().from(staff).where(eq(staff.id, staffId));
+  if (!row) return null;
+
+  const existing = (row.documents as StaffDocument[] | null) ?? [];
+  const updated = existing.filter((d) => d.key !== key);
+  await db.update(staff).set({ documents: updated, updatedAt: new Date() }).where(eq(staff.id, staffId));
+  return updated;
+}
+
 export async function listStaff(requester?: AuthPayload): Promise<StaffMember[]> {
   const where = withBusinessFilter(requester, staff.businessId);
   const rows = await db.select().from(staff).where(where).orderBy(staff.name);

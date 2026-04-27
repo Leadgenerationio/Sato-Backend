@@ -14,3 +14,5 @@ invoiceRoutes.get('/clients', invoiceController.getClients);
 invoiceRoutes.get('/:id', invoiceController.getInvoice);
 invoiceRoutes.post('/', invoiceController.createInvoice);
 invoiceRoutes.post('/:id/push-to-xero', invoiceController.pushToXero);
+invoiceRoutes.post('/:id/attachments', invoiceController.addAttachment);
+invoiceRoutes.delete('/:id/attachments/:key', invoiceController.removeAttachment);

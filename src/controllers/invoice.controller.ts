@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import { z } from 'zod';
 import * as invoiceService from '../services/invoice.service.js';
 
 export async function listInvoices(req: Request, res: Response) {
@@ -65,4 +66,36 @@ export async function pushToXero(req: Request, res: Response) {
     }
     res.status(502).json({ status: 'error', message: msg });
   }
+}
+
+const attachmentSchema = z.object({
+  key: z.string().min(1),
+  name: z.string().min(1),
+  size: z.number().int().nonnegative(),
+  contentType: z.string().min(1),
+});
+
+export async function addAttachment(req: Request, res: Response) {
+  const parsed = attachmentSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ status: 'error', message: 'Invalid input', issues: parsed.error.issues });
+    return;
+  }
+  const invoice = await invoiceService.addInvoiceAttachment(req.params.id as string, parsed.data, req.user!);
+  if (!invoice) {
+    res.status(404).json({ status: 'error', message: 'Invoice not found' });
+    return;
+  }
+  res.json({ status: 'success', data: { invoice } });
+}
+
+export async function removeAttachment(req: Request, res: Response) {
+  const id = req.params.id as string;
+  const key = decodeURIComponent(req.params.key as string);
+  const invoice = await invoiceService.removeInvoiceAttachment(id, key, req.user!);
+  if (!invoice) {
+    res.status(404).json({ status: 'error', message: 'Invoice not found' });
+    return;
+  }
+  res.json({ status: 'success', data: { invoice } });
 }

@@ -1,5 +1,44 @@
 import { Request, Response } from 'express';
+import { z } from 'zod';
 import * as staffService from '../services/staff.service.js';
+
+const documentSchema = z.object({
+  key: z.string().min(1),
+  name: z.string().min(1),
+  size: z.number().int().nonnegative(),
+  contentType: z.string().min(1),
+  category: z.string().optional(),
+});
+
+export async function listStaffDocuments(req: Request, res: Response) {
+  const documents = await staffService.listStaffDocuments(req.params.id as string);
+  res.json({ status: 'success', data: { documents } });
+}
+
+export async function addStaffDocument(req: Request, res: Response) {
+  const parsed = documentSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ status: 'error', message: 'Invalid input', issues: parsed.error.issues });
+    return;
+  }
+  const documents = await staffService.addStaffDocument(req.params.id as string, parsed.data, req.user!);
+  if (!documents) {
+    res.status(404).json({ status: 'error', message: 'Staff member not found' });
+    return;
+  }
+  res.json({ status: 'success', data: { documents } });
+}
+
+export async function removeStaffDocument(req: Request, res: Response) {
+  const id = req.params.id as string;
+  const key = decodeURIComponent(req.params.key as string);
+  const documents = await staffService.removeStaffDocument(id, key);
+  if (!documents) {
+    res.status(404).json({ status: 'error', message: 'Staff member not found' });
+    return;
+  }
+  res.json({ status: 'success', data: { documents } });
+}
 
 export async function listStaff(req: Request, res: Response) {
   const staff = await staffService.listStaff(req.user!);

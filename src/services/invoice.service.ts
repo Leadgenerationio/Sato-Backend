@@ -30,12 +30,22 @@ export interface InvoiceSummary {
   xeroInvoiceId: string | null;
 }
 
+export interface InvoiceAttachment {
+  key: string;
+  name: string;
+  size: number;
+  contentType: string;
+  uploadedAt: string;
+  uploadedBy?: string;
+}
+
 export interface InvoiceDetail extends InvoiceSummary {
   lineItems: LineItem[];
   chaseCount: number;
   lastChasedAt: string | null;
   clientEmail: string;
   vatRegistered: boolean;
+  attachments: InvoiceAttachment[];
 }
 
 type InvoiceRow = typeof invoices.$inferSelect;
@@ -68,6 +78,7 @@ function invoiceToDetail(row: InvoiceRow, client: ClientRow): InvoiceDetail {
     lastChasedAt: row.lastChasedAt ? row.lastChasedAt.toISOString() : null,
     clientEmail: client.contactEmail ?? '',
     vatRegistered: client.vatRegistered ?? false,
+    attachments: (row.attachments as InvoiceAttachment[] | null) ?? [],
   };
 }
 
@@ -246,6 +257,53 @@ export async function pushInvoiceToXero(invoiceId: string, requester: AuthPayloa
 
   const [client] = await db.select().from(clients).where(eq(clients.id, updated.clientId));
   return invoiceToDetail(updated, client);
+}
+
+/**
+ * Append a file attachment to an invoice. Frontend uploads via signed R2
+ * URL first, then calls this with the resulting key + metadata.
+ */
+export async function addInvoiceAttachment(
+  invoiceId: string,
+  attachment: Omit<InvoiceAttachment, 'uploadedAt' | 'uploadedBy'>,
+  requester: AuthPayload,
+): Promise<InvoiceDetail | null> {
+  const existing = await getInvoice(invoiceId, requester);
+  if (!existing) return null;
+
+  const newItem: InvoiceAttachment = {
+    ...attachment,
+    uploadedAt: new Date().toISOString(),
+    uploadedBy: requester.userId,
+  };
+  const updated = [...existing.attachments, newItem];
+
+  await db
+    .update(invoices)
+    .set({ attachments: updated, updatedAt: new Date() })
+    .where(eq(invoices.id, invoiceId));
+
+  logger.info({ invoiceId, key: attachment.key }, 'Invoice attachment added');
+  return getInvoice(invoiceId, requester);
+}
+
+/** Remove an attachment by key. R2 file is left in place (orphaned). */
+export async function removeInvoiceAttachment(
+  invoiceId: string,
+  key: string,
+  requester: AuthPayload,
+): Promise<InvoiceDetail | null> {
+  const existing = await getInvoice(invoiceId, requester);
+  if (!existing) return null;
+
+  const updated = existing.attachments.filter((a) => a.key !== key);
+  await db
+    .update(invoices)
+    .set({ attachments: updated, updatedAt: new Date() })
+    .where(eq(invoices.id, invoiceId));
+
+  logger.info({ invoiceId, key }, 'Invoice attachment removed');
+  return getInvoice(invoiceId, requester);
 }
 
 /**

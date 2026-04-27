@@ -1,4 +1,4 @@
-import { pgTable, uuid, varchar, integer, date, timestamp, index } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, varchar, integer, date, timestamp, jsonb, index } from 'drizzle-orm/pg-core';
 import { businesses } from './businesses.js';
 
 export const staff = pgTable('staff', {
@@ -12,6 +12,7 @@ export const staff = pgTable('staff', {
   status: varchar('status', { length: 20 }).notNull().default('active'),
   holidaysRemaining: integer('holidays_remaining').notNull().default(25),
   holidaysTaken: integer('holidays_taken').notNull().default(0),
+  documents: jsonb('documents').notNull().default([]),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 }, (table) => [
