@@ -12,10 +12,25 @@ import { registerSchedules } from './jobs/schedules.js';
 const app: Express = express();
 
 // Security
-app.use(cors({
-  origin: env.NODE_ENV === 'development' ? true : env.FRONTEND_URL,
-  credentials: true,
-}));
+const ALLOWED_ORIGINS = (env.FRONTEND_URL || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+app.use(
+  cors({
+    origin:
+      env.NODE_ENV === 'development'
+        ? true
+        : (origin, cb) => {
+            if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+              cb(null, true);
+            } else {
+              cb(new Error(`CORS: origin not allowed: ${origin}`));
+            }
+          },
+    credentials: true,
+  }),
+);
 app.use(helmet());
 
 // Body parsing
