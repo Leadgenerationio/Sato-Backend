@@ -57,6 +57,12 @@ async function getS3Client() {
       secretAccessKey: env.R2_SECRET_ACCESS_KEY,
     },
     forcePathStyle: true,
+    // Cloudflare R2 doesn't fully support AWS SDK v3's new default behavior
+    // of auto-adding CRC32 checksum headers. The browser PUT then fails with
+    // signature mismatch because the presigned URL signs an empty CRC32.
+    // Force WHEN_REQUIRED so checksums only add when caller explicitly asks.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
   });
 }
 
