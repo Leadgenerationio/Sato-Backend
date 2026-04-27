@@ -3,7 +3,7 @@ import { db } from '../config/database.js';
 import { agreements } from '../db/schema/agreements.js';
 import { clients } from '../db/schema/clients.js';
 import { createEnvelope, downloadSignedPdf, getEnvelopeStatus } from '../integrations/signnow/signnow-client.js';
-import { uploadFile } from '../integrations/r2/r2-client.js';
+import { uploadFile, downloadFile } from '../integrations/r2/r2-client.js';
 import { notify } from './notification.service.js';
 import { logger } from '../utils/logger.js';
 import type { EnvelopeStatus, SignNowWebhookEvent } from '../integrations/signnow/signnow-types.js';
@@ -12,19 +12,42 @@ export interface SendAgreementInput {
   clientId: string;
   signerEmail: string;
   signerName: string;
-  documentBase64: string;
+  /** Inline base64-encoded PDF bytes. Capped at the API body limit (~10 MB). */
+  documentBase64?: string;
+  /**
+   * R2 key (relative to the `misc` folder by default) of a previously-uploaded
+   * PDF. Bypasses the API body limit — frontend uploads via signed URL first,
+   * then passes the key here. Either this OR documentBase64 must be set.
+   */
+  r2SourceKey?: string;
+  /** Folder the r2SourceKey lives under. Defaults to 'misc' (FileUpload default). */
+  r2SourceFolder?: 'invoices' | 'agreements' | 'creatives' | 'landing-pages' | 'misc';
   documentName?: string;
 }
 
 /**
  * Create an agreement row and dispatch a signing envelope via SignNow.
+ *
+ * Two ways to supply the document:
+ *   1. documentBase64  — for small PDFs (<10 MB), inline in the request.
+ *   2. r2SourceKey     — for any size, frontend pre-uploads via signed URL.
  */
 export async function sendAgreement(input: SendAgreementInput) {
+  let documentBase64: string;
+  if (input.r2SourceKey) {
+    const buf = await downloadFile(input.r2SourceFolder ?? 'misc', input.r2SourceKey);
+    documentBase64 = buf.toString('base64');
+  } else if (input.documentBase64) {
+    documentBase64 = input.documentBase64;
+  } else {
+    throw new Error('sendAgreement requires either documentBase64 or r2SourceKey');
+  }
+
   const envelope = await createEnvelope({
     signerEmail: input.signerEmail,
     signerName: input.signerName,
     documentName: input.documentName || 'Service Agreement.pdf',
-    documentBase64: input.documentBase64,
+    documentBase64,
   });
 
   const [row] = await db

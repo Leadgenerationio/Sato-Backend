@@ -4,13 +4,23 @@ import * as agreementService from '../services/agreement.service.js';
 import { verifyWebhookSignature } from '../integrations/signnow/signnow-client.js';
 import { logger } from '../utils/logger.js';
 
-const sendSchema = z.object({
-  clientId: z.string().uuid(),
-  signerEmail: z.string().email(),
-  signerName: z.string().min(1),
-  documentBase64: z.string().min(1),
-  documentName: z.string().optional(),
-});
+const sendSchema = z
+  .object({
+    clientId: z.string().uuid(),
+    signerEmail: z.string().email(),
+    signerName: z.string().min(1),
+    /** Either documentBase64 OR r2SourceKey must be set; never both. */
+    documentBase64: z.string().min(1).optional(),
+    r2SourceKey: z.string().min(1).optional(),
+    r2SourceFolder: z
+      .enum(['invoices', 'agreements', 'creatives', 'landing-pages', 'misc'])
+      .optional(),
+    documentName: z.string().optional(),
+  })
+  .refine(
+    (v) => Boolean(v.documentBase64) !== Boolean(v.r2SourceKey),
+    { message: 'Provide exactly one of documentBase64 or r2SourceKey' },
+  );
 
 export async function send(req: Request, res: Response) {
   const parsed = sendSchema.safeParse(req.body);

@@ -132,6 +132,30 @@ export async function getSignedUploadUrl(opts: R2SignedUrlOptions): Promise<stri
   );
 }
 
+/**
+ * Download a stored object back as a Buffer. Used when the backend needs to
+ * forward an already-uploaded file to a third party (e.g., agreements page
+ * uploads a PDF to R2 first, then we download it here to forward to SignNow).
+ */
+export async function downloadFile(folder: R2Folder, key: string): Promise<Buffer> {
+  const fullKey = buildKey(folder, key);
+
+  if (!isR2Configured()) {
+    throw new Error(`R2 not configured — cannot download ${fullKey}`);
+  }
+
+  const { GetObjectCommand } = await import('@aws-sdk/client-s3');
+  const client = await getS3Client();
+  const res = await client.send(
+    new GetObjectCommand({ Bucket: env.R2_BUCKET, Key: fullKey }),
+  );
+  if (!res.Body) throw new Error(`R2 download returned empty body for ${fullKey}`);
+  // AWS SDK v3 returns a stream; collect into a Buffer.
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of res.Body as AsyncIterable<Uint8Array>) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
 export async function deleteFile(folder: R2Folder, key: string): Promise<void> {
   const fullKey = buildKey(folder, key);
 
