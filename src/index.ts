@@ -11,11 +11,16 @@ import { registerSchedules } from './jobs/schedules.js';
 
 const app: Express = express();
 
+// Behind Railway's proxy — trust the immediate hop so req.ip is the real client
+// and express-rate-limit doesn't throw ERR_ERL_UNEXPECTED_X_FORWARDED_FOR.
+app.set('trust proxy', 1);
+
 // Security
 const ALLOWED_ORIGINS = (env.FRONTEND_URL || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+console.log('CORS allow-list:', ALLOWED_ORIGINS);
 app.use(
   cors({
     origin:
