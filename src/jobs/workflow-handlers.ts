@@ -2,7 +2,8 @@ import { db } from '../config/database.js';
 import { campaigns } from '../db/schema/campaigns.js';
 import { invoices } from '../db/schema/invoices.js';
 import { clients } from '../db/schema/clients.js';
-import { eq, and } from 'drizzle-orm';
+import { leadDeliveries } from '../db/schema/lead-deliveries.js';
+import { eq, and, gte, sql } from 'drizzle-orm';
 import * as invoiceService from '../services/invoice.service.js';
 import { sendEmail } from '../integrations/resend/resend-client.js';
 import { logger } from '../utils/logger.js';
@@ -60,9 +61,9 @@ export const WORKFLOW_HANDLERS: Record<string, () => Promise<HandlerResult>> = {
    * auto-invoice — creates a draft Xero invoice for every active
    * weekly_auto client based on the last 7 days of LeadByte deliveries.
    *
-   * Slice 1 stub: discovers eligible clients but doesn't push yet — needs
-   * the LeadByte→client→delivery aggregation that the LeadByte sync job
-   * builds in `lead_deliveries`. Returns a count so the UI shows progress.
+   * For each eligible client: sums leadCount × leadPrice over the past 7
+   * days from lead_deliveries, creates a draft invoice via invoice.service,
+   * then pushes to Xero. Skips clients with zero leads in the window.
    */
   'auto-invoice': async () => {
     const eligible = await db
@@ -72,18 +73,79 @@ export const WORKFLOW_HANDLERS: Record<string, () => Promise<HandlerResult>> = {
 
     if (eligible.length === 0) return { ok: true, summary: 'No clients on weekly_auto billing.' };
 
-    logger.info({ count: eligible.length }, 'auto-invoice handler — eligible clients');
-    return {
-      ok: true,
-      summary: `Identified ${eligible.length} weekly_auto clients. Real Xero push pending — wire to invoice.service.pushInvoiceToXero per client once lead_deliveries is populated.`,
-    };
+    const sevenDaysAgo = new Date(Date.now() - 7 * 86_400_000).toISOString().split('T')[0];
+
+    let invoicesCreated = 0;
+    let invoicesPushed = 0;
+    let skippedNoLeads = 0;
+    const errors: string[] = [];
+
+    for (const client of eligible) {
+      try {
+        const requester: AuthPayload = {
+          ...SYSTEM_AUTH,
+          businessId: client.businessId ?? SYSTEM_AUTH.businessId,
+        };
+
+        const [agg] = await db
+          .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
+          .from(leadDeliveries)
+          .where(and(eq(leadDeliveries.clientId, client.id), gte(leadDeliveries.deliveryDate, sevenDaysAgo)));
+
+        const leadCount = agg?.leads ?? 0;
+        if (leadCount === 0) {
+          skippedNoLeads++;
+          continue;
+        }
+
+        const leadPrice = Number(client.leadPrice ?? 0);
+        if (leadPrice === 0) {
+          errors.push(`${client.companyName}: leadPrice not set`);
+          continue;
+        }
+
+        const lineItem = {
+          description: `Lead generation — ${leadCount} leads (week ending ${new Date().toISOString().split('T')[0]})`,
+          quantity: leadCount,
+          unitPrice: leadPrice,
+          amount: Math.round(leadCount * leadPrice * 100) / 100,
+        };
+
+        const created = await invoiceService.createInvoice(
+          {
+            clientId: client.id,
+            currency: client.currency ?? 'GBP',
+            lineItems: [lineItem],
+            addVat: client.vatRegistered ?? false,
+          },
+          requester,
+        );
+        invoicesCreated++;
+
+        try {
+          await invoiceService.pushInvoiceToXero(created.id, requester);
+          invoicesPushed++;
+        } catch (err) {
+          // Invoice exists in DB; Xero push failed (e.g., not configured).
+          // Don't fail the whole batch — log and continue.
+          logger.error({ err, clientId: client.id, invoiceId: created.id }, 'auto-invoice: Xero push failed');
+          errors.push(`${client.companyName}: Xero push failed`);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error({ err, clientId: client.id }, 'auto-invoice: per-client failure');
+        errors.push(`${client.companyName}: ${msg}`);
+      }
+    }
+
+    const summary = `Auto-invoice: ${invoicesCreated} created, ${invoicesPushed} pushed to Xero, ${skippedNoLeads} skipped (no leads). ${errors.length} errors.`;
+    return { ok: errors.length === 0, summary };
   },
 
   /**
-   * monthly-validated — sends per-client validation reports for clients on
-   * the monthly_validated billing workflow.
-   *
-   * Slice 1: emails Sam a summary instead of building per-client PDFs.
+   * monthly-validated — emails Sam a per-client lead-volume summary for the
+   * previous calendar month, plus the eligible clients' contact emails so he
+   * can request validation. Once Sam confirms, he triggers auto-invoice.
    */
   'monthly-validated': async () => {
     const eligible = await db
@@ -93,14 +155,54 @@ export const WORKFLOW_HANDLERS: Record<string, () => Promise<HandlerResult>> = {
 
     if (eligible.length === 0) return { ok: true, summary: 'No clients on monthly_validated billing.' };
 
+    // Previous calendar month bounds.
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().split('T')[0];
+    const monthEnd = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().split('T')[0];
+
+    const rows: { client: string; leads: number; revenue: number; email: string | null }[] = [];
+    for (const c of eligible) {
+      const [agg] = await db
+        .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
+        .from(leadDeliveries)
+        .where(
+          and(
+            eq(leadDeliveries.clientId, c.id),
+            gte(leadDeliveries.deliveryDate, monthStart),
+          ),
+        );
+      const leadCount = agg?.leads ?? 0;
+      const leadPrice = Number(c.leadPrice ?? 0);
+      rows.push({
+        client: c.companyName,
+        leads: leadCount,
+        revenue: Math.round(leadCount * leadPrice * 100) / 100,
+        email: c.contactEmail,
+      });
+    }
+
+    const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
+    const html = `
+      <p>Monthly validation report for ${monthStart} – ${monthEnd}.</p>
+      <p><strong>${rows.length} clients</strong> · <strong>${rows.reduce((s, r) => s + r.leads, 0)} total leads</strong> · <strong>£${totalRevenue.toFixed(2)} revenue</strong></p>
+      <table cellpadding="6" cellspacing="0" border="1" style="border-collapse:collapse;">
+        <tr><th>Client</th><th>Leads</th><th>Revenue</th><th>Contact</th></tr>
+        ${rows.map((r) => `<tr><td>${r.client}</td><td align="right">${r.leads}</td><td align="right">£${r.revenue.toFixed(2)}</td><td>${r.email ?? '—'}</td></tr>`).join('')}
+      </table>
+      <p>Reply to each client requesting sign-off, then run auto-invoice.</p>
+    `;
+
     if (emailQueue) {
       await emailQueue.add('send-email', {
         to: 'owner@stato.app',
-        subject: `Monthly validation report — ${eligible.length} clients`,
-        html: `<p>${eligible.length} clients on monthly_validated billing need lead-data sign-off.</p><ul>${eligible.map((c) => `<li>${c.companyName}</li>`).join('')}</ul>`,
+        subject: `Monthly validation report — ${rows.length} clients (${monthStart} – ${monthEnd})`,
+        html,
       } satisfies ResendSendRequest);
     }
-    return { ok: true, summary: `Validation summary queued for ${eligible.length} clients.` };
+    return {
+      ok: true,
+      summary: `Validation summary for ${rows.length} clients queued (${rows.reduce((s, r) => s + r.leads, 0)} leads, £${totalRevenue.toFixed(2)} revenue).`,
+    };
   },
 
   /**
