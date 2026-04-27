@@ -111,6 +111,66 @@ function requireConfigured(op: string): void {
   if (!isConfigured()) throw new Error(`LeadByte not configured — cannot ${op}`);
 }
 
+// ─── Response normalisers ───────────────────────────────────────────────────
+
+/**
+ * LeadByte's /reports/* endpoints return `{status, message, data, benchmark}`.
+ * Older mocked responses used `{report: [...]}`. Accept either shape and
+ * fall through to `[]` so callers always get an array.
+ */
+function unwrapReport<T>(res: unknown): T[] {
+  if (Array.isArray(res)) return res as T[];
+  const r = res as { data?: unknown; report?: unknown };
+  if (Array.isArray(r?.data)) return r.data as T[];
+  if (Array.isArray(r?.report)) return r.report as T[];
+  return [];
+}
+
+/**
+ * Report rows often nest `campaign`, `supplier`, or `buyer` as `{id, name, reference}`
+ * objects rather than the flat strings the client docs imply. Pull out a printable
+ * identifier so downstream typed `string` fields stay valid.
+ */
+function flatRef(v: unknown): string {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'object') {
+    const o = v as { name?: unknown; id?: unknown };
+    if (typeof o.name === 'string') return o.name;
+    if (typeof o.id === 'string' || typeof o.id === 'number') return String(o.id);
+  }
+  return '';
+}
+
+/** Pick the id off a `{id, name, reference}` ref object (or echo a flat string id). */
+function refId(v: unknown): string {
+  if (v == null) return '';
+  if (typeof v === 'string' || typeof v === 'number') return String(v);
+  if (typeof v === 'object') {
+    const o = v as { id?: unknown };
+    if (typeof o.id === 'string' || typeof o.id === 'number') return String(o.id);
+  }
+  return '';
+}
+
+/**
+ * LeadByte returns currency as a long human-readable label
+ * ("Britain (United Kingdom), Pounds") rather than ISO 4217. Map the common
+ * cases back to ISO codes so frontend formatters work.
+ */
+function toIsoCurrency(s: string | undefined | null): string {
+  if (!s) return 'GBP';
+  const trimmed = s.trim();
+  if (/^[A-Z]{3}$/.test(trimmed)) return trimmed; // already ISO
+  if (/pound|sterling|gbp|united kingdom|britain/i.test(trimmed)) return 'GBP';
+  if (/euro|eur/i.test(trimmed)) return 'EUR';
+  if (/dollar|usd|united states/i.test(trimmed)) return 'USD';
+  if (/dollar|aud|australia/i.test(trimmed)) return 'AUD';
+  if (/dollar|cad|canada/i.test(trimmed)) return 'CAD';
+  return 'GBP';
+}
+
 // ─── Window translation ─────────────────────────────────────────────────────
 
 /**
@@ -242,7 +302,7 @@ function normaliseCampaign(raw: LeadByteCampaignRaw): LeadByteCampaign {
     clientName: '',
     vertical: '',
     leadPrice: 0,
-    currency: raw.currency || 'GBP',
+    currency: toIsoCurrency(raw.currency),
     status,
     startDate: '',
   };
@@ -299,16 +359,15 @@ export async function getDeliveryReports(
       : windowToQuery(windowOrDays);
 
   try {
-    const activity = await lbGet<{ report: LeadByteLeadActivityRow[] }>('/reports/leadactivity', {
+    const activity = await lbGet<unknown>('/reports/leadactivity', {
       campaignId,
       groupBy: 'day',
       showData: 'leads',
       ...dateQuery,
     });
-    const rows = Array.isArray((activity as any).report) ? (activity as any).report : (activity as any);
     // Approximate revenue/cost using mock pricing since LeadByte /reports/leadactivity returns count only.
     // For totals use /reports/campaign in report.service.ts.
-    return (rows as LeadByteLeadActivityRow[]).map((r: LeadByteLeadActivityRow) => ({
+    return unwrapReport<LeadByteLeadActivityRow>(activity).map((r) => ({
       campaignId,
       date: r.date,
       leadCount: r.count,
@@ -333,22 +392,24 @@ export async function getSuppliers(campaignId?: string): Promise<LeadByteSupplie
     return campaignId ? MOCK_SUPPLIERS.filter((s) => s.campaignId === campaignId) : MOCK_SUPPLIERS;
   }
   try {
-    const rows = await lbGet<{ report: LeadByteSupplierReportRow[] }>('/reports/supplier', {
+    const rows = await lbGet<unknown>('/reports/supplier', {
       campaignId: campaignId || 'all',
       datePreset: 'last_30d',
       groupBy: 'campaign',
       showSupplier: 'Yes',
     });
-    const list = Array.isArray((rows as any).report) ? (rows as any).report : (rows as any);
-    return (list as LeadByteSupplierReportRow[]).map((r, i) => ({
-      id: `lb-sup-${i}`,
-      name: r.supplier,
-      platform: r.supplier,
-      accountId: r.supplier,
-      campaignId: r.campaign,
-      totalSpend: r.payout,
-      totalLeads: r.leads,
-    }));
+    return unwrapReport<LeadByteSupplierReportRow>(rows).map((r, i) => {
+      const supplierName = flatRef(r.supplier);
+      return {
+        id: `lb-sup-${i}`,
+        name: supplierName,
+        platform: supplierName,
+        accountId: supplierName,
+        campaignId: refId(r.campaign) || flatRef(r.campaign),
+        totalSpend: r.payout,
+        totalLeads: r.leads,
+      };
+    });
   } catch (err) {
     logger.error({ err }, 'LeadByte getSuppliers failed — returning mocks');
     return campaignId ? MOCK_SUPPLIERS.filter((s) => s.campaignId === campaignId) : MOCK_SUPPLIERS;
@@ -381,24 +442,27 @@ export async function getSupplierSpend(window: DeliveryWindow): Promise<LeadByte
   }
 
   try {
-    const res = await lbGet<{ report: LeadByteSupplierReportRow[] }>('/reports/supplier', {
+    const res = await lbGet<unknown>('/reports/supplier', {
       campaignId: 'all',
       groupBy: 'campaign',
       showSupplier: 'Yes',
       ...windowToQuery(window),
     });
-    const rows = Array.isArray((res as any).report) ? (res as any).report : (res as any);
-    return (rows as LeadByteSupplierReportRow[]).map((r, i): LeadByteSupplierSpend => ({
-      supplierId: `lb-sup-${i}-${r.supplier}`,
-      supplierName: r.supplier,
-      platform: r.supplier,
-      campaignId: r.campaign,
-      campaignName: r.campaign,
-      window,
-      spend: r.payout,
-      leads: r.leads,
-      cpl: r.eCPL ?? (r.leads > 0 ? Math.round((r.payout / r.leads) * 100) / 100 : 0),
-    }));
+    return unwrapReport<LeadByteSupplierReportRow>(res).map((r, i): LeadByteSupplierSpend => {
+      const supplierName = flatRef(r.supplier);
+      const campaignName = flatRef(r.campaign);
+      return {
+        supplierId: `lb-sup-${i}-${supplierName}`,
+        supplierName,
+        platform: supplierName,
+        campaignId: refId(r.campaign) || campaignName,
+        campaignName,
+        window,
+        spend: r.payout,
+        leads: r.leads,
+        cpl: r.eCPL ?? (r.leads > 0 ? Math.round((r.payout / r.leads) * 100) / 100 : 0),
+      };
+    });
   } catch (err) {
     logger.error({ err, window }, 'LeadByte getSupplierSpend failed — returning []');
     return [];
@@ -435,13 +499,19 @@ export async function getCampaignReport(window: DeliveryWindow): Promise<LeadByt
     });
   }
   try {
-    const res = await lbGet<{ report: LeadByteCampaignReportRow[] }>('/reports/campaign', {
+    const res = await lbGet<unknown>('/reports/campaign', {
       campaignId: 'all',
       groupBy: 'campaign',
       showCampaign: 'Yes',
       ...windowToQuery(window),
     });
-    return Array.isArray((res as any).report) ? (res as any).report : (res as unknown as LeadByteCampaignReportRow[]);
+    return unwrapReport<LeadByteCampaignReportRow & { campaign: unknown }>(res).map(
+      (r): LeadByteCampaignReportRow => ({
+        ...r,
+        campaign: flatRef(r.campaign),
+        currency: toIsoCurrency(r.currency as string | undefined),
+      }),
+    );
   } catch (err) {
     logger.error({ err, window }, 'LeadByte getCampaignReport failed — returning []');
     return [];
@@ -725,34 +795,51 @@ function buildReportQuery(p: ReportParams): Record<string, string | number | und
   return base;
 }
 
+function normaliseMessagingRow(r: LeadByteMessagingReportRow & { campaign: unknown; supplier?: unknown; responder?: unknown }): LeadByteMessagingReportRow {
+  return {
+    ...r,
+    campaign: flatRef(r.campaign),
+    supplier: r.supplier !== undefined ? flatRef(r.supplier) : undefined,
+    responder: r.responder !== undefined ? flatRef(r.responder) : undefined,
+    currency: toIsoCurrency(r.currency as string | undefined),
+  };
+}
+
 export async function getEmailReport(params: ReportParams): Promise<LeadByteMessagingReportRow[]> {
   requireConfigured('get email report');
-  const res = await lbGet<{ report: LeadByteMessagingReportRow[] }>('/reports/email', buildReportQuery(params));
-  return Array.isArray((res as any).report) ? (res as any).report : (res as unknown as LeadByteMessagingReportRow[]);
+  const res = await lbGet<unknown>('/reports/email', buildReportQuery(params));
+  return unwrapReport<LeadByteMessagingReportRow & { campaign: unknown }>(res).map(normaliseMessagingRow);
 }
 
 export async function getSmsReport(params: ReportParams): Promise<LeadByteMessagingReportRow[]> {
   requireConfigured('get sms report');
-  const res = await lbGet<{ report: LeadByteMessagingReportRow[] }>('/reports/sms', buildReportQuery(params));
-  return Array.isArray((res as any).report) ? (res as any).report : (res as unknown as LeadByteMessagingReportRow[]);
+  const res = await lbGet<unknown>('/reports/sms', buildReportQuery(params));
+  return unwrapReport<LeadByteMessagingReportRow & { campaign: unknown }>(res).map(normaliseMessagingRow);
 }
 
 export async function getBulkEmailReport(params: ReportParams): Promise<LeadByteMessagingReportRow[]> {
   requireConfigured('get bulk email report');
-  const res = await lbGet<{ report: LeadByteMessagingReportRow[] }>('/reports/bulkemail', buildReportQuery(params));
-  return Array.isArray((res as any).report) ? (res as any).report : (res as unknown as LeadByteMessagingReportRow[]);
+  const res = await lbGet<unknown>('/reports/bulkemail', buildReportQuery(params));
+  return unwrapReport<LeadByteMessagingReportRow & { campaign: unknown }>(res).map(normaliseMessagingRow);
 }
 
 export async function getBulkSmsReport(params: ReportParams): Promise<LeadByteMessagingReportRow[]> {
   requireConfigured('get bulk sms report');
-  const res = await lbGet<{ report: LeadByteMessagingReportRow[] }>('/reports/bulksms', buildReportQuery(params));
-  return Array.isArray((res as any).report) ? (res as any).report : (res as unknown as LeadByteMessagingReportRow[]);
+  const res = await lbGet<unknown>('/reports/bulksms', buildReportQuery(params));
+  return unwrapReport<LeadByteMessagingReportRow & { campaign: unknown }>(res).map(normaliseMessagingRow);
 }
 
 export async function getBuyerReport(params: ReportParams): Promise<LeadByteBuyerReportRow[]> {
   requireConfigured('get buyer report');
-  const res = await lbGet<{ report: LeadByteBuyerReportRow[] }>('/reports/buyer', buildReportQuery(params));
-  return Array.isArray((res as any).report) ? (res as any).report : (res as unknown as LeadByteBuyerReportRow[]);
+  const res = await lbGet<unknown>('/reports/buyer', buildReportQuery(params));
+  return unwrapReport<LeadByteBuyerReportRow & { campaign: unknown; buyer: unknown }>(res).map(
+    (r): LeadByteBuyerReportRow => ({
+      ...r,
+      campaign: flatRef(r.campaign),
+      buyer: flatRef(r.buyer),
+      currency: toIsoCurrency(r.currency as string | undefined),
+    }),
+  );
 }
 
 // ─── Credit ─────────────────────────────────────────────────────────────────

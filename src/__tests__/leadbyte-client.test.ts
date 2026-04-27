@@ -368,6 +368,106 @@ describe('LeadByte client — API calls (fetch mocked)', () => {
     fetchMock.mockResolvedValue(mockJsonResponse({ error: 'bad' }, false, 500));
     await expect(lb.getResponders()).rejects.toThrow(/500/);
   });
+
+  // ── Real-API response shape ──────────────────────────────────────────────
+  it('getCampaignReport unwraps the real-API `data` envelope and flattens campaign + currency', async () => {
+    fetchMock.mockResolvedValue(
+      mockJsonResponse({
+        status: 'Success',
+        message: 'OK',
+        data: [
+          {
+            campaign: { id: '85', name: 'Conservatory Upgrades', reference: 'CONSERVATORY-UPGRADE' },
+            leads: 23,
+            valid: 21,
+            invalid: 2,
+            pending: 0,
+            rejections: 1,
+            payable: 20,
+            sold: 20,
+            returns: 0,
+            payout: 0,
+            revenue: 105,
+            profit: 105,
+            currency: 'Britain (United Kingdom), Pounds',
+          },
+        ],
+        benchmark: 0.5,
+      }),
+    );
+    const rows = await lb.getCampaignReport('last_month');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].campaign).toBe('Conservatory Upgrades');
+    expect(rows[0].currency).toBe('GBP');
+    expect(rows[0].leads).toBe(23);
+    expect(rows[0].revenue).toBe(105);
+  });
+
+  it('getSupplierSpend handles `data` shape with object campaign+supplier refs', async () => {
+    fetchMock.mockResolvedValue(
+      mockJsonResponse({
+        status: 'Success',
+        data: [
+          {
+            campaign: { id: '85', name: 'Conservatory Upgrades' },
+            supplier: { id: 's-9', name: 'Google Ads UK' },
+            leads: 200,
+            valid: 180,
+            invalid: 20,
+            pending: 0,
+            rejected: 0,
+            payable: 180,
+            sold: 180,
+            returns: 0,
+            payout: 1500,
+            revenue: 4000,
+            profit: 2500,
+            eCPL: 7.5,
+            currency: 'Britain (United Kingdom), Pounds',
+          },
+        ],
+      }),
+    );
+    const rows = await lb.getSupplierSpend('last_month');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].supplierName).toBe('Google Ads UK');
+    expect(rows[0].campaignName).toBe('Conservatory Upgrades');
+    expect(rows[0].campaignId).toBe('85');
+    expect(rows[0].spend).toBe(1500);
+    expect(rows[0].cpl).toBe(7.5);
+  });
+
+  it('getEmailReport accepts both `data` (real API) and `report` (legacy) envelopes', async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockJsonResponse({
+        status: 'Success',
+        data: [
+          { campaign: { id: '1', name: 'X' }, sent: 10, delivered: 9, clicks: 1, conversions: 0, cost: 0, revenue: 0, profit: 0, currency: 'Britain (United Kingdom), Pounds' },
+        ],
+      }),
+    );
+    const realApi = await lb.getEmailReport({ campaignId: 1, window: 'today' });
+    expect(realApi[0].campaign).toBe('X');
+    expect(realApi[0].currency).toBe('GBP');
+
+    fetchMock.mockResolvedValueOnce(mockJsonResponse({ report: [{ campaign: 'Y', sent: 5, delivered: 4, clicks: 0, conversions: 0, cost: 0, revenue: 0, profit: 0, currency: 'GBP' }] }));
+    const legacy = await lb.getEmailReport({ campaignId: 1, window: 'today' });
+    expect(legacy[0].campaign).toBe('Y');
+    expect(legacy[0].currency).toBe('GBP');
+  });
+
+  it('getCampaigns maps human-readable currency labels to ISO codes', async () => {
+    fetchMock.mockResolvedValue(
+      mockJsonResponse([
+        { id: 2, name: 'Solar Panels (UK)', active: 'Yes', currency: 'Britain (United Kingdom), Pounds' },
+        { id: 14, name: 'Hearing Aids (CH)', active: 'Yes', currency: 'EUR' },
+      ]),
+    );
+    const campaigns = await lb.getCampaigns();
+    expect(campaigns).toHaveLength(2);
+    expect(campaigns[0].currency).toBe('GBP');
+    expect(campaigns[1].currency).toBe('EUR');
+  });
 });
 
 describe('LeadByte client — syncAll()', () => {
