@@ -12,6 +12,7 @@ integrationRoutes.use(requireRole('owner'));
 integrationRoutes.get('/xero/status', integrationController.xeroStatus);
 integrationRoutes.post('/xero/disconnect', integrationController.xeroDisconnect);
 integrationRoutes.get('/xero/bank-accounts', integrationController.xeroBankAccounts);
+integrationRoutes.get('/xero/vat-liability', integrationController.xeroVatLiability);
 
 // LeadByte
 integrationRoutes.get('/leadbyte/status', integrationController.leadbyteStatus);

@@ -273,3 +273,184 @@ export async function getBankBalances(): Promise<XeroBankAccount[]> {
     balance: balanceByAccountId.get(a.AccountID) ?? '0',
   }));
 }
+
+export interface XeroVatLiability {
+  fromDate: string;   // ISO date
+  toDate: string;     // ISO date
+  owed: string;       // decimal-on-the-wire, GBP
+  collectedOnSales: string;
+  paidOnPurchases: string;
+}
+
+interface XeroReportCell {
+  Value: string;
+  Attributes?: Array<{ Value: string; Id: string }>;
+}
+
+interface XeroReportRow {
+  RowType: string;
+  Title?: string;
+  Cells?: XeroReportCell[];
+  Rows?: XeroReportRow[];
+}
+
+interface XeroTaxSummaryResponse {
+  Reports: Array<{
+    ReportName: string;
+    Rows: XeroReportRow[];
+  }>;
+}
+
+/**
+ * Sum the "Tax Amount" column for either Sales or Purchases section in a
+ * Xero TaxSummary report.
+ *
+ * Report structure:
+ *   Section "Sales" (or "Purchases")
+ *     Row     "Standard Rate (20%)" | net | tax
+ *     Row     "Zero Rated"          | net | tax
+ *     SummaryRow "Total Sales VAT"  | _   | tax-total
+ */
+function sumTaxSection(rows: XeroReportRow[], sectionTitle: string): number {
+  const section = rows.find((r) => r.RowType === 'Section' && r.Title === sectionTitle);
+  if (!section?.Rows) return 0;
+  const summary = section.Rows.find((r) => r.RowType === 'SummaryRow');
+  // Tax column is the LAST cell (Net | Tax). Some Xero variants put it 3rd.
+  const cells = summary?.Cells ?? [];
+  const taxCell = cells[cells.length - 1];
+  const n = parseFloat(taxCell?.Value ?? '0');
+  return Number.isFinite(n) ? n : 0;
+}
+
+export interface XeroBankTransaction {
+  xeroBankTransactionId: string;
+  xeroAccountId: string | null;
+  date: string;          // ISO date YYYY-MM-DD
+  amount: string;        // signed decimal-on-the-wire (negative = money out)
+  currency: string;
+  description: string | null;
+  vendorName: string | null;
+}
+
+interface XeroBankTransactionsResponse {
+  BankTransactions: Array<{
+    BankTransactionID: string;
+    Type: string;        // RECEIVE / SPEND / RECEIVE-OVERPAYMENT / etc
+    Date?: string;       // /Date(unix)/  format
+    Total?: number;      // gross total
+    SubTotal?: number;
+    CurrencyCode?: string;
+    Reference?: string;
+    BankAccount?: { AccountID: string; Name?: string };
+    Contact?: { Name?: string };
+    LineItems?: Array<{ Description?: string }>;
+  }>;
+}
+
+function parseXeroDate(s?: string): string {
+  if (!s) return new Date().toISOString().slice(0, 10);
+  // /Date(1714003200000+0000)/ → extract ms
+  const m = /\/Date\((-?\d+)/.exec(s);
+  if (m) return new Date(Number(m[1])).toISOString().slice(0, 10);
+  // Fallback: assume already ISO
+  const d = new Date(s);
+  return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : s.slice(0, 10);
+}
+
+/**
+ * Pull bank transactions from Xero for a date range.
+ *
+ * Xero `Type=SPEND` (money out) is what we care about for cost categorisation;
+ * `Type=RECEIVE` is income. We pull both so frontend can filter; amounts are
+ * SIGNED — SPEND becomes negative.
+ *
+ * Pages of 100 by default, returns at most `maxPages * 100`.
+ *
+ * Required scope: accounting.transactions.
+ */
+export async function getBankTransactions(
+  fromDate: string,
+  toDate: string,
+  maxPages = 10,
+): Promise<XeroBankTransaction[]> {
+  const { accessToken, tenantId } = await getValidToken();
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    'xero-tenant-id': tenantId,
+    Accept: 'application/json',
+  };
+
+  const where = `Date >= DateTime(${fromDate.replace(/-/g, ', ')}) && Date <= DateTime(${toDate.replace(/-/g, ', ')})`;
+  const out: XeroBankTransaction[] = [];
+
+  for (let page = 1; page <= maxPages; page++) {
+    const url = `${API_HOST}/api.xro/2.0/BankTransactions?where=${encodeURIComponent(where)}&order=Date%20DESC&page=${page}`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      const body = await res.text();
+      logger.error({ status: res.status, body, page }, 'Xero /BankTransactions failed');
+      throw new Error(`Xero BankTransactions failed: ${res.status}`);
+    }
+    const data = (await res.json()) as XeroBankTransactionsResponse;
+    const txs = data.BankTransactions ?? [];
+    if (txs.length === 0) break;
+
+    for (const t of txs) {
+      const isSpend = t.Type?.startsWith('SPEND');
+      const total = Number(t.Total ?? 0);
+      const signed = isSpend ? -Math.abs(total) : Math.abs(total);
+      out.push({
+        xeroBankTransactionId: t.BankTransactionID,
+        xeroAccountId: t.BankAccount?.AccountID ?? null,
+        date: parseXeroDate(t.Date),
+        amount: signed.toFixed(2),
+        currency: t.CurrencyCode ?? 'GBP',
+        description: t.Reference || t.LineItems?.[0]?.Description || null,
+        vendorName: t.Contact?.Name ?? null,
+      });
+    }
+    if (txs.length < 100) break;
+  }
+  return out;
+}
+
+/**
+ * Net VAT liability over a date range, computed from Xero's TaxSummary report.
+ * `owed = collectedOnSales - paidOnPurchases`.
+ *
+ * Used by the VAT widget to show "VAT owed since end of last quarter".
+ *
+ * Required scope: accounting.reports.read.
+ */
+export async function getVatLiability(fromDate: string, toDate: string): Promise<XeroVatLiability> {
+  const { accessToken, tenantId } = await getValidToken();
+  const res = await fetch(
+    `${API_HOST}/api.xro/2.0/Reports/TaxSummary?fromDate=${fromDate}&toDate=${toDate}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'xero-tenant-id': tenantId,
+        Accept: 'application/json',
+      },
+    },
+  );
+  if (!res.ok) {
+    const body = await res.text();
+    logger.error({ status: res.status, body }, 'Xero /Reports/TaxSummary failed');
+    throw new Error(`Xero TaxSummary failed: ${res.status}`);
+  }
+  const data = (await res.json()) as XeroTaxSummaryResponse;
+  const rows = data.Reports?.[0]?.Rows ?? [];
+
+  const collectedOnSales = sumTaxSection(rows, 'Sales');
+  const paidOnPurchases = sumTaxSection(rows, 'Purchases');
+  const owed = collectedOnSales - paidOnPurchases;
+
+  return {
+    fromDate,
+    toDate,
+    owed: owed.toFixed(2),
+    collectedOnSales: collectedOnSales.toFixed(2),
+    paidOnPurchases: paidOnPurchases.toFixed(2),
+  };
+}

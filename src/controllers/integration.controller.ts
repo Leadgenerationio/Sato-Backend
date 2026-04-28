@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import * as xeroClient from '../integrations/xero/xero-client.js';
+import * as vatService from '../services/vat.service.js';
 import { isLeadByteConfigured } from '../integrations/leadbyte/leadbyte-client.js';
 import { getActiveProvider } from '../integrations/credit-check/index.js';
 import { isResendConfigured } from '../integrations/resend/resend-client.js';
@@ -36,6 +37,35 @@ export async function xeroStatus(_req: Request, res: Response) {
 export async function xeroDisconnect(_req: Request, res: Response) {
   xeroClient.disconnect();
   res.json({ status: 'success', data: { connected: false } });
+}
+
+/**
+ * Net VAT liability since end of last completed UK quarter.
+ * Falls back to { configured:false } when Xero env vars unset.
+ */
+export async function xeroVatLiability(_req: Request, res: Response) {
+  if (!xeroClient.isXeroConfigured()) {
+    res.json({ status: 'success', data: { configured: false } });
+    return;
+  }
+  const fromDate = vatService.vatPeriodFromDate();
+  const toDate = vatService.todayIso();
+  try {
+    const liability = await xeroClient.getVatLiability(fromDate, toDate);
+    res.json({ status: 'success', data: { configured: true, ...liability, currency: 'GBP' } });
+  } catch (err) {
+    logger.warn({ err }, 'Xero VAT liability fetch failed');
+    res.json({
+      status: 'success',
+      data: {
+        configured: true,
+        fromDate,
+        toDate,
+        currency: 'GBP',
+        error: err instanceof Error ? err.message : 'fetch failed',
+      },
+    });
+  }
 }
 
 /**
