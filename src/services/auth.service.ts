@@ -88,13 +88,13 @@ export async function loginUser(
     throw new UnauthorizedError('Invalid email or password');
   }
 
-  if (!user.isActive) {
-    throw new UnauthorizedError('Account is disabled');
-  }
-
   const valid = await bcryptjs.compare(password, user.passwordHash);
   if (!valid) {
     throw new UnauthorizedError('Invalid email or password');
+  }
+
+  if (!user.isActive) {
+    throw new UnauthorizedError('Account is disabled');
   }
 
   const tokenPayload: AuthPayload = {
