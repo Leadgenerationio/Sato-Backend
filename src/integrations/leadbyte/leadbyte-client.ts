@@ -290,9 +290,20 @@ const MOCK_SUPPLIERS: LeadByteSupplier[] = [
 // ─── Normalisers ────────────────────────────────────────────────────────────
 
 function normaliseCampaign(raw: LeadByteCampaignRaw): LeadByteCampaign {
-  const active = raw.active === 'Yes' || raw.active === true;
-  const archived = raw.archived === 'Yes' || raw.archived === true;
-  const status: LeadByteCampaign['status'] = archived ? 'inactive' : active ? 'active' : 'paused';
+  // LeadByte returns active/archived as 'Yes'|'No' in docs but the live API
+  // has been observed sending '1'|'0', booleans, or omitting the field entirely
+  // when a campaign is live. Treat anything explicitly truthy as yes, anything
+  // explicitly falsy as no, and default to active (live) when unset — campaigns
+  // returned by /campaigns are running unless flagged otherwise.
+  const isYes = (v: unknown): boolean =>
+    v === 'Yes' || v === 'yes' || v === true || v === 1 || v === '1';
+  const isNo = (v: unknown): boolean =>
+    v === 'No' || v === 'no' || v === false || v === 0 || v === '0';
+  const archived = isYes(raw.archived);
+  let status: LeadByteCampaign['status'];
+  if (archived) status = 'inactive';
+  else if (isNo(raw.active)) status = 'paused';
+  else status = 'active';
   return {
     id: String(raw.id),
     name: raw.name,

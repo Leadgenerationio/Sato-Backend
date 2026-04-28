@@ -29,8 +29,11 @@ export async function campaigns(req: Request, res: Response, next: NextFunction)
 
 export async function leads(req: Request, res: Response, next: NextFunction) {
   try {
-    const leads = await portalService.getLeads(req.user!);
-    res.json({ status: 'success', data: { leads } });
+    const from = typeof req.query.from === 'string' ? req.query.from : undefined;
+    const to = typeof req.query.to === 'string' ? req.query.to : undefined;
+    const range = portalService.resolveLeadsRange({ from, to });
+    const leads = await portalService.getLeads(req.user!, range);
+    res.json({ status: 'success', data: { leads, range } });
   } catch (err) {
     handlePortalError(err, res, next);
   }

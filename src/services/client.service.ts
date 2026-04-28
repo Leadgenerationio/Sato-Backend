@@ -6,6 +6,7 @@ import { creditChecks } from '../db/schema/credit-checks.js';
 import { invoices } from '../db/schema/invoices.js';
 import * as creditCheck from '../integrations/credit-check/index.js';
 import { scoreToRiskRating } from '../integrations/credit-check/types.js';
+import { logger } from '../utils/logger.js';
 import type { AuthPayload } from '../types/index.js';
 
 export interface ClientSummary {
@@ -195,6 +196,22 @@ export async function createClient(data: Partial<ClientDetail>, requester: AuthP
       xeroContactId: data.xeroContactId,
     })
     .returning();
+
+  // Fire-and-forget credit check. Sam wants this auto-triggered on buyer
+  // creation so staff don't forget to run it manually. We don't await — the
+  // create response should not be blocked on the Endole/Creditsafe call,
+  // which can take 2-5s. The detail page will show the score on next refresh.
+  if (row.companyNumber) {
+    runCreditCheck(row.id, requester)
+      .then((result) => {
+        if (result) {
+          logger.info({ clientId: row.id, score: result.creditScore }, 'Auto credit check completed');
+        }
+      })
+      .catch((err) => {
+        logger.error({ err, clientId: row.id }, 'Auto credit check failed on client create');
+      });
+  }
 
   return toDetail(row, 0, 0);
 }

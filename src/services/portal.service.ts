@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { clients } from '../db/schema/clients.js';
 import { campaigns } from '../db/schema/campaigns.js';
@@ -238,9 +238,38 @@ export async function getCampaigns(requester: AuthPayload): Promise<PortalCampai
   }));
 }
 
-export async function getLeads(requester: AuthPayload): Promise<PortalLeadDay[]> {
+export interface GetLeadsRange {
+  /** ISO date `YYYY-MM-DD`. Defaults to 30 days ago. */
+  from?: string;
+  /** ISO date `YYYY-MM-DD`. Defaults to today. */
+  to?: string;
+}
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function todayIso(): string {
+  return new Date().toISOString().split('T')[0];
+}
+
+function thirtyDaysAgoIso(): string {
+  return new Date(Date.now() - 30 * 86_400_000).toISOString().split('T')[0];
+}
+
+/**
+ * Resolve the `from`/`to` window. Invalid or missing inputs fall back to the
+ * default 30-day window so a client typo can never blank out the dashboard.
+ * `to` is end-inclusive (we use `lte`).
+ */
+export function resolveLeadsRange(input?: GetLeadsRange): { from: string; to: string } {
+  const from = input?.from && ISO_DATE_RE.test(input.from) ? input.from : thirtyDaysAgoIso();
+  const to = input?.to && ISO_DATE_RE.test(input.to) ? input.to : todayIso();
+  // Guard against from > to (swap rather than 500).
+  return from <= to ? { from, to } : { from: to, to: from };
+}
+
+export async function getLeads(requester: AuthPayload, range?: GetLeadsRange): Promise<PortalLeadDay[]> {
   const clientId = requireClientId(requester);
-  const since = new Date(Date.now() - 30 * 86_400_000).toISOString().split('T')[0];
+  const { from, to } = resolveLeadsRange(range);
 
   const rows = await db
     .select({
@@ -252,7 +281,13 @@ export async function getLeads(requester: AuthPayload): Promise<PortalLeadDay[]>
     })
     .from(leadDeliveries)
     .innerJoin(campaigns, eq(campaigns.id, leadDeliveries.campaignId))
-    .where(and(eq(leadDeliveries.clientId, clientId), gte(leadDeliveries.deliveryDate, since)))
+    .where(
+      and(
+        eq(leadDeliveries.clientId, clientId),
+        gte(leadDeliveries.deliveryDate, from),
+        lte(leadDeliveries.deliveryDate, to),
+      ),
+    )
     .orderBy(desc(leadDeliveries.deliveryDate));
 
   return rows.map((r) => ({

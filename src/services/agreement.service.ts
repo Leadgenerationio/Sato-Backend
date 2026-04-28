@@ -4,9 +4,46 @@ import { agreements } from '../db/schema/agreements.js';
 import { clients } from '../db/schema/clients.js';
 import { createEnvelope, downloadSignedPdf, getEnvelopeStatus } from '../integrations/signnow/signnow-client.js';
 import { uploadFile, downloadFile } from '../integrations/r2/r2-client.js';
+import { createContact as createXeroContact, isXeroConfigured } from '../integrations/xero/xero-client.js';
 import { notify } from './notification.service.js';
 import { logger } from '../utils/logger.js';
 import type { EnvelopeStatus, SignNowWebhookEvent } from '../integrations/signnow/signnow-types.js';
+
+/**
+ * When an agreement is signed, ensure the client has a Xero contact so they're
+ * ready for invoicing without manual data entry. Idempotent — skips if the
+ * client already has a `xeroContactId`. Fire-and-forget — never blocks the
+ * signing flow.
+ */
+async function ensureXeroContact(clientId: string): Promise<void> {
+  if (!isXeroConfigured()) {
+    logger.info({ clientId }, 'Skipping Xero contact create — not configured');
+    return;
+  }
+  const [client] = await db.select().from(clients).where(eq(clients.id, clientId));
+  if (!client) return;
+  if (client.xeroContactId) {
+    logger.info({ clientId, xeroContactId: client.xeroContactId }, 'Client already linked to Xero — skipping');
+    return;
+  }
+
+  try {
+    const contact = await createXeroContact({
+      name: client.companyName,
+      contactName: client.contactName,
+      email: client.contactEmail,
+      phone: client.contactPhone,
+      address: client.address,
+    });
+    await db
+      .update(clients)
+      .set({ xeroContactId: contact.contactId, updatedAt: new Date() })
+      .where(eq(clients.id, clientId));
+    logger.info({ clientId, xeroContactId: contact.contactId }, 'Xero contact auto-created on agreement signed');
+  } catch (err) {
+    logger.error({ err, clientId }, 'Auto Xero contact creation failed — admin can create manually');
+  }
+}
 
 export interface SendAgreementInput {
   clientId: string;
@@ -139,6 +176,12 @@ export async function handleSignNowWebhook(event: SignNowWebhookEvent) {
         emailTo: client.contactEmail ?? undefined,
       });
     }
+
+    // Fire-and-forget: provision a Xero contact for this client so finance can
+    // invoice them immediately. Sam asked for this in 2026-04-22 review.
+    ensureXeroContact(existing.clientId).catch((err) => {
+      logger.error({ err, clientId: existing.clientId }, 'ensureXeroContact failed (background)');
+    });
   }
 
   await db.update(agreements).set(patch).where(eq(agreements.id, existing.id));
@@ -176,5 +219,15 @@ export async function refreshAgreementStatus(id: string) {
   }
 
   const [updated] = await db.update(agreements).set(patch).where(eq(agreements.id, id)).returning();
+
+  // If we just transitioned to signed/completed via the polling path (not
+  // webhook), still provision the Xero contact. Idempotent — no-op if already
+  // linked.
+  if ((current === 'completed' || current === 'signed') && !row.signedAt) {
+    ensureXeroContact(row.clientId).catch((err) => {
+      logger.error({ err, clientId: row.clientId }, 'ensureXeroContact failed (refresh path)');
+    });
+  }
+
   return updated;
 }

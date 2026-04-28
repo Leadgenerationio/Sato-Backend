@@ -58,6 +58,37 @@ describe('Portal API', () => {
     const res = await request(app).get('/api/v1/portal/leads').set('Authorization', `Bearer ${clientToken}`);
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.data.leads)).toBe(true);
+    expect(res.body.data.range).toBeDefined();
+    expect(res.body.data.range.from).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(res.body.data.range.to).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('portal leads accepts custom from/to range and echoes it back', async () => {
+    const res = await request(app)
+      .get('/api/v1/portal/leads?from=2026-01-01&to=2026-03-30')
+      .set('Authorization', `Bearer ${clientToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.range.from).toBe('2026-01-01');
+    expect(res.body.data.range.to).toBe('2026-03-30');
+  });
+
+  it('portal leads ignores malformed dates and falls back to default window', async () => {
+    const res = await request(app)
+      .get('/api/v1/portal/leads?from=garbage&to=also-garbage')
+      .set('Authorization', `Bearer ${clientToken}`);
+    expect(res.status).toBe(200);
+    // Default window: 30 days ago → today. Range still well-formed.
+    expect(res.body.data.range.from).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(res.body.data.range.to).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('portal leads swaps reversed from>to so the response is never empty due to typo', async () => {
+    const res = await request(app)
+      .get('/api/v1/portal/leads?from=2026-03-30&to=2026-01-01')
+      .set('Authorization', `Bearer ${clientToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.range.from).toBe('2026-01-01');
+    expect(res.body.data.range.to).toBe('2026-03-30');
   });
 
   it('client can view portal invoices', async () => {

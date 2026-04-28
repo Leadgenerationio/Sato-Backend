@@ -171,6 +171,85 @@ export function disconnect(): void {
   logger.info('Xero cache cleared');
 }
 
+export interface CreateContactInput {
+  /** Required by Xero. Falls back to companyName if not given. */
+  name: string;
+  /** From client.contactName — split on first space for First/Last. */
+  contactName?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  address?: string | null;
+}
+
+export interface XeroContact {
+  contactId: string;
+  name: string;
+}
+
+interface XeroContactsResponse {
+  Contacts: Array<{ ContactID: string; Name: string }>;
+}
+
+/**
+ * Create or upsert a Xero Contact for a Sato client. Uses Xero's Contacts API
+ * (POST /api.xro/2.0/Contacts). Triggered automatically when an agreement is
+ * signed so that the client is ready for invoicing without manual data entry.
+ *
+ * Required scope: accounting.contacts (already in SCOPES).
+ */
+export async function createContact(input: CreateContactInput): Promise<XeroContact> {
+  const { accessToken, tenantId } = await getValidToken();
+
+  // Split a single contactName into FirstName / LastName for Xero.
+  let firstName: string | undefined;
+  let lastName: string | undefined;
+  if (input.contactName) {
+    const trimmed = input.contactName.trim();
+    const spaceIdx = trimmed.indexOf(' ');
+    if (spaceIdx >= 0) {
+      firstName = trimmed.slice(0, spaceIdx);
+      lastName = trimmed.slice(spaceIdx + 1);
+    } else {
+      firstName = trimmed;
+    }
+  }
+
+  const body: Record<string, unknown> = { Name: input.name };
+  if (firstName) body.FirstName = firstName;
+  if (lastName) body.LastName = lastName;
+  if (input.email) body.EmailAddress = input.email;
+  if (input.phone) {
+    body.Phones = [{ PhoneType: 'DEFAULT', PhoneNumber: input.phone }];
+  }
+  if (input.address) {
+    body.Addresses = [{ AddressType: 'STREET', AddressLine1: input.address }];
+  }
+
+  const res = await fetch(`${API_HOST}/api.xro/2.0/Contacts`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'xero-tenant-id': tenantId,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    logger.error({ status: res.status, body: errBody, name: input.name }, 'Xero /Contacts POST failed');
+    throw new Error(`Xero createContact failed: ${res.status}`);
+  }
+
+  const data = (await res.json()) as XeroContactsResponse;
+  const created = data.Contacts?.[0];
+  if (!created) {
+    throw new Error('Xero createContact returned no contact');
+  }
+  return { contactId: created.ContactID, name: created.Name };
+}
+
 export interface XeroBankAccount {
   accountId: string;
   name: string;

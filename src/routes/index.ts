@@ -19,6 +19,7 @@ import { adSpendRoutes } from './ad-spend.routes.js';
 import { uploadRoutes } from './upload.routes.js';
 import { creativeRoutes } from './creative.routes.js';
 import { bankFeedRoutes } from './bank-feed.routes.js';
+import { dashboardRoutes } from './dashboard.routes.js';
 import { healthRoutes } from './health.routes.js';
 export const router: RouterType = Router();
 
@@ -45,3 +46,4 @@ router.use('/ad-spend', adSpendRoutes);
 router.use('/uploads', uploadRoutes);
 router.use('/', creativeRoutes);
 router.use('/finance/bank-feed', bankFeedRoutes);
+router.use('/dashboard', dashboardRoutes);

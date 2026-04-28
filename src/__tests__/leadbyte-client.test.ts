@@ -468,6 +468,59 @@ describe('LeadByte client — API calls (fetch mocked)', () => {
     expect(campaigns[0].currency).toBe('GBP');
     expect(campaigns[1].currency).toBe('EUR');
   });
+
+  // Sam reported "Solar Panels" + "Last Empower Attorney" not showing under
+  // the Active filter even though they were live in LeadByte. Root cause:
+  // the live API returns `active` as '1'/0/etc or omits it entirely, but the
+  // old normaliser only matched 'Yes'|true → defaulted everything else to 'paused'.
+  describe('normaliseCampaign — active/archived flag tolerance', () => {
+    it('marks active when LeadByte returns active="1"', async () => {
+      fetchMock.mockResolvedValue(
+        mockJsonResponse([{ id: 1, name: 'Solar Panels UK', active: '1', currency: 'GBP' }]),
+      );
+      const [c] = await lb.getCampaigns();
+      expect(c.status).toBe('active');
+    });
+
+    it('marks active when LeadByte returns active=1 (number)', async () => {
+      fetchMock.mockResolvedValue(
+        mockJsonResponse([{ id: 1, name: 'Last Empower Attorney', active: 1, currency: 'GBP' }]),
+      );
+      const [c] = await lb.getCampaigns();
+      expect(c.status).toBe('active');
+    });
+
+    it('defaults to active when active flag is absent (live campaign)', async () => {
+      fetchMock.mockResolvedValue(
+        mockJsonResponse([{ id: 1, name: 'Mortgage Leads', currency: 'GBP' }]),
+      );
+      const [c] = await lb.getCampaigns();
+      expect(c.status).toBe('active');
+    });
+
+    it('marks paused when active is explicitly No/false/0', async () => {
+      fetchMock.mockResolvedValue(
+        mockJsonResponse([
+          { id: 1, name: 'A', active: 'No', currency: 'GBP' },
+          { id: 2, name: 'B', active: false, currency: 'GBP' },
+          { id: 3, name: 'C', active: '0', currency: 'GBP' },
+        ]),
+      );
+      const campaigns = await lb.getCampaigns();
+      expect(campaigns.map((c) => c.status)).toEqual(['paused', 'paused', 'paused']);
+    });
+
+    it('marks inactive when archived is truthy regardless of active flag', async () => {
+      fetchMock.mockResolvedValue(
+        mockJsonResponse([
+          { id: 1, name: 'A', active: 'Yes', archived: 'Yes', currency: 'GBP' },
+          { id: 2, name: 'B', active: '1', archived: '1', currency: 'GBP' },
+        ]),
+      );
+      const campaigns = await lb.getCampaigns();
+      expect(campaigns.map((c) => c.status)).toEqual(['inactive', 'inactive']);
+    });
+  });
 });
 
 describe('LeadByte client — syncAll()', () => {

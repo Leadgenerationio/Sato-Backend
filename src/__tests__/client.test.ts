@@ -86,6 +86,57 @@ describe('Client API', () => {
       expect(res.body.data.client.companyName).toBe('Test Corp');
       expect(res.body.data.client.status).toBe('prospect');
     });
+
+    // Sam asked for credit checks to auto-trigger on buyer creation so staff
+    // never forget. Fire-and-forget — the create response returns immediately,
+    // the score lands within a few seconds via the credit-checks table.
+    it('auto-triggers a credit check when companyNumber is provided', async () => {
+      const createRes = await request(app)
+        .post('/api/v1/clients')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({
+          companyName: `AutoCheck Co ${Date.now()}`,
+          companyNumber: '00445790',
+          contactName: 'Auto Check',
+          contactEmail: 'auto@check.co',
+          currency: 'GBP',
+        });
+      expect(createRes.status).toBe(201);
+      const newId = createRes.body.data.client.id;
+
+      // Poll up to 5s for the auto-triggered credit check to land.
+      let history: unknown[] = [];
+      for (let i = 0; i < 25; i++) {
+        const res = await request(app)
+          .get(`/api/v1/clients/${newId}/credit-history`)
+          .set('Authorization', `Bearer ${ownerToken}`);
+        history = res.body.data.history;
+        if (history.length > 0) break;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      expect(history.length).toBeGreaterThan(0);
+    });
+
+    it('does NOT auto-trigger a credit check when companyNumber is missing', async () => {
+      const createRes = await request(app)
+        .post('/api/v1/clients')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({
+          companyName: `NoNumber Co ${Date.now()}`,
+          contactName: 'No Number',
+          contactEmail: 'no@number.co',
+          currency: 'GBP',
+        });
+      expect(createRes.status).toBe(201);
+      const newId = createRes.body.data.client.id;
+
+      // Wait briefly to confirm nothing fires in background.
+      await new Promise((r) => setTimeout(r, 800));
+      const res = await request(app)
+        .get(`/api/v1/clients/${newId}/credit-history`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.body.data.history).toHaveLength(0);
+    });
   });
 
   describe('PUT /api/v1/clients/:id', () => {
