@@ -38,6 +38,24 @@ export async function xeroDisconnect(_req: Request, res: Response) {
   res.json({ status: 'success', data: { connected: false } });
 }
 
+/**
+ * Live bank-account balances from Xero. Returns empty array if Xero isn't
+ * configured or fails — frontend falls back to a "not connected" state.
+ */
+export async function xeroBankAccounts(_req: Request, res: Response) {
+  if (!xeroClient.isXeroConfigured()) {
+    res.json({ status: 'success', data: { configured: false, accounts: [] } });
+    return;
+  }
+  try {
+    const accounts = await xeroClient.getBankBalances();
+    res.json({ status: 'success', data: { configured: true, accounts } });
+  } catch (err) {
+    logger.warn({ err }, 'Xero bank-balances fetch failed');
+    res.json({ status: 'success', data: { configured: true, accounts: [], error: err instanceof Error ? err.message : 'fetch failed' } });
+  }
+}
+
 // ─── LeadByte ───
 
 export async function leadbyteStatus(_req: Request, res: Response) {

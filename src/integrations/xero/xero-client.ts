@@ -17,7 +17,7 @@ import { logger } from '../../utils/logger.js';
 const IDENTITY_HOST = 'https://identity.xero.com';
 const API_HOST = 'https://api.xero.com';
 
-const SCOPES = 'accounting.transactions accounting.contacts';
+const SCOPES = 'accounting.transactions accounting.contacts accounting.reports.read accounting.settings.read';
 
 interface XeroCache {
   accessToken: string;
@@ -169,4 +169,107 @@ export async function getStatus(): Promise<XeroStatus> {
 export function disconnect(): void {
   cache = null;
   logger.info('Xero cache cleared');
+}
+
+export interface XeroBankAccount {
+  accountId: string;
+  name: string;
+  code: string | null;
+  currency: string;
+  balance: string; // decimal-on-the-wire
+}
+
+interface XeroAccountsResponse {
+  Accounts: Array<{
+    AccountID: string;
+    Name: string;
+    Code?: string;
+    CurrencyCode?: string;
+    Type: string;
+    Status: string;
+  }>;
+}
+
+interface XeroBankSummaryRow {
+  RowType: 'Header' | 'Section' | 'Row' | 'SummaryRow';
+  Title?: string;
+  Cells?: Array<{ Value: string; Attributes?: Array<{ Value: string; Id: string }> }>;
+  Rows?: XeroBankSummaryRow[];
+}
+
+interface XeroBankSummaryResponse {
+  Reports: Array<{
+    ReportName: string;
+    Rows: XeroBankSummaryRow[];
+  }>;
+}
+
+/**
+ * Fetch live bank-account balances from Xero.
+ *
+ * Combines:
+ *   1. /Accounts?where=Type=="BANK"  → list of bank accounts with currency + name
+ *   2. /Reports/BankSummary           → each account's closing balance (today)
+ *
+ * Required Xero scopes: accounting.settings.read + accounting.reports.read.
+ * If Sam's Custom Connection wasn't configured with those scopes, this throws
+ * a 403 — caller should fall back gracefully.
+ */
+export async function getBankBalances(): Promise<XeroBankAccount[]> {
+  const { accessToken, tenantId } = await getValidToken();
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    'xero-tenant-id': tenantId,
+    Accept: 'application/json',
+  };
+
+  const accountsRes = await fetch(
+    `${API_HOST}/api.xro/2.0/Accounts?where=${encodeURIComponent('Type=="BANK"&&Status=="ACTIVE"')}`,
+    { headers },
+  );
+  if (!accountsRes.ok) {
+    const body = await accountsRes.text();
+    logger.error({ status: accountsRes.status, body }, 'Xero /Accounts failed');
+    throw new Error(`Xero accounts fetch failed: ${accountsRes.status}`);
+  }
+  const accountsData = (await accountsRes.json()) as XeroAccountsResponse;
+  const bankAccounts = accountsData.Accounts ?? [];
+
+  // Bank summary as of today
+  const today = new Date().toISOString().slice(0, 10);
+  const summaryRes = await fetch(
+    `${API_HOST}/api.xro/2.0/Reports/BankSummary?date=${today}`,
+    { headers },
+  );
+  const balanceByAccountId = new Map<string, string>();
+  if (summaryRes.ok) {
+    const summaryData = (await summaryRes.json()) as XeroBankSummaryResponse;
+    const rows = summaryData.Reports?.[0]?.Rows ?? [];
+    // BankSummary structure: a Section row whose nested Rows contain one Row per bank account.
+    // Each Row has Cells: [name, opening, money in, money out, closing].
+    // The first cell carries the AccountID via Attributes.
+    for (const section of rows) {
+      if (section.RowType === 'Section' && section.Rows) {
+        for (const row of section.Rows) {
+          if (row.RowType !== 'Row' || !row.Cells) continue;
+          const idAttr = row.Cells[0]?.Attributes?.find((a) => a.Id === 'accountID');
+          const closing = row.Cells[row.Cells.length - 1]?.Value ?? '0';
+          if (idAttr?.Value) balanceByAccountId.set(idAttr.Value, closing);
+        }
+      }
+    }
+  } else {
+    // BankSummary failed (e.g. missing reports.read scope) — return accounts with 0 balance
+    // rather than blowing up. Caller can show "balance unavailable" UI.
+    const body = await summaryRes.text();
+    logger.warn({ status: summaryRes.status, body }, 'Xero /Reports/BankSummary failed — returning zero balances');
+  }
+
+  return bankAccounts.map((a) => ({
+    accountId: a.AccountID,
+    name: a.Name,
+    code: a.Code ?? null,
+    currency: a.CurrencyCode ?? 'GBP',
+    balance: balanceByAccountId.get(a.AccountID) ?? '0',
+  }));
 }

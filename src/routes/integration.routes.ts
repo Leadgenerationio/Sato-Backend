@@ -11,6 +11,7 @@ integrationRoutes.use(requireRole('owner'));
 // Xero — Custom Connection (server-to-server). No OAuth consent flow needed.
 integrationRoutes.get('/xero/status', integrationController.xeroStatus);
 integrationRoutes.post('/xero/disconnect', integrationController.xeroDisconnect);
+integrationRoutes.get('/xero/bank-accounts', integrationController.xeroBankAccounts);
 
 // LeadByte
 integrationRoutes.get('/leadbyte/status', integrationController.leadbyteStatus);
