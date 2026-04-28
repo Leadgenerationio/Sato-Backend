@@ -42,9 +42,9 @@ export async function me(req: Request, res: Response) {
   });
 }
 
-export function updateProfile(req: Request, res: Response) {
+export async function updateProfile(req: Request, res: Response) {
   const { name } = req.body;
-  const user = userService.updateOwnProfile(req.user!.userId, name);
+  const user = await userService.updateOwnProfile(req.user!.userId, name);
 
   res.json({
     status: 'success',

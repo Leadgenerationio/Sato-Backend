@@ -121,7 +121,8 @@ describe('Invoice API', () => {
       });
       expect(res.status).toBe(201);
       expect(res.body.data.invoice.invoiceNumber).toBeDefined();
-      expect(res.body.data.invoice.total).toBeGreaterThan(0);
+      // Money fields are returned as strings (decimal-on-the-wire). Parse for comparison.
+      expect(parseFloat(res.body.data.invoice.total)).toBeGreaterThan(0);
       expect(res.body.data.invoice.status).toBe('draft');
     });
   });

@@ -43,9 +43,36 @@ export async function getOverdue(req: Request, res: Response) {
   res.json({ status: 'success', data: { invoices } });
 }
 
+export const createInvoiceSchema = z.object({
+  body: z.object({
+    clientId: z.string().uuid(),
+    currency: z.string().length(3),
+    lineItems: z
+      .array(
+        z.object({
+          description: z.string().min(1),
+          quantity: z.number().positive(),
+          unitPrice: z.number().nonnegative(),
+        }),
+      )
+      .min(1),
+    addVat: z.boolean(),
+  }),
+});
+
 export async function createInvoice(req: Request, res: Response) {
   const { clientId, currency, lineItems, addVat } = req.body;
-  const invoice = await invoiceService.createInvoice({ clientId, currency, lineItems, addVat }, req.user!);
+  // Compute amount per line on the server to avoid trusting client-side math.
+  const itemsWithAmount = (lineItems as Array<{ description: string; quantity: number; unitPrice: number }>).map(
+    (li) => ({
+      ...li,
+      amount: Math.round(li.quantity * li.unitPrice * 100) / 100,
+    }),
+  );
+  const invoice = await invoiceService.createInvoice(
+    { clientId, currency, lineItems: itemsWithAmount, addVat },
+    req.user!,
+  );
   res.status(201).json({ status: 'success', data: { invoice } });
 }
 

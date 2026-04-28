@@ -26,6 +26,9 @@ export const env = {
   PORT: parseInt(v('PORT', '3001'), 10),
   NODE_ENV,
   FRONTEND_URL: v('FRONTEND_URL', 'http://localhost:5173'),
+  // Comma-separated allow-list of allowed CORS origins (production). When
+  // unset in dev a fixed localhost allow-list is used; required in prod.
+  CORS_ORIGINS: v('CORS_ORIGINS'),
   JWT_SECRET,
   JWT_REFRESH_SECRET,
 

@@ -20,9 +20,12 @@ export interface InvoiceSummary {
   clientName: string;
   status: string;
   currency: string;
-  subtotal: number;
-  vatAmount: number;
-  total: number;
+  // Money fields are returned as strings (matching the DB decimal type) to
+  // avoid float precision loss on the wire. Frontend can parseFloat() if it
+  // needs a number for display math.
+  subtotal: string;
+  vatAmount: string;
+  total: string;
   dueDate: string;
   paidDate: string | null;
   daysOverdue: number;
@@ -59,9 +62,9 @@ function invoiceToSummary(row: InvoiceRow, client: ClientRow): InvoiceSummary {
     clientName: client.companyName,
     status: row.status ?? 'draft',
     currency: row.currency ?? 'GBP',
-    subtotal: Number(row.subtotal ?? 0),
-    vatAmount: Number(row.vatAmount ?? 0),
-    total: Number(row.total ?? 0),
+    subtotal: String(row.subtotal ?? '0'),
+    vatAmount: String(row.vatAmount ?? '0'),
+    total: String(row.total ?? '0'),
     dueDate: (row.dueDate ?? new Date()).toISOString(),
     paidDate: row.paidDate ? row.paidDate.toISOString() : null,
     daysOverdue: row.daysOverdue ?? 0,
@@ -152,23 +155,30 @@ export async function createInvoice(
 
   // Generate a simple invoice number. For prod, Xero will assign its own
   // number when pushed; this is just our local reference.
-  const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(invoices);
-  const invoiceNumber = `INV-${1000 + (count ?? 0) + 1}`;
+  //
+  // Wrap count + insert in a transaction so two concurrent createInvoice
+  // calls can't both read the same count and produce duplicate invoice
+  // numbers.
+  const row = await db.transaction(async (tx) => {
+    const [{ count }] = await tx.select({ count: sql<number>`count(*)::int` }).from(invoices);
+    const invoiceNumber = `INV-${1000 + (count ?? 0) + 1}`;
 
-  const [row] = await db
-    .insert(invoices)
-    .values({
-      clientId: data.clientId,
-      invoiceNumber,
-      status: 'draft',
-      currency: data.currency,
-      subtotal: String(subtotal),
-      vatAmount: String(vatAmount),
-      total: String(total),
-      dueDate: new Date(Date.now() + 30 * 86_400_000),
-      lineItems: data.lineItems,
-    })
-    .returning();
+    const [inserted] = await tx
+      .insert(invoices)
+      .values({
+        clientId: data.clientId,
+        invoiceNumber,
+        status: 'draft',
+        currency: data.currency,
+        subtotal: String(subtotal),
+        vatAmount: String(vatAmount),
+        total: String(total),
+        dueDate: new Date(Date.now() + 30 * 86_400_000),
+        lineItems: data.lineItems,
+      })
+      .returning();
+    return inserted;
+  });
 
   return invoiceToDetail(row, client);
 }

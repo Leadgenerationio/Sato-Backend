@@ -1,14 +1,24 @@
 import { Router, type Router as RouterType } from 'express';
+import { z } from 'zod';
 import { authMiddleware } from '../middleware/auth.middleware.js';
 import { requireRole } from '../middleware/rbac.middleware.js';
+import { validate } from '../middleware/validate.middleware.js';
+import { paginationQuerySchema } from '../types/index.js';
 import * as clientController from '../controllers/client.controller.js';
 
 export const clientRoutes: RouterType = Router();
 
+const listClientsQuerySchema = z.object({
+  query: paginationQuerySchema.extend({
+    status: z.string().optional(),
+    search: z.string().optional(),
+  }),
+});
+
 clientRoutes.use(authMiddleware);
 clientRoutes.use(requireRole('owner', 'finance_admin', 'ops_manager'));
 
-clientRoutes.get('/', clientController.listClients);
+clientRoutes.get('/', validate(listClientsQuerySchema), clientController.listClients);
 clientRoutes.get('/credit-alerts', clientController.getCreditAlerts);
 clientRoutes.get('/:id', clientController.getClient);
 clientRoutes.post('/', clientController.createClient);
