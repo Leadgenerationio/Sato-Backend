@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
 import { findUserByEmail, findUserById, addUser, getNextId } from '../data/users.js';
 import { UnauthorizedError, ValidationError, NotFoundError } from '../utils/errors.js';
+import { logger } from '../utils/logger.js';
 import type { AuthPayload, AuthTokens, UserResponse, UserRole } from '../types/index.js';
 
 const SALT_ROUNDS = 12;
@@ -18,9 +19,12 @@ export function generateTokens(payload: AuthPayload): AuthTokens {
 export function verifyRefreshToken(token: string): AuthPayload {
   try {
     const decoded = jwt.verify(token, env.JWT_REFRESH_SECRET) as AuthPayload & { iat?: number; exp?: number };
-    const { iat, exp, ...payload } = decoded as any;
-    return payload as AuthPayload;
-  } catch {
+    // Strip JWT-managed claims (iat, exp) so the payload is a clean AuthPayload
+    // when re-signed for a new access token.
+    const { iat: _iat, exp: _exp, ...payload } = decoded;
+    return payload;
+  } catch (err) {
+    logger.warn({ err }, 'Refresh token verification failed');
     throw new UnauthorizedError('Invalid refresh token');
   }
 }

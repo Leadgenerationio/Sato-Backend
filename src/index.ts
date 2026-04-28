@@ -15,24 +15,36 @@ const app: Express = express();
 // and express-rate-limit doesn't throw ERR_ERL_UNEXPECTED_X_FORWARDED_FOR.
 app.set('trust proxy', 1);
 
-// Security
-const ALLOWED_ORIGINS = (env.FRONTEND_URL || '')
+// Security — CORS allow-list.
+//
+// Dev: a fixed localhost allow-list (no `origin: true` — even in dev we don't
+// want every site reading the API). Prod: explicit CORS_ORIGINS env var
+// (falls back to FRONTEND_URL for back-compat) — fail at startup if neither
+// is set.
+const DEV_ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://127.0.0.1:5173',
+];
+const configuredOrigins = (env.CORS_ORIGINS || env.FRONTEND_URL || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+if (env.NODE_ENV === 'production' && configuredOrigins.length === 0) {
+  throw new Error('CORS_ORIGINS must be set in production (comma-separated allow-list)');
+}
+const ALLOWED_ORIGINS = env.NODE_ENV === 'development' ? DEV_ALLOWED_ORIGINS : configuredOrigins;
 console.log('CORS allow-list:', ALLOWED_ORIGINS);
 app.use(
   cors({
-    origin:
-      env.NODE_ENV === 'development'
-        ? true
-        : (origin, cb) => {
-            if (!origin || ALLOWED_ORIGINS.includes(origin)) {
-              cb(null, true);
-            } else {
-              cb(new Error(`CORS: origin not allowed: ${origin}`));
-            }
-          },
+    origin: (origin, cb) => {
+      // Server-to-server / curl / health checks have no Origin header — allow.
+      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+        cb(null, true);
+      } else {
+        cb(new Error(`CORS: origin not allowed: ${origin}`));
+      }
+    },
     credentials: true,
   }),
 );

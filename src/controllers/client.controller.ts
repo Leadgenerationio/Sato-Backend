@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import * as clientService from '../services/client.service.js';
+import { NotFoundError } from '../utils/errors.js';
 
 export async function listClients(req: Request, res: Response) {
   let clients = await clientService.listClients(req.user!);
@@ -49,7 +50,16 @@ export async function updateClient(req: Request, res: Response) {
 }
 
 export async function getCreditHistory(req: Request, res: Response) {
-  const history = await clientService.getCreditHistory(req.params.id as string, req.user!);
+  const clientId = req.params.id as string;
+  // Confirm the client belongs to the caller's business before exposing
+  // credit history. getClient() already scopes by businessId, so a null
+  // result means the row is either missing or out-of-scope — both should
+  // be hidden from the caller.
+  const client = await clientService.getClient(clientId, req.user!);
+  if (!client) {
+    throw new NotFoundError('Client');
+  }
+  const history = await clientService.getCreditHistory(clientId, req.user!);
   res.json({ status: 'success', data: { history } });
 }
 

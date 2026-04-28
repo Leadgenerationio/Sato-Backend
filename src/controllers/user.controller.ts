@@ -1,8 +1,8 @@
 import { Request, Response } from 'express';
 import * as userService from '../services/user.service.js';
 
-export function getUsers(req: Request, res: Response) {
-  const users = userService.listUsers(req.user!);
+export async function getUsers(req: Request, res: Response) {
+  const users = await userService.listUsers(req.user!);
 
   res.json({
     status: 'success',
@@ -20,10 +20,10 @@ export async function createUser(req: Request, res: Response) {
   });
 }
 
-export function updateUser(req: Request, res: Response) {
+export async function updateUser(req: Request, res: Response) {
   const id = req.params.id as string;
   const { name, role } = req.body;
-  const user = userService.updateUser(id, name, role, req.user!);
+  const user = await userService.updateUser(id, name, role, req.user!);
 
   res.json({
     status: 'success',
@@ -31,10 +31,10 @@ export function updateUser(req: Request, res: Response) {
   });
 }
 
-export function updateRole(req: Request, res: Response) {
+export async function updateRole(req: Request, res: Response) {
   const id = req.params.id as string;
   const { role } = req.body;
-  const user = userService.updateUserRole(id, role, req.user!);
+  const user = await userService.updateUserRole(id, role, req.user!);
 
   res.json({
     status: 'success',
@@ -42,9 +42,9 @@ export function updateRole(req: Request, res: Response) {
   });
 }
 
-export function toggleActive(req: Request, res: Response) {
+export async function toggleActive(req: Request, res: Response) {
   const id = req.params.id as string;
-  const user = userService.toggleUserActive(id, req.user!);
+  const user = await userService.toggleUserActive(id, req.user!);
 
   res.json({
     status: 'success',

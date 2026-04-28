@@ -58,6 +58,23 @@ export const changePasswordSchema = z.object({
   }),
 });
 
+export const refreshTokenSchema = z.object({
+  body: z.object({
+    refreshToken: z.string().min(1),
+  }),
+});
+
+// ─── Pagination / list query helpers ───
+//
+// Reused by every list route that paginates: page (1-based), limit (capped
+// at 100). Coerced from query strings since req.query values are strings.
+// Each list route extends this with its own filter shape via z.object.merge
+// or by composing in the route file.
+export const paginationQuerySchema = z.object({
+  page: z.coerce.number().int().positive().max(10_000).optional(),
+  limit: z.coerce.number().int().positive().max(100).optional(),
+});
+
 export interface ApiResponse<T = unknown> {
   status: 'success' | 'error';
   data?: T;
