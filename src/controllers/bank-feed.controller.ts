@@ -58,6 +58,7 @@ export async function syncNow(req: Request, res: Response) {
   const { fromDate, toDate } = req.body ?? {};
   try {
     const result = await bankFeed.syncFromXero(req.user!, fromDate, toDate);
+    bankFeed.recordBankFeedSync(new Date().toISOString());
     res.json({ status: 'success', data: result });
   } catch (err) {
     logger.error({ err }, 'Bank-feed sync failed');
@@ -66,4 +67,13 @@ export async function syncNow(req: Request, res: Response) {
       message: err instanceof Error ? err.message : 'Sync failed',
     });
   }
+}
+
+export async function syncStatus(_req: Request, res: Response) {
+  res.json({
+    status: 'success',
+    data: {
+      lastSyncAt: bankFeed.getLastBankFeedSyncAt(),
+    },
+  });
 }

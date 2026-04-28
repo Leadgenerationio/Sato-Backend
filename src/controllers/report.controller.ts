@@ -29,3 +29,9 @@ export async function financialOverview(req: Request, res: Response) {
   const data = await reportService.getFinancialOverview(req.user!);
   res.json({ status: 'success', data: { report: data } });
 }
+
+export async function pnlSummary(req: Request, res: Response) {
+  const days = req.query.days ? Math.max(1, Math.min(365, Number(req.query.days))) : 30;
+  const data = await reportService.getPnlSummary(req.user!, days);
+  res.json({ status: 'success', data });
+}

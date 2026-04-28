@@ -9,6 +9,7 @@ import { syncAll } from '../integrations/leadbyte/leadbyte-client.js';
 import { recordLeadByteSync } from '../controllers/integration.controller.js';
 import { syncAll as catchrSyncAll } from '../services/ad-spend.service.js';
 import { recordCatchrSync } from '../controllers/ad-spend.controller.js';
+import { syncAllBusinessesFromXero, recordBankFeedSync } from '../services/bank-feed.service.js';
 import { sendEmail } from '../integrations/resend/resend-client.js';
 import type { ResendSendRequest } from '../integrations/resend/resend-types.js';
 import { emailQueue } from './queue.js';
@@ -221,6 +222,12 @@ new Worker('sync', async (job) => {
       const result = await catchrSyncAll({ db });
       recordCatchrSync(result.finishedAt);
       return result;
+    }
+    case 'bank-feed-hourly-sync': {
+      const result = await syncAllBusinessesFromXero();
+      const ts = new Date().toISOString();
+      recordBankFeedSync(ts);
+      return { ...result, finishedAt: ts };
     }
     default:
       logger.warn({ jobId: job.id, name: job.name }, 'Unknown sync job — ignoring');

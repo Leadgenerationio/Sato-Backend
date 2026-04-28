@@ -274,21 +274,21 @@ interface SyncResult {
   autoCategorized: number;
   fromDate: string;
   toDate: string;
+  businessId: string;
 }
 
 /**
- * Pull bank transactions from Xero for the given date range, upsert by
- * (businessId, xeroBankTransactionId), then auto-apply existing vendor
- * rules to newly-inserted rows.
+ * Internal sync — pulls Xero transactions for a specific business and
+ * applies existing vendor rules. No auth check; callers (controller +
+ * cron worker) gate access.
  *
  * Idempotent: re-running the same range is a no-op (ON CONFLICT DO NOTHING).
  */
-export async function syncFromXero(
-  requester: AuthPayload,
+export async function syncBusinessFromXero(
+  businessId: string,
   fromDate?: string,
   toDate?: string,
 ): Promise<SyncResult> {
-  const businessId = requireBusinessId(requester);
   if (!xeroClient.isXeroConfigured()) {
     throw new Error('Xero not configured');
   }
@@ -301,7 +301,7 @@ export async function syncFromXero(
   const to = toDate ?? today.toISOString().slice(0, 10);
 
   const xeroTxs = await xeroClient.getBankTransactions(from, to);
-  logger.info({ from, to, count: xeroTxs.length }, 'Fetched bank transactions from Xero');
+  logger.info({ businessId, from, to, count: xeroTxs.length }, 'Fetched bank transactions from Xero');
 
   let inserted = 0;
   for (const t of xeroTxs) {
@@ -356,5 +356,58 @@ export async function syncFromXero(
     autoCategorized += updated.length;
   }
 
-  return { fetched: xeroTxs.length, inserted, autoCategorized, fromDate: from, toDate: to };
+  return { businessId, fetched: xeroTxs.length, inserted, autoCategorized, fromDate: from, toDate: to };
+}
+
+/**
+ * User-facing sync — used by the manual "Sync from Xero" button.
+ * Wraps syncBusinessFromXero with the requester's businessId.
+ */
+export async function syncFromXero(
+  requester: AuthPayload,
+  fromDate?: string,
+  toDate?: string,
+): Promise<SyncResult> {
+  return syncBusinessFromXero(requireBusinessId(requester), fromDate, toDate);
+}
+
+/**
+ * Cron-job sync — iterates over every business in the DB and runs
+ * syncBusinessFromXero for each. Used by the hourly BullMQ scheduler.
+ *
+ * Phase 1 (leadgeneration.io) has exactly one business, but this is
+ * future-proof for multi-tenant. Errors per-business are caught so one
+ * tenant's failure doesn't kill the cron run.
+ */
+export async function syncAllBusinessesFromXero(): Promise<{
+  total: number;
+  succeeded: number;
+  failed: number;
+  results: Array<SyncResult | { businessId: string; error: string }>;
+}> {
+  const { businesses } = await import('../db/schema/index.js');
+  const allBusinesses = await db.select({ id: businesses.id }).from(businesses);
+  const results: Array<SyncResult | { businessId: string; error: string }> = [];
+  let succeeded = 0;
+  let failed = 0;
+  for (const b of allBusinesses) {
+    try {
+      const r = await syncBusinessFromXero(b.id);
+      results.push(r);
+      succeeded++;
+    } catch (err) {
+      logger.error({ businessId: b.id, err }, 'Bank-feed cron sync failed for business');
+      results.push({ businessId: b.id, error: err instanceof Error ? err.message : String(err) });
+      failed++;
+    }
+  }
+  return { total: allBusinesses.length, succeeded, failed, results };
+}
+
+let lastBankFeedSyncAt: string | null = null;
+export function recordBankFeedSync(ts: string): void {
+  lastBankFeedSyncAt = ts;
+}
+export function getLastBankFeedSyncAt(): string | null {
+  return lastBankFeedSyncAt;
 }

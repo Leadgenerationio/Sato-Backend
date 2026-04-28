@@ -19,7 +19,11 @@ import { adSpendRoutes } from './ad-spend.routes.js';
 import { uploadRoutes } from './upload.routes.js';
 import { creativeRoutes } from './creative.routes.js';
 import { bankFeedRoutes } from './bank-feed.routes.js';
+import { healthRoutes } from './health.routes.js';
 export const router: RouterType = Router();
+
+// Public — must be before any auth middleware on individual routers.
+router.use('/health', healthRoutes);
 
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);

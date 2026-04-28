@@ -1,3 +1,5 @@
+import { and, eq, sql, isNull } from 'drizzle-orm';
+import { db } from '../config/database.js';
 import type { AuthPayload } from '../types/index.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
@@ -233,4 +235,118 @@ export async function getSupplierPerformance(
 
 export async function getFinancialOverview(_requester: AuthPayload): Promise<FinancialOverviewRow[]> {
   return generateFinancialOverview();
+}
+
+// ─── P&L three-bucket summary (Sam's 2026-04-28 brief) ─────────────────────
+//
+// Revenue (from paid invoices) vs (fixed costs + one-off costs + ad spend)
+// over the last `days` days. Uses the bank-feed categorisation tables
+// (bank_transactions joined to cost_categories) for cost buckets.
+
+import { invoices } from '../db/schema/invoices.js';
+import { bankTransactions, costCategories } from '../db/schema/bank-feed.js';
+import { adSpend } from '../db/schema/ad-spend.js';
+import { gte, lte } from 'drizzle-orm';
+
+export interface PnlSummary {
+  fromDate: string;
+  toDate: string;
+  currency: string;
+  revenue: string;
+  fixedCosts: string;
+  oneOffCosts: string;
+  adSpend: string;
+  totalCosts: string;
+  netProfit: string;
+  margin: string; // 0..1 fraction (e.g. "0.42" = 42%)
+  uncategorisedCount: number;
+}
+
+export async function getPnlSummary(
+  requester: AuthPayload,
+  days = 30,
+): Promise<PnlSummary> {
+  const businessId = requester.businessId;
+  const today = new Date();
+  const fromDate = new Date(today);
+  fromDate.setDate(fromDate.getDate() - days);
+  const fromIso = fromDate.toISOString().slice(0, 10);
+  const toIso = today.toISOString().slice(0, 10);
+
+  // Revenue = sum(invoices.total) where status='paid' AND createdAt in window
+  // (invoices table is single-tenant in Phase 1 so no businessId scope yet)
+  const [revenueRow] = await db
+    .select({ total: sql<string>`coalesce(sum(${invoices.total}::numeric), 0)::text` })
+    .from(invoices)
+    .where(
+      and(
+        eq(invoices.status, 'paid'),
+        gte(invoices.createdAt, fromDate),
+        lte(invoices.createdAt, today),
+      ),
+    );
+
+  // Costs by bucket from bank_transactions (amount is signed; SPEND is negative).
+  const txWhere = and(
+    gte(bankTransactions.date, fromIso),
+    lte(bankTransactions.date, toIso),
+    businessId ? eq(bankTransactions.businessId, businessId) : sql`true`,
+  );
+  const costByBucket = await db
+    .select({
+      bucket: costCategories.bucket,
+      total: sql<string>`coalesce(sum(abs(${bankTransactions.amount}::numeric)), 0)::text`,
+    })
+    .from(bankTransactions)
+    .leftJoin(costCategories, eq(costCategories.id, bankTransactions.categoryId))
+    .where(txWhere)
+    .groupBy(costCategories.bucket);
+
+  let fixed = 0;
+  let oneOff = 0;
+  let uncategorisedCount = 0;
+  for (const row of costByBucket) {
+    const amount = parseFloat(row.total) || 0;
+    if (row.bucket === 'fixed') fixed += amount;
+    else if (row.bucket === 'one_off') oneOff += amount;
+    else uncategorisedCount = Math.round(amount); // null bucket = uncategorised; we'll re-count below
+  }
+
+  // Re-count uncategorised as a row count (more useful UI signal than a sum)
+  const [uncatRow] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(bankTransactions)
+    .where(and(txWhere, isNull(bankTransactions.categoryId)));
+  uncategorisedCount = uncatRow?.count ?? 0;
+
+  // Ad spend from Catchr (already a positive number; single-tenant in Phase 1)
+  const [adSpendRow] = await db
+    .select({ total: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text` })
+    .from(adSpend)
+    .where(
+      and(
+        gte(adSpend.date, fromIso),
+        lte(adSpend.date, toIso),
+      ),
+    );
+
+  const revenue = parseFloat(revenueRow?.total ?? '0');
+  const adSpendTotal = parseFloat(adSpendRow?.total ?? '0');
+  const totalCosts = fixed + oneOff + adSpendTotal;
+  const netProfit = revenue - totalCosts;
+  const margin = revenue > 0 ? netProfit / revenue : 0;
+
+  return {
+    fromDate: fromIso,
+    toDate: toIso,
+    currency: 'GBP',
+    revenue: revenue.toFixed(2),
+    fixedCosts: fixed.toFixed(2),
+    oneOffCosts: oneOff.toFixed(2),
+    adSpend: adSpendTotal.toFixed(2),
+    totalCosts: totalCosts.toFixed(2),
+    netProfit: netProfit.toFixed(2),
+    margin: margin.toFixed(4),
+    uncategorisedCount,
+  };
 }

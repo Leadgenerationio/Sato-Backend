@@ -12,3 +12,4 @@ reportRoutes.get('/campaign-performance', reportController.campaignPerformance);
 reportRoutes.get('/client-pnl', reportController.clientPnl);
 reportRoutes.get('/supplier-performance', reportController.supplierPerformance);
 reportRoutes.get('/financial-overview', reportController.financialOverview);
+reportRoutes.get('/pnl-summary', reportController.pnlSummary);

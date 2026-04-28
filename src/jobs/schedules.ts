@@ -33,5 +33,14 @@ export async function registerSchedules() {
     data: {},
   });
 
+  // Sync Xero bank-feed hourly (10 min offset from Catchr).
+  // Pulls last 90 days each run and upserts (idempotent).
+  await syncQueue.upsertJobScheduler('bank-feed-sync', {
+    pattern: '10 * * * *',
+  }, {
+    name: 'bank-feed-hourly-sync',
+    data: {},
+  });
+
   logger.info('Scheduled jobs registered');
 }

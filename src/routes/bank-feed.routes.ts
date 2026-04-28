@@ -22,5 +22,6 @@ bankFeedRoutes.delete('/categories/:id', bankFeed.deleteCategory);
 bankFeedRoutes.get('/rules', bankFeed.listRules);
 bankFeedRoutes.delete('/rules/:id', bankFeed.deleteRule);
 
-// Manual sync trigger
+// Manual sync trigger + last-sync status
 bankFeedRoutes.post('/sync', bankFeed.syncNow);
+bankFeedRoutes.get('/sync/status', bankFeed.syncStatus);
