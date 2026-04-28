@@ -20,7 +20,12 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./
 COPY --from=build /app/src/db/migrations ./src/db/migrations
+COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/drizzle.config.ts ./
 
 EXPOSE 3001
-CMD ["node", "dist/index.js"]
+# Run the defensive idempotent migrator (tolerates "already exists" so it
+# works whether prod was originally bootstrapped via db:push or db:migrate),
+# then start the server. If a real migration error happens, the container
+# exits and Railway surfaces the error.
+CMD ["sh", "-c", "pnpm db:auto-migrate && node dist/index.js"]
