@@ -16,7 +16,11 @@ function wrap<T>(fn: (req: Request) => Promise<T>) {
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
       const data = await fn(req);
-      res.json({ data });
+      // Match the api/v1 envelope shape the FE's `unwrap()` + ApiClient expect.
+      // Without `status: 'success'` here, every LeadByte route silently fails on
+      // the FE — including the "Couldn't load campaign report" error on the
+      // LeadByte Dashboard page.
+      res.json({ status: 'success', data });
     } catch (err) {
       next(err);
     }

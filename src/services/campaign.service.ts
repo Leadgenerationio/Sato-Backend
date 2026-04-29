@@ -99,41 +99,48 @@ export interface CampaignDetail extends CampaignSummary {
 }
 
 export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSummary[]> {
-  const [campaigns, typeMapEntries] = await Promise.all([
+  // Fetch the campaign list + 4 windows of /reports/campaign in parallel.
+  // /reports/campaign returns ALL campaigns aggregated for a window in ONE call,
+  // so we only hit LeadByte 5 times total no matter how many campaigns Sam has
+  // (was N+1 before — one /reports/leadactivity call per campaign — which both
+  // scaled badly AND returned revenue: 0 because that endpoint only counts leads).
+  //
+  // Each window call is independently cached so repeat dashboard loads within
+  // the TTL window get instant Redis hits.
+  const [campaigns, typeMapEntries, todayReport, weekReport, monthReport, ytdReport] = await Promise.all([
     cached('lb:campaigns', CAMPAIGN_LIST_TTL_SECONDS, () => leadbyte.getCampaigns()),
-    // Map can't JSON-serialize, so cache as an entries array and rebuild.
     cached('campaigns:type-map', TYPE_MAP_TTL_SECONDS, async () => {
       const m = await loadCampaignTypeMap();
       return Array.from(m.entries());
     }),
+    cached('lb:report:today', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('today')),
+    cached('lb:report:week', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_week')),
+    cached('lb:report:month', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_month')),
+    cached('lb:report:ytd', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('ytd')),
   ]);
   const typeMap = new Map(typeMapEntries);
 
-  // Compute date boundaries once — they don't change per-campaign.
-  const today = new Date().toISOString().split('T')[0];
-  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
-  const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+  // The report rows are keyed by campaign NAME (LeadByte's choice), so we
+  // build name-keyed maps for fast lookup per campaign.
+  type ReportRow = (typeof todayReport)[number];
+  const byName = (rows: ReportRow[]) => new Map(rows.map((r) => [r.campaign, r] as const));
+  const todayByName = byName(todayReport);
+  const weekByName = byName(weekReport);
+  const monthByName = byName(monthReport);
+  const ytdByName = byName(ytdReport);
 
-  // Fetch all delivery reports in parallel, each Redis-cached so repeat
-  // dashboard loads within 60s are near-instant. Cache key includes the
-  // campaign id so each campaign's report is its own entry.
-  const deliveriesPerCampaign = await Promise.all(
-    campaigns.map((c) =>
-      cached(`lb:deliveries:${c.id}:30d`, DELIVERY_REPORT_TTL_SECONDS, () =>
-        leadbyte.getDeliveryReports(c.id, 30),
-      ),
-    ),
-  );
+  return campaigns.map((c): CampaignSummary => {
+    const today = todayByName.get(c.name);
+    const week = weekByName.get(c.name);
+    const month = monthByName.get(c.name);
+    const ytd = ytdByName.get(c.name);
 
-  return campaigns.map((c, i): CampaignSummary => {
-    const deliveries = deliveriesPerCampaign[i];
-
-    const leadsToday = deliveries.filter((d) => d.date === today).reduce((sum, d) => sum + d.leadCount, 0);
-    const leadsThisWeek = deliveries.filter((d) => d.date >= weekAgo).reduce((sum, d) => sum + d.leadCount, 0);
-    const leadsThisMonth = deliveries.filter((d) => d.date >= monthAgo).reduce((sum, d) => sum + d.leadCount, 0);
-    const totalLeads = deliveries.reduce((sum, d) => sum + d.leadCount, 0);
-    const totalRevenue = deliveries.reduce((sum, d) => sum + d.revenue, 0);
-    const totalCost = deliveries.reduce((sum, d) => sum + d.cost, 0);
+    // Revenue/cost/margin use the YTD figures so the table shows lifetime totals
+    // (matches what Sam expects from the LeadByte UI). Leads have separate
+    // today/week/month columns and the totalLeads column shows YTD.
+    const totalLeads = ytd?.leads ?? 0;
+    const totalRevenue = ytd?.revenue ?? 0;
+    const totalCost = (ytd?.payout ?? 0) + (ytd?.emailCost ?? 0) + (ytd?.smsCost ?? 0) + (ytd?.validationCost ?? 0);
     const cpl = totalLeads > 0 ? totalCost / totalLeads : 0;
     const margin = totalRevenue > 0 ? ((totalRevenue - totalCost) / totalRevenue) * 100 : 0;
 
@@ -147,9 +154,9 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
       leadPrice: c.leadPrice,
       currency: c.currency,
       totalLeads,
-      leadsToday,
-      leadsThisWeek,
-      leadsThisMonth,
+      leadsToday: today?.leads ?? 0,
+      leadsThisWeek: week?.leads ?? 0,
+      leadsThisMonth: month?.leads ?? 0,
       totalRevenue: Math.round(totalRevenue * 100) / 100,
       totalCost: Math.round(totalCost * 100) / 100,
       cpl: Math.round(cpl * 100) / 100,
