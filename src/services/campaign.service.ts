@@ -2,7 +2,17 @@ import { eq, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
+import { cached } from '../utils/cache.js';
 import type { AuthPayload } from '../types/index.js';
+
+// LeadByte campaign aggregates change slowly relative to dashboard load
+// frequency. Caching them for 60s collapses the per-campaign LeadByte round
+// trip from ~500ms to ~5ms (Redis hit) for everyone after the first request
+// in a 60s window. The first user pays the full LeadByte cost; everyone
+// else gets near-instant.
+const CAMPAIGN_LIST_TTL_SECONDS = 60;
+const DELIVERY_REPORT_TTL_SECONDS = 60;
+const TYPE_MAP_TTL_SECONDS = 300;
 
 export type CampaignType = 'pay_per_lead' | 'managed' | 'internal';
 
@@ -85,24 +95,30 @@ export interface CampaignDetail extends CampaignSummary {
 }
 
 export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSummary[]> {
-  const [campaigns, typeMap] = await Promise.all([
-    leadbyte.getCampaigns(),
-    loadCampaignTypeMap(),
+  const [campaigns, typeMapEntries] = await Promise.all([
+    cached('lb:campaigns', CAMPAIGN_LIST_TTL_SECONDS, () => leadbyte.getCampaigns()),
+    // Map can't JSON-serialize, so cache as an entries array and rebuild.
+    cached('campaigns:type-map', TYPE_MAP_TTL_SECONDS, async () => {
+      const m = await loadCampaignTypeMap();
+      return Array.from(m.entries());
+    }),
   ]);
+  const typeMap = new Map(typeMapEntries);
 
   // Compute date boundaries once — they don't change per-campaign.
   const today = new Date().toISOString().split('T')[0];
   const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
   const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
 
-  // Fetch all delivery reports in parallel. The previous sequential `for await`
-  // loop turned this into an N+1 — each LeadByte call is 200-500ms, and the
-  // dashboard's /campaigns?limit=100 was waiting on every single one in series.
-  // Promise.all collapses wall-time to ~max(individual call latencies).
-  // For very large campaign lists (>50) consider chunked concurrency to avoid
-  // hitting LeadByte rate limits, but the typical case is well under 20.
+  // Fetch all delivery reports in parallel, each Redis-cached so repeat
+  // dashboard loads within 60s are near-instant. Cache key includes the
+  // campaign id so each campaign's report is its own entry.
   const deliveriesPerCampaign = await Promise.all(
-    campaigns.map((c) => leadbyte.getDeliveryReports(c.id, 30)),
+    campaigns.map((c) =>
+      cached(`lb:deliveries:${c.id}:30d`, DELIVERY_REPORT_TTL_SECONDS, () =>
+        leadbyte.getDeliveryReports(c.id, 30),
+      ),
+    ),
   );
 
   return campaigns.map((c, i): CampaignSummary => {
