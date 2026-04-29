@@ -170,9 +170,11 @@ export async function getCampaignPerformance(
 ): Promise<CampaignReportRow[]> {
   const rows = await leadbyte.getCampaignReport(window);
 
-  if (rows.length === 0) {
-    return generateCampaignReport();
-  }
+  // Empty when LeadByte returns nothing for the window — the UI shows an
+  // empty state. Previously fell back to a mock generator which displayed
+  // fabricated revenue figures; that's been removed so users never see
+  // numbers that aren't real.
+  if (rows.length === 0) return [];
 
   return rows.map((r): CampaignReportRow => {
     const meta = CAMPAIGN_META[r.campaign] ?? { clientName: 'Unknown', vertical: 'Unknown' };
@@ -225,10 +227,9 @@ export async function getClientPnl(_requester: AuthPayload): Promise<ClientPnlRo
       .groupBy(leadDeliveries.clientId, sql`to_char(${leadDeliveries.deliveryDate}, 'YYYY-MM')`),
   ]);
 
-  // Nothing real to report → fall back so the page isn't blank.
-  if (revenueRows.length === 0 && costRows.length === 0) {
-    return generateClientPnl();
-  }
+  // No real data → return empty. UI shows an empty state. We deliberately
+  // do NOT fabricate numbers here.
+  if (revenueRows.length === 0 && costRows.length === 0) return [];
 
   const clientNames = new Map<string, string>();
   for (const c of await db.select({ id: clients.id, name: clients.companyName }).from(clients)) {
@@ -284,10 +285,10 @@ export async function getSupplierPerformance(
 ): Promise<SupplierReportRow[]> {
   const spendRows = await leadbyte.getSupplierSpend(window);
 
-  if (spendRows.length === 0) {
-    // Fallback to canned numbers so the dashboard never shows empty when LeadByte is down.
-    return generateSupplierReport();
-  }
+  // Empty when LeadByte returns nothing — UI handles the empty state.
+  // Removed the canned-numbers fallback; users should never see fabricated
+  // supplier spend.
+  if (spendRows.length === 0) return [];
 
   // Aggregate by supplier (collapse across campaigns)
   const bySupplier = new Map<string, SupplierReportRow>();
@@ -355,9 +356,9 @@ export async function getFinancialOverview(_requester: AuthPayload): Promise<Fin
       .groupBy(sql`to_char(${invoices.createdAt}, 'YYYY-MM')`, invoices.status),
   ]);
 
-  if (revenueRows.length === 0 && expenseRows.length === 0) {
-    return generateFinancialOverview();
-  }
+  // No real data → return empty. UI charts fall back to a flat-zero
+  // series rather than fabricating numbers.
+  if (revenueRows.length === 0 && expenseRows.length === 0) return [];
 
   // Build the last 12 months as zero-baseline rows so charts always render
   // a continuous timeline even if some months had no activity.
