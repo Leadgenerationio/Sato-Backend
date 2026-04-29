@@ -120,7 +120,15 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
     cached('lb:report:today:v2', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('today')),
     cached('lb:report:week:v2', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_week')),
     cached('lb:report:month:v2', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_month')),
-    cached('lb:report:ytd:v2', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('ytd')),
+    // YTD intentionally bypasses cache while we diagnose why it returns
+    // empty in listCampaigns even though /api/v1/leadbyte/reports/campaign?
+    // window=ytd returns 19 real rows. Will re-cache once root cause is
+    // confirmed.
+    leadbyte.getCampaignReport('ytd').catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[listCampaigns] ytd report failed:', err);
+      return [] as Awaited<ReturnType<typeof leadbyte.getCampaignReport>>;
+    }),
   ]);
   const typeMap = new Map(typeMapEntries);
 
