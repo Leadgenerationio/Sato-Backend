@@ -238,57 +238,15 @@ function windowToQuery(win: DeliveryWindow): Record<string, string> {
 
 // ─── Mock data (fallback when LEADBYTE_API_KEY not set) ─────────────────────
 
-// Mock fixtures used ONLY when LEADBYTE_API_KEY is not set (i.e. local dev /
-// tests). Every name is suffixed " (for demo)" so if these ever leak into a
-// real environment the UI immediately signals that they're not real data.
-const MOCK_CAMPAIGNS: LeadByteCampaign[] = [
-  { id: 'lb-1', name: 'Solar Panel Leads UK (for demo)', clientId: 'c-1', clientName: 'Apex Media Ltd (for demo)', vertical: 'Solar', status: 'active', leadPrice: 12.50, currency: 'GBP', startDate: '2025-09-01' },
-  { id: 'lb-2', name: 'Home Insurance Quotes (for demo)', clientId: 'c-2', clientName: 'Brightfield Corp (for demo)', vertical: 'Insurance', status: 'active', leadPrice: 8.00, currency: 'GBP', startDate: '2025-10-15' },
-  { id: 'lb-3', name: 'Mortgage Leads London (for demo)', clientId: 'c-3', clientName: 'Clearwater Digital (for demo)', vertical: 'Finance', status: 'active', leadPrice: 22.00, currency: 'GBP', startDate: '2025-11-01' },
-  { id: 'lb-4', name: 'Debt Management Leads (for demo)', clientId: 'c-4', clientName: 'Delta Solutions (for demo)', vertical: 'Finance', status: 'paused', leadPrice: 15.00, currency: 'GBP', startDate: '2025-08-20' },
-  { id: 'lb-5', name: 'Boiler Installation UK (for demo)', clientId: 'c-1', clientName: 'Apex Media Ltd (for demo)', vertical: 'Home Services', status: 'active', leadPrice: 18.00, currency: 'GBP', startDate: '2026-01-10' },
-  { id: 'lb-6', name: 'Life Insurance Over 50s (for demo)', clientId: 'c-5', clientName: 'Echo Marketing (for demo)', vertical: 'Insurance', status: 'active', leadPrice: 6.50, currency: 'GBP', startDate: '2025-12-01' },
-  { id: 'lb-7', name: 'EV Charging Installers (for demo)', clientId: 'c-2', clientName: 'Brightfield Corp (for demo)', vertical: 'Solar', status: 'inactive', leadPrice: 20.00, currency: 'GBP', startDate: '2025-07-01' },
-  { id: 'lb-8', name: 'Personal Injury Claims (for demo)', clientId: 'c-3', clientName: 'Clearwater Digital (for demo)', vertical: 'Legal', status: 'active', leadPrice: 35.00, currency: 'GBP', startDate: '2026-02-01' },
-];
+// Strict no-fake-data policy: when LEADBYTE_API_KEY is not configured, every
+// fallback returns an empty array. The UI then shows "No data available"
+// instead of fabricated names and numbers.
+const MOCK_CAMPAIGNS: LeadByteCampaign[] = [];
+const MOCK_SUPPLIERS: LeadByteSupplier[] = [];
 
-function generateMockDeliveries(campaignId: string, days: number): LeadByteDeliveryReport[] {
-  const deliveries: LeadByteDeliveryReport[] = [];
-  const campaign = MOCK_CAMPAIGNS.find((c) => c.id === campaignId);
-  const price = campaign?.leadPrice ?? 10;
-
-  for (let i = 0; i < days; i++) {
-    const date = new Date();
-    date.setDate(date.getDate() - i);
-    const leads = Math.floor(Math.random() * 40) + 5;
-    const revenue = leads * price;
-    const cost = revenue * (0.35 + Math.random() * 0.2);
-
-    deliveries.push({
-      campaignId,
-      date: date.toISOString().split('T')[0],
-      leadCount: leads,
-      validLeads: leads,
-      invalidLeads: 0,
-      revenue: Math.round(revenue * 100) / 100,
-      cost: Math.round(cost * 100) / 100,
-      reportId: `rpt-${campaignId}-${i}`,
-    });
-  }
-
-  return deliveries.reverse();
+function generateMockDeliveries(_campaignId: string, _days: number): LeadByteDeliveryReport[] {
+  return [];
 }
-
-const MOCK_SUPPLIERS: LeadByteSupplier[] = [
-  { id: 's-1', name: 'Google Ads UK (for demo)', platform: 'Google Ads', accountId: 'gads-001', campaignId: 'lb-1', totalSpend: 4200, totalLeads: 420 },
-  { id: 's-2', name: 'Facebook Lead Ads (for demo)', platform: 'Facebook', accountId: 'fb-001', campaignId: 'lb-1', totalSpend: 2800, totalLeads: 310 },
-  { id: 's-3', name: 'LinkedIn Ads (for demo)', platform: 'LinkedIn', accountId: 'li-001', campaignId: 'lb-3', totalSpend: 5600, totalLeads: 180 },
-  { id: 's-4', name: 'Bing Ads (for demo)', platform: 'Bing', accountId: 'bing-001', campaignId: 'lb-2', totalSpend: 1200, totalLeads: 200 },
-  { id: 's-5', name: 'Google Ads Insurance (for demo)', platform: 'Google Ads', accountId: 'gads-002', campaignId: 'lb-2', totalSpend: 3500, totalLeads: 480 },
-  { id: 's-6', name: 'Facebook Finance (for demo)', platform: 'Facebook', accountId: 'fb-002', campaignId: 'lb-3', totalSpend: 3200, totalLeads: 220 },
-  { id: 's-7', name: 'TikTok Solar (for demo)', platform: 'TikTok', accountId: 'tt-001', campaignId: 'lb-5', totalSpend: 1800, totalLeads: 150 },
-  { id: 's-8', name: 'Google Legal (for demo)', platform: 'Google Ads', accountId: 'gads-003', campaignId: 'lb-8', totalSpend: 8400, totalLeads: 240 },
-];
 
 // ─── Normalisers ────────────────────────────────────────────────────────────
 
@@ -536,53 +494,11 @@ export async function returnLead(args: { leadId?: string | number; leadIds?: Arr
 
 // ─── Mock data for buyers/deliveries/responders (no-key dev mode) ───────────
 
-const MOCK_BUYERS = [
-  { id: 1, company: 'Solar Savings UK (for demo)', bid: 'BUY-SSUK', status: 'Active' as const, credit_amount: 5000, credit_balance: 3200, phone: '020 1234 5678', postcode: 'EC1A 1AA' },
-  { id: 2, company: 'Insurance Hub Ltd (for demo)', bid: 'BUY-INSH', status: 'Active' as const, credit_amount: 10000, credit_balance: 7450, phone: '0161 555 0100', postcode: 'M1 4BT' },
-  { id: 3, company: 'Finance First (for demo)', bid: 'BUY-FF', status: 'Active' as const, credit_amount: 8000, credit_balance: 1200, phone: '0113 222 3333', postcode: 'LS1 5QS' },
-  { id: 4, company: 'Home Services Group (for demo)', bid: 'BUY-HSG', status: 'Inactive' as const, credit_amount: 2500, credit_balance: 0, phone: '0117 900 1122', postcode: 'BS1 4DJ' },
-  { id: 5, company: 'Legal Partners UK (for demo)', bid: 'BUY-LPUK', status: 'Active' as const, credit_amount: 15000, credit_balance: 11800, phone: '0207 444 5678', postcode: 'WC2B 4HH' },
-];
-
-const MOCK_DELIVERIES = [
-  { id: 101, reference: 'DEL-SOLAR-01 (for demo)', status: 'Active' as const, campaign: { id: 'lb-1', name: 'Solar Panel Leads UK (for demo)' }, deliver_to: 'Direct Post' as const, buyer: { id: 1, name: 'Solar Savings UK (for demo)', bid: 'BUY-SSUK' } },
-  { id: 102, reference: 'DEL-INSURE-01 (for demo)', status: 'Active' as const, campaign: { id: 'lb-2', name: 'Home Insurance Quotes (for demo)' }, deliver_to: 'Email' as const, buyer: { id: 2, name: 'Insurance Hub Ltd (for demo)', bid: 'BUY-INSH' } },
-  { id: 103, reference: 'DEL-MORTG-01 (for demo)', status: 'Active' as const, campaign: { id: 'lb-3', name: 'Mortgage Leads London (for demo)' }, deliver_to: 'Direct Post' as const, buyer: { id: 3, name: 'Finance First (for demo)', bid: 'BUY-FF' } },
-  { id: 104, reference: 'DEL-BOILER-SMS (for demo)', status: 'Inactive' as const, campaign: { id: 'lb-5', name: 'Boiler Installation UK (for demo)' }, deliver_to: 'SMS' as const, buyer: { id: 4, name: 'Home Services Group (for demo)', bid: 'BUY-HSG' } },
-  { id: 105, reference: 'DEL-LEGAL-01 (for demo)', status: 'Active' as const, campaign: { id: 'lb-8', name: 'Personal Injury Claims (for demo)' }, deliver_to: 'Direct Post' as const, buyer: { id: 5, name: 'Legal Partners UK (for demo)', bid: 'BUY-LPUK' } },
-  { id: 106, reference: 'DEL-LIFE-STORE (for demo)', status: 'Saved' as const, campaign: { id: 'lb-6', name: 'Life Insurance Over 50s (for demo)' }, deliver_to: 'Store Lead' as const, buyer: { id: 2, name: 'Insurance Hub Ltd (for demo)', bid: 'BUY-INSH' } },
-];
-
-const MOCK_RESPONDERS = [
-  {
-    id: 201,
-    reference: 'RES-WELCOME-SOLAR (for demo)',
-    status: 'Active',
-    campaign: { id: 'lb-1', name: 'Solar Panel Leads UK (for demo)' },
-    pushes: [
-      { push_id: 1, name: 'Day 0 — Welcome (for demo)', sent: 1200, delivered: 1150, clicks: 340, conversions: 42, cost: 120, revenue: 520, profit: 400, active: true },
-      { push_id: 2, name: 'Day 3 — Reminder (for demo)', sent: 890, delivered: 870, clicks: 210, conversions: 18, cost: 89, revenue: 216, profit: 127, active: true },
-    ],
-  },
-  {
-    id: 202,
-    reference: 'RES-INSURE-FLOW (for demo)',
-    status: 'Active',
-    campaign: { id: 'lb-2', name: 'Home Insurance Quotes (for demo)' },
-    pushes: [
-      { push_id: 3, name: 'Quote Reminder (for demo)', sent: 2100, delivered: 2080, clicks: 410, conversions: 64, cost: 210, revenue: 512, profit: 302, active: true },
-    ],
-  },
-  {
-    id: 203,
-    reference: 'RES-FIN-WARMUP (for demo)',
-    status: 'Paused',
-    campaign: { id: 'lb-3', name: 'Mortgage Leads London (for demo)' },
-    pushes: [
-      { push_id: 4, name: 'Mortgage Tips (for demo)', sent: 450, delivered: 440, clicks: 88, conversions: 6, cost: 45, revenue: 132, profit: 87, active: false },
-    ],
-  },
-];
+// All buyer/delivery/responder fallbacks return empty when API not configured.
+// UI shows "No data available" placeholder.
+const MOCK_BUYERS: LeadByteBuyer[] = [];
+const MOCK_DELIVERIES: LeadByteDelivery[] = [];
+const MOCK_RESPONDERS: LeadByteResponder[] = [];
 
 function logMock(scope: string): void {
   logger.warn(`LeadByte ${scope} — returning mocks (LEADBYTE_API_KEY not configured)`);

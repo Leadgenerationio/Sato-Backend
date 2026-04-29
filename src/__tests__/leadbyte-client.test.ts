@@ -31,18 +31,16 @@ describe('LeadByte client — configuration', () => {
     expect(lb.isLeadByteConfigured()).toBe(true);
   });
 
-  it('getCampaigns falls back to mocks without a key', async () => {
+  // Per the no-fake-data policy, unconfigured fallbacks return empty arrays
+  // (UI shows "No data available") rather than fabricating campaigns/leads.
+  it('getCampaigns returns empty array when LEADBYTE_API_KEY is not set', async () => {
     const campaigns = await lb.getCampaigns();
-    expect(campaigns.length).toBeGreaterThan(0);
-    expect(campaigns[0]).toHaveProperty('id');
-    expect(campaigns[0]).toHaveProperty('leadPrice');
+    expect(campaigns).toEqual([]);
   });
 
-  it('getDeliveryReports returns mocks for a numeric day window when unconfigured', async () => {
+  it('getDeliveryReports returns empty array when unconfigured', async () => {
     const reports = await lb.getDeliveryReports('lb-1', 7);
-    expect(reports).toHaveLength(7);
-    expect(reports[0].invalidLeads).toBe(0);
-    expect(reports[0].validLeads).toBe(reports[0].leadCount);
+    expect(reports).toEqual([]);
   });
 
   it('throws when write endpoints are called without configuration', async () => {

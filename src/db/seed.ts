@@ -12,11 +12,12 @@ if (!connectionString) {
 const client = postgres(connectionString);
 const db = drizzle(client);
 
-// Demo client + sample notifications. Default ON in dev/test, OFF in production.
-// Override with SEED_DEMO_DATA=true | false at any time.
-const SEED_DEMO_DATA = process.env.SEED_DEMO_DATA
-  ? process.env.SEED_DEMO_DATA === 'true'
-  : process.env.NODE_ENV !== 'production';
+// Demo client + sample notifications are OFF by default everywhere. Must be
+// opted in explicitly with SEED_DEMO_DATA=true. Production never gets demo
+// data unless the operator sets that env var deliberately. Per the no-fake-
+// data policy, the recommendation is to never enable this in any tenant a
+// real user can sign into.
+const SEED_DEMO_DATA = process.env.SEED_DEMO_DATA === 'true';
 
 async function seed() {
   console.log('Seeding...');
