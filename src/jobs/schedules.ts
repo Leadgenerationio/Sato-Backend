@@ -42,5 +42,18 @@ export async function registerSchedules() {
     data: {},
   });
 
+  // Pre-warm the LeadByte Redis cache every 45 seconds. The dashboard's
+  // /campaigns endpoint reads from this cache; without prewarming, the
+  // first user after a 60s idle pays the full LeadByte cost (~1.5-2s).
+  // 45s < 60s TTL, so the cache is always fresh by the time TTL would
+  // expire. Cron patterns can't go below 1-minute granularity, so we use
+  // the BullMQ `every: ms` form instead.
+  await syncQueue.upsertJobScheduler('leadbyte-cache-prewarm', {
+    every: 45_000,
+  }, {
+    name: 'leadbyte-cache-prewarm',
+    data: {},
+  });
+
   logger.info('Scheduled jobs registered');
 }
