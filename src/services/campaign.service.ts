@@ -90,14 +90,23 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
     loadCampaignTypeMap(),
   ]);
 
-  const summaries: CampaignSummary[] = [];
+  // Compute date boundaries once — they don't change per-campaign.
+  const today = new Date().toISOString().split('T')[0];
+  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+  const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
 
-  for (const c of campaigns) {
-    const deliveries = await leadbyte.getDeliveryReports(c.id, 30);
+  // Fetch all delivery reports in parallel. The previous sequential `for await`
+  // loop turned this into an N+1 — each LeadByte call is 200-500ms, and the
+  // dashboard's /campaigns?limit=100 was waiting on every single one in series.
+  // Promise.all collapses wall-time to ~max(individual call latencies).
+  // For very large campaign lists (>50) consider chunked concurrency to avoid
+  // hitting LeadByte rate limits, but the typical case is well under 20.
+  const deliveriesPerCampaign = await Promise.all(
+    campaigns.map((c) => leadbyte.getDeliveryReports(c.id, 30)),
+  );
 
-    const today = new Date().toISOString().split('T')[0];
-    const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
-    const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+  return campaigns.map((c, i): CampaignSummary => {
+    const deliveries = deliveriesPerCampaign[i];
 
     const leadsToday = deliveries.filter((d) => d.date === today).reduce((sum, d) => sum + d.leadCount, 0);
     const leadsThisWeek = deliveries.filter((d) => d.date >= weekAgo).reduce((sum, d) => sum + d.leadCount, 0);
@@ -108,7 +117,7 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
     const cpl = totalLeads > 0 ? totalCost / totalLeads : 0;
     const margin = totalRevenue > 0 ? ((totalRevenue - totalCost) / totalRevenue) * 100 : 0;
 
-    summaries.push({
+    return {
       id: c.id,
       name: c.name,
       clientName: c.clientName,
@@ -126,10 +135,8 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
       cpl: Math.round(cpl * 100) / 100,
       margin: Math.round(margin * 10) / 10,
       startDate: c.startDate,
-    });
-  }
-
-  return summaries;
+    };
+  });
 }
 
 export async function getCampaign(id: string, _requester: AuthPayload): Promise<CampaignDetail | null> {
