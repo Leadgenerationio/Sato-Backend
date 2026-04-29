@@ -6,6 +6,8 @@ import { getActiveProvider } from '../integrations/credit-check/index.js';
 import { isResendConfigured } from '../integrations/resend/resend-client.js';
 import { isSignNowConfigured } from '../integrations/signnow/signnow-client.js';
 import { isR2Configured } from '../integrations/r2/r2-client.js';
+import { isCatchrConfigured } from '../integrations/catchr/catchr-client.js';
+import { getLastCatchrSyncAt } from './ad-spend.controller.js';
 import { syncQueue } from '../jobs/queue.js';
 import { logger } from '../utils/logger.js';
 
@@ -158,6 +160,19 @@ export async function r2Status(_req: Request, res: Response) {
       configured: isR2Configured(),
       bucket: process.env.R2_BUCKET || null,
       publicBaseUrl: process.env.R2_PUBLIC_URL || null,
+    },
+  });
+}
+
+// ─── Catchr ad-spend ───
+
+export async function catchrStatus(_req: Request, res: Response) {
+  res.json({
+    status: 'success',
+    data: {
+      configured: isCatchrConfigured(),
+      mcpUrl: process.env.CATCHR_MCP_URL || 'https://api.catchr.io/mcp',
+      lastSyncAt: getLastCatchrSyncAt(),
     },
   });
 }

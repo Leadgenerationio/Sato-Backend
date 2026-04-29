@@ -8,6 +8,9 @@ let lastCatchrSyncAt: string | null = null;
 export function recordCatchrSync(ts: string): void {
   lastCatchrSyncAt = ts;
 }
+export function getLastCatchrSyncAt(): string | null {
+  return lastCatchrSyncAt;
+}
 
 function filtersFromQuery(req: Request): svc.AdSpendFilters {
   const q = req.query;

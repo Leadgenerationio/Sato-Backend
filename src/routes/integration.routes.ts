@@ -21,7 +21,8 @@ integrationRoutes.post('/leadbyte/sync', integrationController.leadbyteSyncNow);
 // Credit check
 integrationRoutes.get('/credit-check/status', integrationController.creditCheckStatus);
 
-// Resend / SignNow / R2 — read-only status indicators
+// Resend / SignNow / R2 / Catchr — read-only status indicators
 integrationRoutes.get('/resend/status', integrationController.resendStatus);
 integrationRoutes.get('/signnow/status', integrationController.signnowStatus);
 integrationRoutes.get('/r2/status', integrationController.r2Status);
+integrationRoutes.get('/catchr/status', integrationController.catchrStatus);
