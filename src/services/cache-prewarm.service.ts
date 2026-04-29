@@ -30,52 +30,54 @@ const CACHE_TTL_SECONDS = 300;
 
 export async function prewarmLeadByteCache(): Promise<{
   campaignsCached: number;
-  deliveriesCached: number;
+  reportsCached: number;
   durationMs: number;
 }> {
   const start = Date.now();
 
   if (!redis) {
     logger.warn('Cache prewarm skipped — Redis not available');
-    return { campaignsCached: 0, deliveriesCached: 0, durationMs: 0 };
+    return { campaignsCached: 0, reportsCached: 0, durationMs: 0 };
   }
 
-  // Direct LeadByte fetch — bypasses the `cached()` wrapper since we want
-  // to FORCE a refresh, not a read-through.
+  // Refresh the campaign LIST first — used by listCampaigns directly.
   const campaigns = await leadbyte.getCampaigns();
+  if (campaigns.length > 0) {
+    await redis.set('lb:campaigns', JSON.stringify(campaigns), 'EX', CACHE_TTL_SECONDS);
+  }
 
-  // Write the campaign list with a fresh TTL.
-  await redis.set('lb:campaigns', JSON.stringify(campaigns), 'EX', CACHE_TTL_SECONDS);
+  // Refresh the four /reports/campaign windows that listCampaigns reads.
+  // Sequential to avoid the burst-rate-limit pattern that caused some
+  // windows to come back empty earlier. Empty results are NOT written
+  // (matches the cache-helper guard) so a transient blip doesn't pin
+  // zeros until the next prewarm.
+  const windows: Array<{ key: string; w: 'today' | 'this_week' | 'this_month' | 'ytd' }> = [
+    { key: 'lb:report:today:v5', w: 'today' },
+    { key: 'lb:report:week:v5', w: 'this_week' },
+    { key: 'lb:report:month:v5', w: 'this_month' },
+    { key: 'lb:report:ytd:v5', w: 'ytd' },
+  ];
 
-  // Refresh each campaign's delivery report cache in parallel. Errors on
-  // individual campaigns shouldn't block the others.
-  const deliveryResults = await Promise.allSettled(
-    campaigns.map(async (c) => {
-      const deliveries = await leadbyte.getDeliveryReports(c.id, 30);
-      await redis!.set(
-        `lb:deliveries:${c.id}:30d`,
-        JSON.stringify(deliveries),
-        'EX',
-        CACHE_TTL_SECONDS,
-      );
-      return c.id;
-    }),
-  );
-
-  const deliveriesCached = deliveryResults.filter((r) => r.status === 'fulfilled').length;
-  const failures = deliveryResults
-    .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-    .map((r) => r.reason);
-
-  if (failures.length > 0) {
-    logger.warn({ failures: failures.length, total: campaigns.length }, 'Cache prewarm: some delivery refreshes failed');
+  let reportsCached = 0;
+  for (const { key, w } of windows) {
+    try {
+      const rows = await leadbyte.getCampaignReport(w);
+      if (rows.length > 0) {
+        await redis.set(key, JSON.stringify(rows), 'EX', CACHE_TTL_SECONDS);
+        reportsCached++;
+      } else {
+        logger.warn({ key, window: w }, 'Cache prewarm: report came back empty — skip cache write');
+      }
+    } catch (err) {
+      logger.warn({ err, key, window: w }, 'Cache prewarm: report fetch failed — skip');
+    }
   }
 
   const durationMs = Date.now() - start;
   logger.info(
-    { campaignsCached: campaigns.length, deliveriesCached, durationMs },
+    { campaignsCached: campaigns.length, reportsCached, durationMs },
     'Cache prewarm complete',
   );
 
-  return { campaignsCached: campaigns.length, deliveriesCached, durationMs };
+  return { campaignsCached: campaigns.length, reportsCached, durationMs };
 }
