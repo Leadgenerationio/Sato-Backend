@@ -23,7 +23,10 @@ import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
  * gate this on "any user activity in the last 5 minutes" — see
  * `lastActivityAt` flag pattern in the docstring of warmLeadByteCache.
  */
-const CACHE_TTL_SECONDS = 60;
+// Match campaign.service.ts CACHE_LIST_TTL_SECONDS. Prewarm overwrites with
+// fresh TTL each run; user requests do the same on miss. Worst case (worker
+// dies and no users hit for 5 min): one slow request, then back to fast.
+const CACHE_TTL_SECONDS = 300;
 
 export async function prewarmLeadByteCache(): Promise<{
   campaignsCached: number;
