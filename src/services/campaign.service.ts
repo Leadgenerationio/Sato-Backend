@@ -113,10 +113,14 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
       const m = await loadCampaignTypeMap();
       return Array.from(m.entries());
     }),
-    cached('lb:report:today', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('today')),
-    cached('lb:report:week', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_week')),
-    cached('lb:report:month', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_month')),
-    cached('lb:report:ytd', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('ytd')),
+    // Cache key suffix bumped to v2 — old keys had a stale empty result from
+    // the first deploy, when the LeadByte YTD endpoint may have rate-limited
+    // under the burst of 4 parallel window requests. The empty array got
+    // cached with the long TTL; v2 forces a fresh fetch.
+    cached('lb:report:today:v2', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('today')),
+    cached('lb:report:week:v2', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_week')),
+    cached('lb:report:month:v2', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_month')),
+    cached('lb:report:ytd:v2', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('ytd')),
   ]);
   const typeMap = new Map(typeMapEntries);
 
