@@ -1,5 +1,8 @@
-import { and, eq, sql, isNull } from 'drizzle-orm';
+import { and, eq, sql, isNull, gte } from 'drizzle-orm';
 import { db } from '../config/database.js';
+import { invoices } from '../db/schema/invoices.js';
+import { leadDeliveries } from '../db/schema/lead-deliveries.js';
+import { clients } from '../db/schema/clients.js';
 import type { AuthPayload } from '../types/index.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
@@ -192,7 +195,87 @@ export async function getCampaignPerformance(
 }
 
 export async function getClientPnl(_requester: AuthPayload): Promise<ClientPnlRow[]> {
-  return generateClientPnl();
+  // Real query: per-client per-month revenue (sum of paid invoices) + cost
+  // (sum of lead-delivery costs) over the last 6 months.
+  // Falls back to demo data only if there's nothing in the DB at all.
+  const sixMonthsAgo = new Date();
+  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  sixMonthsAgo.setDate(1);
+  const sixMonthsAgoIso = sixMonthsAgo.toISOString().split('T')[0];
+
+  const [revenueRows, costRows] = await Promise.all([
+    db
+      .select({
+        clientId: invoices.clientId,
+        month: sql<string>`to_char(${invoices.createdAt}, 'YYYY-MM')`,
+        revenue: sql<string>`coalesce(sum(${invoices.total}), 0)`,
+      })
+      .from(invoices)
+      .where(and(eq(invoices.status, 'paid'), gte(invoices.createdAt, sixMonthsAgo)))
+      .groupBy(invoices.clientId, sql`to_char(${invoices.createdAt}, 'YYYY-MM')`),
+    db
+      .select({
+        clientId: leadDeliveries.clientId,
+        month: sql<string>`to_char(${leadDeliveries.deliveryDate}, 'YYYY-MM')`,
+        cost: sql<string>`coalesce(sum(${leadDeliveries.cost}), 0)`,
+        leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int`,
+      })
+      .from(leadDeliveries)
+      .where(gte(leadDeliveries.deliveryDate, sixMonthsAgoIso))
+      .groupBy(leadDeliveries.clientId, sql`to_char(${leadDeliveries.deliveryDate}, 'YYYY-MM')`),
+  ]);
+
+  // Nothing real to report → fall back so the page isn't blank.
+  if (revenueRows.length === 0 && costRows.length === 0) {
+    return generateClientPnl();
+  }
+
+  const clientNames = new Map<string, string>();
+  for (const c of await db.select({ id: clients.id, name: clients.companyName }).from(clients)) {
+    clientNames.set(c.id, c.name);
+  }
+
+  // Merge revenue + cost by clientId+month.
+  const merged = new Map<string, ClientPnlRow>();
+  for (const r of revenueRows) {
+    const key = `${r.clientId}|${r.month}`;
+    merged.set(key, {
+      clientId: r.clientId,
+      clientName: clientNames.get(r.clientId) ?? 'Unknown',
+      month: r.month,
+      revenue: Number(r.revenue),
+      cost: 0,
+      profit: Number(r.revenue),
+      margin: 100,
+      leadsDelivered: 0,
+    });
+  }
+  for (const c of costRows) {
+    const key = `${c.clientId}|${c.month}`;
+    const existing = merged.get(key);
+    const cost = Number(c.cost);
+    if (existing) {
+      existing.cost = cost;
+      existing.profit = existing.revenue - cost;
+      existing.margin = existing.revenue > 0
+        ? Math.round(((existing.revenue - cost) / existing.revenue) * 1000) / 10
+        : 0;
+      existing.leadsDelivered = c.leads;
+    } else {
+      merged.set(key, {
+        clientId: c.clientId,
+        clientName: clientNames.get(c.clientId) ?? 'Unknown',
+        month: c.month,
+        revenue: 0,
+        cost,
+        profit: -cost,
+        margin: 0,
+        leadsDelivered: c.leads,
+      });
+    }
+  }
+
+  return [...merged.values()].sort((a, b) => b.month.localeCompare(a.month));
 }
 
 export async function getSupplierPerformance(
@@ -234,7 +317,84 @@ export async function getSupplierPerformance(
 }
 
 export async function getFinancialOverview(_requester: AuthPayload): Promise<FinancialOverviewRow[]> {
-  return generateFinancialOverview();
+  // Real query: last 12 months of revenue (paid invoices), expenses (lead-
+  // delivery costs), and invoice status counts per month. This drives the
+  // dashboard's revenue-vs-expenses chart.
+  // Falls back to demo numbers only if BOTH tables are empty.
+  const twelveMonthsAgo = new Date();
+  twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 11);
+  twelveMonthsAgo.setDate(1);
+  const twelveMonthsAgoIso = twelveMonthsAgo.toISOString().split('T')[0];
+
+  const [revenueRows, expenseRows, invoiceCountRows] = await Promise.all([
+    db
+      .select({
+        month: sql<string>`to_char(${invoices.createdAt}, 'YYYY-MM')`,
+        revenue: sql<string>`coalesce(sum(${invoices.total}), 0)`,
+        vat: sql<string>`coalesce(sum(${invoices.vatAmount}), 0)`,
+      })
+      .from(invoices)
+      .where(and(eq(invoices.status, 'paid'), gte(invoices.createdAt, twelveMonthsAgo)))
+      .groupBy(sql`to_char(${invoices.createdAt}, 'YYYY-MM')`),
+    db
+      .select({
+        month: sql<string>`to_char(${leadDeliveries.deliveryDate}, 'YYYY-MM')`,
+        expenses: sql<string>`coalesce(sum(${leadDeliveries.cost}), 0)`,
+      })
+      .from(leadDeliveries)
+      .where(gte(leadDeliveries.deliveryDate, twelveMonthsAgoIso))
+      .groupBy(sql`to_char(${leadDeliveries.deliveryDate}, 'YYYY-MM')`),
+    db
+      .select({
+        month: sql<string>`to_char(${invoices.createdAt}, 'YYYY-MM')`,
+        status: invoices.status,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(invoices)
+      .where(gte(invoices.createdAt, twelveMonthsAgo))
+      .groupBy(sql`to_char(${invoices.createdAt}, 'YYYY-MM')`, invoices.status),
+  ]);
+
+  if (revenueRows.length === 0 && expenseRows.length === 0) {
+    return generateFinancialOverview();
+  }
+
+  // Build the last 12 months as zero-baseline rows so charts always render
+  // a continuous timeline even if some months had no activity.
+  const months: string[] = [];
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date();
+    d.setMonth(d.getMonth() - i);
+    months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+  }
+
+  const revenueByMonth = new Map(revenueRows.map((r) => [r.month, { revenue: Number(r.revenue), vat: Number(r.vat) }]));
+  const expensesByMonth = new Map(expenseRows.map((r) => [r.month, Number(r.expenses)]));
+  const paidByMonth = new Map<string, number>();
+  const overdueByMonth = new Map<string, number>();
+  for (const c of invoiceCountRows) {
+    if (c.status === 'paid') paidByMonth.set(c.month, c.count);
+    if (c.status === 'overdue') overdueByMonth.set(c.month, c.count);
+  }
+
+  return months.map((m): FinancialOverviewRow => {
+    const r = revenueByMonth.get(m) ?? { revenue: 0, vat: 0 };
+    const expenses = expensesByMonth.get(m) ?? 0;
+    const [year, mm] = m.split('-');
+    const monthLabel = new Date(Number(year), Number(mm) - 1, 1).toLocaleDateString('en-GB', {
+      month: 'short',
+      year: 'numeric',
+    });
+    return {
+      month: monthLabel,
+      revenue: Math.round(r.revenue * 100) / 100,
+      expenses: Math.round(expenses * 100) / 100,
+      profit: Math.round((r.revenue - expenses) * 100) / 100,
+      invoicesPaid: paidByMonth.get(m) ?? 0,
+      invoicesOverdue: overdueByMonth.get(m) ?? 0,
+      vatCollected: Math.round(r.vat * 100) / 100,
+    };
+  });
 }
 
 // ─── P&L three-bucket summary (Sam's 2026-04-28 brief) ─────────────────────
@@ -243,10 +403,9 @@ export async function getFinancialOverview(_requester: AuthPayload): Promise<Fin
 // over the last `days` days. Uses the bank-feed categorisation tables
 // (bank_transactions joined to cost_categories) for cost buckets.
 
-import { invoices } from '../db/schema/invoices.js';
 import { bankTransactions, costCategories } from '../db/schema/bank-feed.js';
 import { adSpend } from '../db/schema/ad-spend.js';
-import { gte, lte } from 'drizzle-orm';
+import { lte } from 'drizzle-orm';
 
 export interface PnlSummary {
   fromDate: string;
