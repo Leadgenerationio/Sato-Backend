@@ -107,26 +107,27 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
   //
   // Each window call is independently cached so repeat dashboard loads within
   // the TTL window get instant Redis hits.
-  const [campaigns, typeMapEntries, todayReport, weekReport, monthReport, ytdReport] = await Promise.all([
+  // Fetch independent things (campaigns + typeMap) in parallel.
+  const [campaigns, typeMapEntries] = await Promise.all([
     cached('lb:campaigns', CAMPAIGN_LIST_TTL_SECONDS, () => leadbyte.getCampaigns()),
     cached('campaigns:type-map', TYPE_MAP_TTL_SECONDS, async () => {
       const m = await loadCampaignTypeMap();
       return Array.from(m.entries());
     }),
-    // Cache key suffix bumped to v2 — old keys had a stale empty result from
-    // the first deploy, when the LeadByte YTD endpoint may have rate-limited
-    // under the burst of 4 parallel window requests. The empty array got
-    // cached with the long TTL; v2 forces a fresh fetch.
-    // Cache keys at :v4 — earlier versions had a stale empty result that we
-    // confirmed by temporarily bypassing the cache (YTD then returned 19
-    // real rows). The bump forces a fresh fetch from each dashboard load
-    // until v3 is populated, then everyone reads from cache.
-    cached('lb:report:today:v4', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('today')),
-    cached('lb:report:week:v4', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_week')),
-    cached('lb:report:month:v4', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_month')),
-    cached('lb:report:ytd:v4', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('ytd')),
   ]);
   const typeMap = new Map(typeMapEntries);
+
+  // /reports/campaign for the 4 windows. Fetched SEQUENTIALLY because the
+  // 4-in-parallel burst was empirically getting rate-limited / partially-empty
+  // responses from LeadByte (some windows came back as []). Sequential adds
+  // ~1.5s wall-time on a cold-cache request, but each result is cached
+  // independently, so warm cache (the common case after first user) stays
+  // ~50ms total. Combined with the never-cache-empty rule in cached(), we
+  // tolerate transient LeadByte blips without poisoning the cache.
+  const todayReport = await cached('lb:report:today:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('today'));
+  const weekReport = await cached('lb:report:week:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_week'));
+  const monthReport = await cached('lb:report:month:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_month'));
+  const ytdReport = await cached('lb:report:ytd:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('ytd'));
 
   // The report rows are keyed by campaign NAME (LeadByte's choice), so we
   // build name-keyed maps for fast lookup per campaign.
