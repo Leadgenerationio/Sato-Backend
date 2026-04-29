@@ -21,9 +21,29 @@ import type { AuthPayload } from '../types/index.js';
 
 const connection = redis ?? undefined;
 
-if (!connection) {
-  logger.warn('Redis not configured — workers will not start');
-  process.exit(0);
+let workersStarted = false;
+
+/**
+ * Spin up all BullMQ workers (email, invoice, workflow, sync).
+ *
+ * Idempotent — guards against being called twice if both `pnpm worker`
+ * and an in-process import try to start workers in the same Node
+ * process. Returns a boolean for visibility but never throws so the
+ * API server can call this without try/catch.
+ */
+export function startWorkers(): boolean {
+  if (workersStarted) {
+    logger.warn('Workers already started — ignoring duplicate startWorkers() call');
+    return true;
+  }
+  if (!connection) {
+    logger.warn('Redis not configured — workers will not start');
+    return false;
+  }
+  registerWorkers();
+  workersStarted = true;
+  logger.info('Workers started');
+  return true;
 }
 
 const SYSTEM_AUTH: AuthPayload = {
@@ -33,6 +53,9 @@ const SYSTEM_AUTH: AuthPayload = {
   businessId: 'system',
 };
 
+function registerWorkers(): void {
+  // startWorkers() already null-checked, but re-narrow for TS inside this fn.
+  if (!connection) return;
 // Email worker — dispatches on job.name
 new Worker('email', async (job) => {
   logger.info({ jobId: job.id, name: job.name }, 'Processing email job');
@@ -241,5 +264,11 @@ new Worker('sync', async (job) => {
       return { skipped: true };
   }
 }, { connection });
+} // end registerWorkers
 
-logger.info('Workers started');
+// Auto-start when this file is the entry point (e.g. `pnpm worker`).
+// When imported by index.ts (in-process), index.ts calls startWorkers() itself.
+const isMainModule = import.meta.url === `file://${process.argv[1]?.replace(/\\/g, '/')}`;
+if (isMainModule) {
+  startWorkers();
+}

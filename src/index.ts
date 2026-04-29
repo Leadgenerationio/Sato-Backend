@@ -8,6 +8,7 @@ import { errorHandler } from './middleware/error.middleware.js';
 import { router } from './routes/index.js';
 import { seedDefaultUsers } from './data/users.js';
 import { registerSchedules } from './jobs/schedules.js';
+import { startWorkers } from './jobs/worker-entry.js';
 
 const app: Express = express();
 
@@ -80,6 +81,17 @@ async function start() {
     await registerSchedules();
   } catch (err) {
     logger.error({ err }, 'Failed to register scheduled jobs');
+  }
+  // Spawn BullMQ workers in-process so scheduled jobs (LeadByte sync,
+  // cache prewarm, overdue chase, bank-feed sync, etc.) actually fire on
+  // Railway's single-service deployment. Without this, schedules go into
+  // Redis but no one consumes them — silently dead. If we ever scale to
+  // multiple instances, move this to a separate Railway service running
+  // `pnpm worker` and remove this call.
+  try {
+    startWorkers();
+  } catch (err) {
+    logger.error({ err }, 'Failed to start workers');
   }
   app.listen(env.PORT, () => {
     logger.info(`Server running on http://localhost:${env.PORT}`);
