@@ -75,8 +75,8 @@ async function seedDemoData(bizId: string) {
   const [sampleClient] = await db.insert(clients).values({
     id: DEMO_CLIENT_ID,
     businessId: bizId,
-    companyName: 'Apex Media Ltd',
-    contactName: 'John Smith',
+    companyName: 'Apex Media Ltd (for demo)',
+    contactName: 'John Smith (for demo)',
     contactEmail: 'john@apexmedia.co.uk',
     status: 'active',
     onboardingStatus: 'active',
@@ -97,9 +97,9 @@ async function seedDemoData(bizId: string) {
   }
 
   const sampleNotifications = [
-    { type: 'invoice_overdue', title: 'Invoice INV-2026-042 overdue', message: 'TradeFX Ltd invoice of £4,200.00 is 14 days past due.', severity: 'warning', read: false },
-    { type: 'credit_alert', title: 'Credit score drop — Apex Leads', message: 'Apex Leads credit score fell from 72 to 54. Risk rating changed to Medium.', severity: 'warning', read: false },
-    { type: 'workflow_complete', title: 'Monthly invoicing workflow finished', message: '12 invoices generated for March billing cycle.', severity: 'info', read: false },
+    { type: 'invoice_overdue', title: 'Invoice INV-2026-042 overdue (for demo)', message: 'TradeFX Ltd (for demo) invoice of £4,200.00 is 14 days past due.', severity: 'warning', read: false },
+    { type: 'credit_alert', title: 'Credit score drop — Apex Leads (for demo)', message: 'Apex Leads (for demo) credit score fell from 72 to 54. Risk rating changed to Medium.', severity: 'warning', read: false },
+    { type: 'workflow_complete', title: 'Monthly invoicing workflow finished (for demo)', message: '12 invoices generated for March billing cycle (for demo).', severity: 'info', read: false },
   ];
 
   for (const n of sampleNotifications) {

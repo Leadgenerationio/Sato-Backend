@@ -55,14 +55,16 @@ export interface FinancialOverviewRow {
 // ─── Mock generators ───
 
 function generateCampaignReport(): CampaignReportRow[] {
+  // All names suffixed " (for demo)" so users can spot mock data immediately
+  // if this generator is ever wired back in.
   const campaigns = [
-    { id: 'lb-1', name: 'Solar Panel Leads UK', client: 'Apex Media Ltd', vertical: 'Solar' },
-    { id: 'lb-2', name: 'Home Insurance Quotes', client: 'Brightfield Corp', vertical: 'Insurance' },
-    { id: 'lb-3', name: 'Mortgage Leads London', client: 'Clearwater Digital', vertical: 'Finance' },
-    { id: 'lb-4', name: 'Debt Management Leads', client: 'Delta Solutions', vertical: 'Finance' },
-    { id: 'lb-5', name: 'Boiler Installation UK', client: 'Apex Media Ltd', vertical: 'Home Services' },
-    { id: 'lb-6', name: 'Life Insurance Over 50s', client: 'Echo Marketing', vertical: 'Insurance' },
-    { id: 'lb-8', name: 'Personal Injury Claims', client: 'Clearwater Digital', vertical: 'Legal' },
+    { id: 'lb-1', name: 'Solar Panel Leads UK (for demo)', client: 'Apex Media Ltd (for demo)', vertical: 'Solar' },
+    { id: 'lb-2', name: 'Home Insurance Quotes (for demo)', client: 'Brightfield Corp (for demo)', vertical: 'Insurance' },
+    { id: 'lb-3', name: 'Mortgage Leads London (for demo)', client: 'Clearwater Digital (for demo)', vertical: 'Finance' },
+    { id: 'lb-4', name: 'Debt Management Leads (for demo)', client: 'Delta Solutions (for demo)', vertical: 'Finance' },
+    { id: 'lb-5', name: 'Boiler Installation UK (for demo)', client: 'Apex Media Ltd (for demo)', vertical: 'Home Services' },
+    { id: 'lb-6', name: 'Life Insurance Over 50s (for demo)', client: 'Echo Marketing (for demo)', vertical: 'Insurance' },
+    { id: 'lb-8', name: 'Personal Injury Claims (for demo)', client: 'Clearwater Digital (for demo)', vertical: 'Legal' },
   ];
 
   return campaigns.map((c) => {
@@ -89,7 +91,10 @@ function generateCampaignReport(): CampaignReportRow[] {
 }
 
 function generateClientPnl(): ClientPnlRow[] {
-  const clients = ['Apex Media Ltd', 'Brightfield Corp', 'Clearwater Digital', 'Delta Solutions', 'Echo Marketing'];
+  // All names suffixed " (for demo)" so if this generator is ever wired back
+  // into a live endpoint by mistake, the UI immediately signals that the
+  // numbers aren't real client revenue.
+  const clients = ['Apex Media Ltd (for demo)', 'Brightfield Corp (for demo)', 'Clearwater Digital (for demo)', 'Delta Solutions (for demo)', 'Echo Marketing (for demo)'];
   const rows: ClientPnlRow[] = [];
 
   for (const client of clients) {
@@ -119,11 +124,11 @@ function generateClientPnl(): ClientPnlRow[] {
 
 function generateSupplierReport(): SupplierReportRow[] {
   return [
-    { supplierId: 's-1', supplierName: 'Google Ads UK', platform: 'Google Ads', totalSpend: 14200, totalLeads: 1420, cpl: 10.00, campaigns: 4 },
-    { supplierId: 's-2', supplierName: 'Facebook Lead Ads', platform: 'Facebook', totalSpend: 8800, totalLeads: 1100, cpl: 8.00, campaigns: 3 },
-    { supplierId: 's-3', supplierName: 'LinkedIn Ads', platform: 'LinkedIn', totalSpend: 5600, totalLeads: 280, cpl: 20.00, campaigns: 1 },
-    { supplierId: 's-4', supplierName: 'Bing Ads', platform: 'Bing', totalSpend: 3200, totalLeads: 640, cpl: 5.00, campaigns: 2 },
-    { supplierId: 's-5', supplierName: 'TikTok Ads', platform: 'TikTok', totalSpend: 1800, totalLeads: 225, cpl: 8.00, campaigns: 1 },
+    { supplierId: 's-1', supplierName: 'Google Ads UK (for demo)', platform: 'Google Ads', totalSpend: 14200, totalLeads: 1420, cpl: 10.00, campaigns: 4 },
+    { supplierId: 's-2', supplierName: 'Facebook Lead Ads (for demo)', platform: 'Facebook', totalSpend: 8800, totalLeads: 1100, cpl: 8.00, campaigns: 3 },
+    { supplierId: 's-3', supplierName: 'LinkedIn Ads (for demo)', platform: 'LinkedIn', totalSpend: 5600, totalLeads: 280, cpl: 20.00, campaigns: 1 },
+    { supplierId: 's-4', supplierName: 'Bing Ads (for demo)', platform: 'Bing', totalSpend: 3200, totalLeads: 640, cpl: 5.00, campaigns: 2 },
+    { supplierId: 's-5', supplierName: 'TikTok Ads (for demo)', platform: 'TikTok', totalSpend: 1800, totalLeads: 225, cpl: 8.00, campaigns: 1 },
   ];
 }
 
@@ -152,14 +157,18 @@ function generateFinancialOverview(): FinancialOverviewRow[] {
  * Join LeadByte's campaign report with Sato's campaign metadata
  * (LeadByte doesn't store client/vertical on its end).
  */
+// Stale hardcoded mapping from a pre-LeadByte-sync era. Real LeadByte campaign
+// names rarely match these keys, so production lookups land on 'Unknown'
+// (which is honest). Kept here only as a fallback for the unlikely match;
+// labelled " (for demo)" on the off-chance it ever fires.
 const CAMPAIGN_META: Record<string, { clientName: string; vertical: string }> = {
-  'Solar Panel Leads UK': { clientName: 'Apex Media Ltd', vertical: 'Solar' },
-  'Home Insurance Quotes': { clientName: 'Brightfield Corp', vertical: 'Insurance' },
-  'Mortgage Leads London': { clientName: 'Clearwater Digital', vertical: 'Finance' },
-  'Debt Management Leads': { clientName: 'Delta Solutions', vertical: 'Finance' },
-  'Boiler Installation UK': { clientName: 'Apex Media Ltd', vertical: 'Home Services' },
-  'Life Insurance Over 50s': { clientName: 'Echo Marketing', vertical: 'Insurance' },
-  'Personal Injury Claims': { clientName: 'Clearwater Digital', vertical: 'Legal' },
+  'Solar Panel Leads UK': { clientName: 'Apex Media Ltd (for demo)', vertical: 'Solar' },
+  'Home Insurance Quotes': { clientName: 'Brightfield Corp (for demo)', vertical: 'Insurance' },
+  'Mortgage Leads London': { clientName: 'Clearwater Digital (for demo)', vertical: 'Finance' },
+  'Debt Management Leads': { clientName: 'Delta Solutions (for demo)', vertical: 'Finance' },
+  'Boiler Installation UK': { clientName: 'Apex Media Ltd (for demo)', vertical: 'Home Services' },
+  'Life Insurance Over 50s': { clientName: 'Echo Marketing (for demo)', vertical: 'Insurance' },
+  'Personal Injury Claims': { clientName: 'Clearwater Digital (for demo)', vertical: 'Legal' },
 };
 
 // ─── Service ───
