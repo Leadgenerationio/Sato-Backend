@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import * as bankFeed from '../services/bank-feed.service.js';
+import { classifyXeroError } from '../utils/xero-errors.js';
 import { logger } from '../utils/logger.js';
 
 export async function listTransactions(req: Request, res: Response) {
@@ -62,9 +63,11 @@ export async function syncNow(req: Request, res: Response) {
     res.json({ status: 'success', data: result });
   } catch (err) {
     logger.error({ err }, 'Bank-feed sync failed');
-    res.status(502).json({
+    const classified = classifyXeroError(err);
+    res.status(classified.httpStatus).json({
       status: 'error',
-      message: err instanceof Error ? err.message : 'Sync failed',
+      code: classified.code,
+      message: classified.message,
     });
   }
 }

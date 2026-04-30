@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import * as invoiceService from '../services/invoice.service.js';
 import { uuidShape } from '../utils/zod-helpers.js';
+import { classifyXeroError } from '../utils/xero-errors.js';
 
 export async function listInvoices(req: Request, res: Response) {
   let invoices = await invoiceService.listInvoices(req.user!);
@@ -89,10 +90,15 @@ export async function pushToXero(req: Request, res: Response) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Push to Xero failed';
     if (msg.includes('not found')) {
-      res.status(404).json({ status: 'error', message: msg });
+      res.status(404).json({ status: 'error', code: 'not_found', message: msg });
       return;
     }
-    res.status(502).json({ status: 'error', message: msg });
+    const classified = classifyXeroError(err);
+    res.status(classified.httpStatus).json({
+      status: 'error',
+      code: classified.code,
+      message: classified.message,
+    });
   }
 }
 

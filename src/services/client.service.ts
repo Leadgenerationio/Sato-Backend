@@ -6,6 +6,7 @@ import { creditChecks } from '../db/schema/credit-checks.js';
 import { invoices } from '../db/schema/invoices.js';
 import * as creditCheck from '../integrations/credit-check/index.js';
 import { scoreToRiskRating } from '../integrations/credit-check/types.js';
+import { createNotification } from './notification.service.js';
 import { logger } from '../utils/logger.js';
 import type { AuthPayload } from '../types/index.js';
 
@@ -210,6 +211,21 @@ export async function createClient(data: Partial<ClientDetail>, requester: AuthP
       })
       .catch((err) => {
         logger.error({ err, clientId: row.id }, 'Auto credit check failed on client create');
+        // Surface to staff — without this the failure was silent and they'd assume
+        // a fresh client had no score for legitimate reasons (e.g. brand new ltd
+        // with no history) when in fact Endole/Creditsafe just errored.
+        void createNotification({
+          type: 'system_error',
+          severity: 'warning',
+          title: `Credit check failed — ${row.companyName}`,
+          message:
+            (err instanceof Error ? err.message : 'Endole/Creditsafe lookup failed') +
+            '. Click Run Credit Check on the client page to retry.',
+          actionUrl: `/clients/${row.id}`,
+          metadata: { clientId: row.id, companyNumber: row.companyNumber },
+        }).catch((notifyErr) => {
+          logger.error({ notifyErr }, 'Failed to write credit-check failure notification');
+        });
       });
   }
 
