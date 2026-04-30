@@ -1,6 +1,7 @@
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { trafficSources } from '../db/schema/traffic-sources.js';
+import { isUuid } from '../utils/zod-helpers.js';
 import type { AuthPayload } from '../types/index.js';
 
 /**
@@ -44,6 +45,10 @@ export async function listSourcesForCampaign(
   campaignId: string,
   _requester: AuthPayload,
 ): Promise<TrafficSource[]> {
+  // LeadByte campaigns have numeric IDs and no internal traffic-source rows.
+  // Skip the DB query before Postgres rejects the non-uuid value.
+  if (!isUuid(campaignId)) return [];
+
   const rows = await db
     .select()
     .from(trafficSources)
@@ -53,6 +58,7 @@ export async function listSourcesForCampaign(
 }
 
 export async function countSourcesForCampaign(campaignId: string): Promise<number> {
+  if (!isUuid(campaignId)) return 0;
   const [row] = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(trafficSources)

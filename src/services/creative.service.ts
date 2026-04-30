@@ -4,6 +4,7 @@ import { creatives } from '../db/schema/creatives.js';
 import { campaigns } from '../db/schema/campaigns.js';
 import { clients } from '../db/schema/clients.js';
 import { logger } from '../utils/logger.js';
+import { isUuid } from '../utils/zod-helpers.js';
 import type { AuthPayload } from '../types/index.js';
 
 /** Verify a campaign belongs to a client owned by the requester's business. */
@@ -56,6 +57,11 @@ export async function listCreativesForCampaign(
 ): Promise<CreativeDto[]> {
   const businessId = requester.businessId;
   if (!businessId) return [];
+
+  // LeadByte campaign IDs are numeric strings ("2", "157") — they have no
+  // local creative rows because the column is a Postgres uuid. Short-circuit
+  // before the DB query to avoid an "invalid input syntax for type uuid" 500.
+  if (!isUuid(campaignId)) return [];
 
   if (!(await campaignBelongsToBusiness(campaignId, businessId))) return [];
 

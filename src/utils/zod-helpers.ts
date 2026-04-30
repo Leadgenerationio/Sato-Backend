@@ -12,3 +12,10 @@ import { z } from 'zod';
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const uuidShape = (label = 'must be a UUID') => z.string().regex(UUID_SHAPE, label);
+
+/** Pure regex check — used by services that need to short-circuit before
+ * passing a value to a Postgres `uuid` column (LeadByte campaign IDs are
+ * numeric strings like "2" and would crash an internal Postgres query). */
+export function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_SHAPE.test(value);
+}

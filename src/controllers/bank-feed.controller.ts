@@ -17,12 +17,26 @@ export async function listTransactions(req: Request, res: Response) {
 
 export async function categorizeTransaction(req: Request, res: Response) {
   const { categoryId, learnRule, applyRetroactively } = req.body ?? {};
-  await bankFeed.categorizeTransaction(req.user!, req.params.id as string, {
-    categoryId: categoryId ?? null,
-    learnRule: !!learnRule,
-    applyRetroactively: !!applyRetroactively,
-  });
-  res.json({ status: 'success', data: { ok: true } });
+  try {
+    await bankFeed.categorizeTransaction(req.user!, req.params.id as string, {
+      categoryId: categoryId ?? null,
+      learnRule: !!learnRule,
+      applyRetroactively: !!applyRetroactively,
+    });
+    res.json({ status: 'success', data: { ok: true } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Categorization failed';
+    if (/transaction not found/i.test(msg)) {
+      res.status(404).json({ status: 'error', code: 'transaction_not_found', message: msg });
+      return;
+    }
+    if (/invalid input syntax for type uuid|invalid uuid/i.test(msg)) {
+      res.status(400).json({ status: 'error', code: 'invalid_id', message: 'Invalid transaction or category ID' });
+      return;
+    }
+    logger.error({ err, transactionId: req.params.id }, 'Categorize transaction failed');
+    res.status(500).json({ status: 'error', code: 'categorize_failed', message: msg });
+  }
 }
 
 export async function listCategories(req: Request, res: Response) {
