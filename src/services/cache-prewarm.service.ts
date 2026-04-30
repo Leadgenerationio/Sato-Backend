@@ -1,6 +1,8 @@
 import { redis } from '../config/redis.js';
 import { logger } from '../utils/logger.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
+import { recordLeadByteSync } from '../controllers/integration.controller.js';
+import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
 
 /**
  * Periodically refreshes the LeadByte caches the dashboard depends on,
@@ -28,16 +30,38 @@ import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 // dies and no users hit for 5 min): one slow request, then back to fast.
 const CACHE_TTL_SECONDS = 300;
 
+// All 7 windows the LeadByte Dashboard exposes via the window selector.
+// Keys must match what `leadbyte.routes.ts` reads through `cached()`.
+const REPORT_WINDOWS: DeliveryWindow[] = [
+  'today',
+  'yesterday',
+  'this_week',
+  'last_week',
+  'this_month',
+  'last_month',
+  'ytd',
+];
+
 export async function prewarmLeadByteCache(): Promise<{
   campaignsCached: number;
   reportsCached: number;
+  supplierSpendCached: number;
+  buyersCached: boolean;
+  deliveriesCached: boolean;
   durationMs: number;
 }> {
   const start = Date.now();
 
   if (!redis) {
     logger.warn('Cache prewarm skipped — Redis not available');
-    return { campaignsCached: 0, reportsCached: 0, durationMs: 0 };
+    return {
+      campaignsCached: 0,
+      reportsCached: 0,
+      supplierSpendCached: 0,
+      buyersCached: false,
+      deliveriesCached: false,
+      durationMs: 0,
+    };
   }
 
   // Refresh the campaign LIST first — used by listCampaigns directly.
@@ -46,20 +70,13 @@ export async function prewarmLeadByteCache(): Promise<{
     await redis.set('lb:campaigns', JSON.stringify(campaigns), 'EX', CACHE_TTL_SECONDS);
   }
 
-  // Refresh the four /reports/campaign windows that listCampaigns reads.
-  // Sequential to avoid the burst-rate-limit pattern that caused some
-  // windows to come back empty earlier. Empty results are NOT written
-  // (matches the cache-helper guard) so a transient blip doesn't pin
-  // zeros until the next prewarm.
-  const windows: Array<{ key: string; w: 'today' | 'this_week' | 'this_month' | 'ytd' }> = [
-    { key: 'lb:report:today:v5', w: 'today' },
-    { key: 'lb:report:week:v5', w: 'this_week' },
-    { key: 'lb:report:month:v5', w: 'this_month' },
-    { key: 'lb:report:ytd:v5', w: 'ytd' },
-  ];
-
+  // Refresh /reports/campaign for all 7 windows. Sequential to avoid the
+  // burst-rate-limit pattern that caused some windows to come back empty.
+  // Empty results are NOT written (matches the cache-helper guard) so a
+  // transient blip doesn't pin zeros until the next prewarm.
   let reportsCached = 0;
-  for (const { key, w } of windows) {
+  for (const w of REPORT_WINDOWS) {
+    const key = `lb:report:${w}:v5`;
     try {
       const rows = await leadbyte.getCampaignReport(w);
       if (rows.length > 0) {
@@ -73,11 +90,68 @@ export async function prewarmLeadByteCache(): Promise<{
     }
   }
 
+  // /reports/supplier-spend per window — drives the dashboard's spend table.
+  let supplierSpendCached = 0;
+  for (const w of REPORT_WINDOWS) {
+    const key = `lb:supplier-spend:${w}:v1`;
+    try {
+      const rows = await leadbyte.getSupplierSpend(w);
+      if (rows.length > 0) {
+        await redis.set(key, JSON.stringify(rows), 'EX', CACHE_TTL_SECONDS);
+        supplierSpendCached++;
+      }
+    } catch (err) {
+      logger.warn({ err, key, window: w }, 'Cache prewarm: supplier-spend fetch failed — skip');
+    }
+  }
+
+  // Buyers + deliveries listings (LeadByte → Buyers / Deliveries pages).
+  let buyersCached = false;
+  try {
+    const buyers = await leadbyte.getBuyers();
+    if (buyers.length > 0) {
+      await redis.set('lb:buyers:all:v1', JSON.stringify(buyers), 'EX', CACHE_TTL_SECONDS);
+      buyersCached = true;
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Cache prewarm: buyers fetch failed — skip');
+  }
+
+  let deliveriesCached = false;
+  try {
+    const deliveries = await leadbyte.getDeliveries();
+    if (deliveries.length > 0) {
+      await redis.set('lb:deliveries:all:v1', JSON.stringify(deliveries), 'EX', CACHE_TTL_SECONDS);
+      deliveriesCached = true;
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Cache prewarm: deliveries fetch failed — skip');
+  }
+
+  // Mark a successful sync timestamp so the Settings → Integrations LeadByte
+  // tile shows "Last sync: a few minutes ago" even if the slower 2-min sync
+  // job hasn't run / has failed.
+  recordLeadByteSync(new Date().toISOString());
+
   const durationMs = Date.now() - start;
   logger.info(
-    { campaignsCached: campaigns.length, reportsCached, durationMs },
+    {
+      campaignsCached: campaigns.length,
+      reportsCached,
+      supplierSpendCached,
+      buyersCached,
+      deliveriesCached,
+      durationMs,
+    },
     'Cache prewarm complete',
   );
 
-  return { campaignsCached: campaigns.length, reportsCached, durationMs };
+  return {
+    campaignsCached: campaigns.length,
+    reportsCached,
+    supplierSpendCached,
+    buyersCached,
+    deliveriesCached,
+    durationMs,
+  };
 }

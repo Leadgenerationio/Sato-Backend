@@ -299,6 +299,11 @@ export async function runCreditCheck(clientId: string, requester: AuthPayload): 
     .set({
       creditScore: report.creditScore,
       creditLastChecked: new Date(report.checkedAt),
+      // Persist Endole company link only on first successful check — Endole
+      // identifies a company by its Companies House number, which is the
+      // same value we just verified against. The External System IDs card
+      // surfaces this so admins can see which Endole record is bound.
+      endoleCompanyId: client.endoleCompanyId ?? client.companyNumber,
       updatedAt: new Date(),
     })
     .where(eq(clients.id, clientId));

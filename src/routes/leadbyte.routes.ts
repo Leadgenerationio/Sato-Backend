@@ -3,6 +3,13 @@ import { authMiddleware } from '../middleware/auth.middleware.js';
 import { requireRole } from '../middleware/rbac.middleware.js';
 import * as lb from '../integrations/leadbyte/leadbyte-client.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
+import { cached } from '../utils/cache.js';
+
+// Read-through TTL for the dashboard caches. The 90s prewarmer keeps these
+// keys hot, so user requests almost always hit a warm Redis entry; this TTL
+// is the safety net if the worker dies and acts as the cap on staleness.
+const DASHBOARD_TTL_SECONDS = 300;
+const LIST_TTL_SECONDS = 300;
 
 export const leadbyteRoutes: RouterType = Router();
 
@@ -54,7 +61,15 @@ leadbyteRoutes.post('/leads/deliverychecker', ops, wrap((req) => lb.deliveryChec
 
 // ─── Deliveries ─────────────────────────────────────────────────────────────
 leadbyteRoutes.post('/deliveries/create', ops, wrap((req) => lb.createDelivery(req.body)));
-leadbyteRoutes.get('/deliveries', ops, wrap((req) => lb.getDeliveries(req.query as unknown as { status?: 'Active' | 'Inactive' | 'Saved'; bid?: string })));
+leadbyteRoutes.get('/deliveries', ops, wrap((req) => {
+  const filter = req.query as unknown as { status?: 'Active' | 'Inactive' | 'Saved'; bid?: string };
+  // Cache only the unfiltered listing (the only shape the FE currently calls).
+  // Filtered queries are rare and bypass the cache to keep results live.
+  if (!filter.status && !filter.bid) {
+    return cached('lb:deliveries:all:v1', LIST_TTL_SECONDS, () => lb.getDeliveries(filter));
+  }
+  return lb.getDeliveries(filter);
+}));
 leadbyteRoutes.get('/deliveries/:id', ops, wrap((req) => lb.getDeliveryById(pathId(req))));
 leadbyteRoutes.put('/deliveries', ops, wrap((req) => lb.updateDeliveries(req.body.deliveries)));
 leadbyteRoutes.put('/deliveries/:id', ops, wrap((req) => lb.updateDeliveryById(pathId(req), req.body.update)));
@@ -87,19 +102,29 @@ function parseWindow(req: Request): DeliveryWindow {
 }
 
 /** Per-campaign summary (leads/valid/revenue/payout/profit) for a given time window. */
-leadbyteRoutes.get('/reports/campaign', ops, wrap((req) => lb.getCampaignReport(parseWindow(req))));
+leadbyteRoutes.get('/reports/campaign', ops, wrap((req) => {
+  const window = parseWindow(req);
+  return cached(`lb:report:${window}:v5`, DASHBOARD_TTL_SECONDS, () => lb.getCampaignReport(window));
+}));
 
 /** Supplier-level spend breakdown for a given time window. */
-leadbyteRoutes.get('/reports/supplier-spend', ops, wrap((req) => lb.getSupplierSpend(parseWindow(req))));
+leadbyteRoutes.get('/reports/supplier-spend', ops, wrap((req) => {
+  const window = parseWindow(req);
+  return cached(`lb:supplier-spend:${window}:v1`, DASHBOARD_TTL_SECONDS, () => lb.getSupplierSpend(window));
+}));
 
 /**
  * Aggregated dashboard summary — totals across all campaigns for the selected window.
  * Returns { window, leads, valid, revenue, payout, profit, campaigns: n }.
  * Per Sam's spec: no invalid split shown in UI.
+ *
+ * Reuses the same `lb:report:{window}:v5` cache key as /reports/campaign so we
+ * don't double-hit LeadByte when the dashboard loads (summary + campaign-table
+ * + supplier-spend fire concurrently).
  */
 leadbyteRoutes.get('/reports/summary', ops, wrap(async (req) => {
   const window = parseWindow(req);
-  const rows = await lb.getCampaignReport(window);
+  const rows = await cached(`lb:report:${window}:v5`, DASHBOARD_TTL_SECONDS, () => lb.getCampaignReport(window));
   const totals = rows.reduce(
     (acc, r) => {
       acc.leads += Number(r.leads || 0);
@@ -124,7 +149,13 @@ leadbyteRoutes.post('/credit/add', finance, wrap((req) => lb.addCredit(req.body)
 
 // ─── Buyers ─────────────────────────────────────────────────────────────────
 leadbyteRoutes.post('/buyers', owner, wrap((req) => lb.createBuyer(req.body)));
-leadbyteRoutes.get('/buyers', ops, wrap((req) => lb.getBuyers(req.query.status as 'Active' | 'Inactive' | undefined)));
+leadbyteRoutes.get('/buyers', ops, wrap((req) => {
+  const status = req.query.status as 'Active' | 'Inactive' | undefined;
+  if (!status) {
+    return cached('lb:buyers:all:v1', LIST_TTL_SECONDS, () => lb.getBuyers());
+  }
+  return lb.getBuyers(status);
+}));
 leadbyteRoutes.get('/buyers/:id', ops, wrap((req) => lb.getBuyerById(pathId(req))));
 leadbyteRoutes.put('/buyers', owner, wrap((req) => lb.updateBuyers(req.body.buyers)));
 leadbyteRoutes.put('/buyers/:id', owner, wrap((req) => lb.updateBuyerById(pathId(req), req.body.update)));

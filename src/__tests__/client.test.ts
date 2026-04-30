@@ -165,6 +165,17 @@ describe('Client API', () => {
       expect(res.body.data.creditCheck.riskRating).toBeDefined();
     });
 
+    it('persists endoleCompanyId on the client row after a successful check', async () => {
+      // Run a check to ensure the column gets populated, then read the client
+      // back. The External System IDs card on the client detail page reads
+      // this column, so a regression here would make the card show
+      // "Not linked" forever even after running checks (pre-fix behaviour).
+      await request(app).post(`/api/v1/clients/${realClientId}/credit-check`).set('Authorization', `Bearer ${ownerToken}`);
+      const res = await request(app).get(`/api/v1/clients/${realClientId}`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.client.endoleCompanyId).toBe('00445790');
+    });
+
     it('returns 404 for non-existent client', async () => {
       const res = await request(app).post(`/api/v1/clients/${MISSING_UUID}/credit-check`).set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(404);
