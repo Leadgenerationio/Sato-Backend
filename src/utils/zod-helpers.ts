@@ -19,3 +19,12 @@ export const uuidShape = (label = 'must be a UUID') => z.string().regex(UUID_SHA
 export function isUuid(value: unknown): value is string {
   return typeof value === 'string' && UUID_SHAPE.test(value);
 }
+
+/** Coerce a possibly non-UUID actor ID to either UUID-or-null for safe FK
+ * insertion. The legacy in-memory seed users have ids like '1','2','3' — if
+ * those land in a Postgres `uuid` column the insert blows up with "invalid
+ * input syntax for type uuid". Use this everywhere `requester.userId` is
+ * persisted as a `references(users.id)` FK. */
+export function uuidOrNull(value: unknown): string | null {
+  return isUuid(value) ? value : null;
+}

@@ -4,7 +4,7 @@ import { creatives } from '../db/schema/creatives.js';
 import { campaigns } from '../db/schema/campaigns.js';
 import { clients } from '../db/schema/clients.js';
 import { logger } from '../utils/logger.js';
-import { isUuid } from '../utils/zod-helpers.js';
+import { isUuid, uuidOrNull } from '../utils/zod-helpers.js';
 import type { AuthPayload } from '../types/index.js';
 
 /** Verify a campaign belongs to a client owned by the requester's business. */
@@ -101,7 +101,7 @@ export async function createCreative(
       r2Key: input.r2Key,
       sizeBytes: input.sizeBytes,
       contentType: input.contentType,
-      uploadedBy: requester.userId,
+      uploadedBy: uuidOrNull(requester.userId),
     })
     .returning();
 

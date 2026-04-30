@@ -7,6 +7,7 @@ import {
 } from '../db/schema/bank-feed.js';
 import * as xeroClient from '../integrations/xero/xero-client.js';
 import { logger } from '../utils/logger.js';
+import { uuidOrNull } from '../utils/zod-helpers.js';
 import type { AuthPayload } from '../types/index.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -242,7 +243,7 @@ export async function categorizeTransaction(
         vendorPattern: tx.vendorName,
         matchType: 'contains',
         categoryId: data.categoryId,
-        createdBy: requester.userId ?? null,
+        createdBy: uuidOrNull(requester.userId),
       })
       .returning();
 

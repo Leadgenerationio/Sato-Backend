@@ -183,19 +183,38 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
   const campaign = campaigns.find((c) => c.id === id);
   if (!campaign) return null;
 
-  const deliveries = await leadbyte.getDeliveryReports(id, 30);
-  const suppliers = await leadbyte.getSuppliers(id);
+  // Fetch in parallel:
+  //  - daily lead breakdown (for the per-day chart)
+  //  - suppliers (for the supplier table)
+  //  - 4 windows of /reports/campaign keyed by name (for accurate
+  //    revenue / cost / margin — /reports/leadactivity returns count only)
+  const [deliveries, suppliers, todayReport, weekReport, monthReport, ytdReport] =
+    await Promise.all([
+      leadbyte.getDeliveryReports(id, 30),
+      leadbyte.getSuppliers(id),
+      cached('lb:report:today:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('today')),
+      cached('lb:report:week:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_week')),
+      cached('lb:report:month:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_month')),
+      cached('lb:report:ytd:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('ytd')),
+    ]);
 
-  const today = new Date().toISOString().split('T')[0];
-  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
-  const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+  // /reports/campaign rows are keyed by campaign name (LeadByte's choice).
+  const findRow = (rows: typeof ytdReport) => rows.find((r) => r.campaign === campaign.name);
+  const todayRow = findRow(todayReport);
+  const weekRow = findRow(weekReport);
+  const monthRow = findRow(monthReport);
+  const ytdRow = findRow(ytdReport);
 
-  const leadsToday = deliveries.filter((d) => d.date === today).reduce((sum, d) => sum + d.leadCount, 0);
-  const leadsThisWeek = deliveries.filter((d) => d.date >= weekAgo).reduce((sum, d) => sum + d.leadCount, 0);
-  const leadsThisMonth = deliveries.filter((d) => d.date >= monthAgo).reduce((sum, d) => sum + d.leadCount, 0);
-  const totalLeads = deliveries.reduce((sum, d) => sum + d.leadCount, 0);
-  const totalRevenue = deliveries.reduce((sum, d) => sum + d.revenue, 0);
-  const totalCost = deliveries.reduce((sum, d) => sum + d.cost, 0);
+  const totalLeads = ytdRow?.leads ?? 0;
+  const leadsToday = todayRow?.leads ?? 0;
+  const leadsThisWeek = weekRow?.leads ?? 0;
+  const leadsThisMonth = monthRow?.leads ?? 0;
+  const totalRevenue = ytdRow?.revenue ?? 0;
+  const totalCost =
+    (ytdRow?.payout ?? 0) +
+    (ytdRow?.emailCost ?? 0) +
+    (ytdRow?.smsCost ?? 0) +
+    (ytdRow?.validationCost ?? 0);
   const cpl = totalLeads > 0 ? totalCost / totalLeads : 0;
   const margin = totalRevenue > 0 ? ((totalRevenue - totalCost) / totalRevenue) * 100 : 0;
 
