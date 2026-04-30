@@ -3,17 +3,11 @@ import { z } from 'zod';
 import * as agreementService from '../services/agreement.service.js';
 import { verifyWebhookSignature } from '../integrations/signnow/signnow-client.js';
 import { logger } from '../utils/logger.js';
-
-// Zod 4's .uuid() enforces a strict UUID v4 format with non-zero version bits,
-// which rejects the demo seed client UUID 00000000-0000-0000-0000-000000000001.
-// Postgres' uuid column already enforces shape on insert, so accepting any
-// 36-char UUID-shaped string here matches the FE/seed reality and lets Sam
-// send agreements for the demo client. Mismatched ids still 4xx at insert.
-const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { uuidShape } from '../utils/zod-helpers.js';
 
 const sendSchema = z
   .object({
-    clientId: z.string().regex(UUID_SHAPE, 'must be a UUID'),
+    clientId: uuidShape(),
     signerEmail: z.string().email(),
     signerName: z.string().min(1),
     /** Either documentBase64 OR r2SourceKey must be set; never both. */

@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import * as creativeService from '../services/creative.service.js';
+import { uuidShape } from '../utils/zod-helpers.js';
 
 export async function listForCampaign(req: Request, res: Response) {
   const creatives = await creativeService.listCreativesForCampaign(
@@ -11,7 +12,7 @@ export async function listForCampaign(req: Request, res: Response) {
 }
 
 const createSchema = z.object({
-  campaignId: z.string().uuid(),
+  campaignId: uuidShape(),
   name: z.string().min(1).max(255),
   type: z.enum(['image', 'video', 'text']),
   r2Key: z.string().min(1),

@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
 import * as invoiceService from '../services/invoice.service.js';
+import { uuidShape } from '../utils/zod-helpers.js';
 
 export async function listInvoices(req: Request, res: Response) {
   let invoices = await invoiceService.listInvoices(req.user!);
@@ -45,7 +46,7 @@ export async function getOverdue(req: Request, res: Response) {
 
 export const createInvoiceSchema = z.object({
   body: z.object({
-    clientId: z.string().uuid(),
+    clientId: uuidShape(),
     currency: z.string().length(3),
     lineItems: z
       .array(
