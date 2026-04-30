@@ -79,6 +79,12 @@ export interface CampaignSummary {
   startDate: string;
 }
 
+export interface CampaignWindowTotals {
+  leads: number;
+  revenue: number;
+  cost: number;
+}
+
 export interface CampaignDetail extends CampaignSummary {
   leadDeliveries: {
     date: string;
@@ -88,6 +94,19 @@ export interface CampaignDetail extends CampaignSummary {
     revenue: number;
     cost: number;
   }[];
+  /** Per-window aggregate totals computed from /reports/campaign (which has
+   * accurate revenue + cost), so the FE can render the per-tab figures
+   * without relying on the daily leadactivity feed (which doesn't carry
+   * money figures and sometimes returns empty). */
+  windowReports: {
+    today: CampaignWindowTotals;
+    yesterday: CampaignWindowTotals;
+    this_week: CampaignWindowTotals;
+    last_week: CampaignWindowTotals;
+    this_month: CampaignWindowTotals;
+    last_month: CampaignWindowTotals;
+    ytd: CampaignWindowTotals;
+  };
   suppliers: {
     id: string;
     name: string;
@@ -186,24 +205,53 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
   // Fetch in parallel:
   //  - daily lead breakdown (for the per-day chart)
   //  - suppliers (for the supplier table)
-  //  - 4 windows of /reports/campaign keyed by name (for accurate
-  //    revenue / cost / margin — /reports/leadactivity returns count only)
-  const [deliveries, suppliers, todayReport, weekReport, monthReport, ytdReport] =
-    await Promise.all([
-      leadbyte.getDeliveryReports(id, 30),
-      leadbyte.getSuppliers(id),
-      cached('lb:report:today:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('today')),
-      cached('lb:report:week:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_week')),
-      cached('lb:report:month:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_month')),
-      cached('lb:report:ytd:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('ytd')),
-    ]);
+  //  - all 7 windows of /reports/campaign keyed by name (for accurate
+  //    revenue / cost / margin per tab — /reports/leadactivity returns
+  //    count only and sometimes returns nothing at all, which made the
+  //    detail page tabs all show £0). Each window is independently cached.
+  const [
+    deliveries, suppliers,
+    todayReport, yesterdayReport, weekReport, lastWeekReport,
+    monthReport, lastMonthReport, ytdReport,
+  ] = await Promise.all([
+    leadbyte.getDeliveryReports(id, 30),
+    leadbyte.getSuppliers(id),
+    cached('lb:report:today:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('today')),
+    cached('lb:report:yesterday:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('yesterday')),
+    cached('lb:report:week:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_week')),
+    cached('lb:report:last_week:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('last_week')),
+    cached('lb:report:month:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_month')),
+    cached('lb:report:last_month:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('last_month')),
+    cached('lb:report:ytd:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('ytd')),
+  ]);
 
   // /reports/campaign rows are keyed by campaign name (LeadByte's choice).
   const findRow = (rows: typeof ytdReport) => rows.find((r) => r.campaign === campaign.name);
   const todayRow = findRow(todayReport);
+  const yesterdayRow = findRow(yesterdayReport);
   const weekRow = findRow(weekReport);
+  const lastWeekRow = findRow(lastWeekReport);
   const monthRow = findRow(monthReport);
+  const lastMonthRow = findRow(lastMonthReport);
   const ytdRow = findRow(ytdReport);
+
+  const rowToWindow = (r: typeof todayRow): CampaignWindowTotals => ({
+    leads: r?.leads ?? 0,
+    revenue: Math.round((r?.revenue ?? 0) * 100) / 100,
+    cost: Math.round(
+      ((r?.payout ?? 0) + (r?.emailCost ?? 0) + (r?.smsCost ?? 0) + (r?.validationCost ?? 0)) * 100,
+    ) / 100,
+  });
+
+  const windowReports = {
+    today: rowToWindow(todayRow),
+    yesterday: rowToWindow(yesterdayRow),
+    this_week: rowToWindow(weekRow),
+    last_week: rowToWindow(lastWeekRow),
+    this_month: rowToWindow(monthRow),
+    last_month: rowToWindow(lastMonthRow),
+    ytd: rowToWindow(ytdRow),
+  };
 
   const totalLeads = ytdRow?.leads ?? 0;
   const leadsToday = todayRow?.leads ?? 0;
@@ -244,6 +292,7 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
       revenue: d.revenue,
       cost: d.cost,
     })),
+    windowReports,
     suppliers: suppliers.map((s) => ({
       id: s.id,
       name: s.name,

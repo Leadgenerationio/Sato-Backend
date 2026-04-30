@@ -120,9 +120,20 @@ function requireConfigured(op: string): void {
  */
 function unwrapReport<T>(res: unknown): T[] {
   if (Array.isArray(res)) return res as T[];
-  const r = res as { data?: unknown; report?: unknown };
-  if (Array.isArray(r?.data)) return r.data as T[];
-  if (Array.isArray(r?.report)) return r.report as T[];
+  if (!res || typeof res !== 'object') return [];
+  const r = res as Record<string, unknown>;
+  // Common shapes first (data, report).
+  if (Array.isArray(r.data)) return r.data as T[];
+  if (Array.isArray(r.report)) return r.report as T[];
+  // /reports/leadactivity (and some other endpoints) wrap the rows under a
+  // semantic key like "leads", "activity", or "rows" depending on
+  // showData/groupBy. Pick the first array-shaped value that isn't a
+  // metadata field — this keeps us robust against LeadByte tweaking shapes.
+  const skipKeys = new Set(['status', 'message', 'benchmark', 'meta', 'pagination']);
+  for (const [key, val] of Object.entries(r)) {
+    if (skipKeys.has(key)) continue;
+    if (Array.isArray(val)) return val as T[];
+  }
   return [];
 }
 
