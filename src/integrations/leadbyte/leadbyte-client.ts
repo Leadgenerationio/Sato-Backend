@@ -127,6 +127,29 @@ function unwrapReport<T>(res: unknown): T[] {
 }
 
 /**
+ * LeadByte's list endpoints (e.g. /buyers, /deliveries, /responders) return
+ * `{status: 'Success', message: 'OK', <pluralKey>: [...]}` rather than the
+ * raw array — the upstream API wraps the list in an envelope.
+ *
+ * Pre-fix: callers blindly cast `lbGet<T[]>(...)`, so the typed return looked
+ * right but was actually the envelope object. The dashboard /buyers + /deliveries
+ * pages then tried to `.map()` over a non-array and hung "loading" forever.
+ *
+ * This helper extracts the list whether it lives under the named key, under
+ * `data`, or is already a plain array (for paranoid robustness against future
+ * shape changes).
+ */
+function unwrapList<T>(res: unknown, primaryKey: string): T[] {
+  if (Array.isArray(res)) return res as T[];
+  if (res && typeof res === 'object') {
+    const obj = res as Record<string, unknown>;
+    if (Array.isArray(obj[primaryKey])) return obj[primaryKey] as T[];
+    if (Array.isArray(obj.data)) return obj.data as T[];
+  }
+  return [];
+}
+
+/**
  * Report rows often nest `campaign`, `supplier`, or `buyer` as `{id, name, reference}`
  * objects rather than the flat strings the client docs imply. Pull out a printable
  * identifier so downstream typed `string` fields stay valid.
@@ -596,7 +619,8 @@ export async function getDeliveries(filter?: {
     logMock('getDeliveries');
     return filter?.status ? MOCK_DELIVERIES.filter((d) => d.status === filter.status) : MOCK_DELIVERIES;
   }
-  return lbGet<LeadByteDelivery[]>('/deliveries', filter as Record<string, string | number | undefined>);
+  const res = await lbGet<unknown>('/deliveries', filter as Record<string, string | number | undefined>);
+  return unwrapList<LeadByteDelivery>(res, 'deliveries');
 }
 
 export async function getDeliveryById(id: string | number): Promise<LeadByteDelivery> {
@@ -635,7 +659,8 @@ export async function getResponders(): Promise<LeadByteResponder[]> {
     logMock('getResponders');
     return MOCK_RESPONDERS;
   }
-  return lbGet<LeadByteResponder[]>('/responders');
+  const res = await lbGet<unknown>('/responders');
+  return unwrapList<LeadByteResponder>(res, 'responders');
 }
 
 export async function getResponderById(id: string | number): Promise<LeadByteResponder> {
@@ -769,7 +794,8 @@ export async function getBuyers(statusFilter?: 'Active' | 'Inactive'): Promise<L
     logMock('getBuyers');
     return statusFilter ? MOCK_BUYERS.filter((b) => b.status === statusFilter) : MOCK_BUYERS;
   }
-  return lbGet<LeadByteBuyer[]>('/buyers', { status: statusFilter });
+  const res = await lbGet<unknown>('/buyers', { status: statusFilter });
+  return unwrapList<LeadByteBuyer>(res, 'buyers');
 }
 
 export async function getBuyerById(id: string | number): Promise<LeadByteBuyer> {

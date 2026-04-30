@@ -338,6 +338,64 @@ describe('LeadByte client — API calls (fetch mocked)', () => {
     expect(fetchMock.mock.calls[0][0]).toContain('/buyers/7');
   });
 
+  // Sam's 30-Apr report: /leadbyte/buyers and /leadbyte/deliveries pages "did
+  // not load after 1 min". Root cause: lbGet returned LeadByte's envelope
+  // {status, message, buyers: [...]} but typed as LeadByteBuyer[]. FE then
+  // tried to .map() over an object → page hung. unwrapList must dig into
+  // the named key (or 'data', or array) and always return an array.
+  it('getBuyers unwraps the LeadByte envelope into the buyers array', async () => {
+    fetchMock.mockResolvedValue(
+      mockJsonResponse({
+        status: 'Success',
+        message: 'OK',
+        buyers: [
+          { id: '2', bid: 'THE-SOLAR-GEEKS', company: 'The Solar Geeks', status: 'Active' },
+          { id: '4', bid: 'AMPLIFON-CH', company: 'Amplifon CH', status: 'Active' },
+        ],
+      }),
+    );
+    const buyers = await lb.getBuyers();
+    expect(Array.isArray(buyers)).toBe(true);
+    expect(buyers).toHaveLength(2);
+    expect(buyers[0].company).toBe('The Solar Geeks');
+  });
+
+  it('getDeliveries unwraps the LeadByte envelope into the deliveries array', async () => {
+    fetchMock.mockResolvedValue(
+      mockJsonResponse({
+        status: 'Success',
+        message: 'OK',
+        deliveries: [
+          { id: '4', reference: 'The Solar Geeks - All PCs', status: 'Active' },
+        ],
+      }),
+    );
+    const deliveries = await lb.getDeliveries();
+    expect(Array.isArray(deliveries)).toBe(true);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].reference).toBe('The Solar Geeks - All PCs');
+  });
+
+  it('getResponders unwraps the LeadByte envelope into the responders array', async () => {
+    fetchMock.mockResolvedValue(
+      mockJsonResponse({
+        status: 'Success',
+        message: 'OK',
+        responders: [{ id: 1, name: 'Welcome Series' }],
+      }),
+    );
+    const responders = await lb.getResponders();
+    expect(Array.isArray(responders)).toBe(true);
+    expect(responders).toHaveLength(1);
+  });
+
+  it('list endpoints return [] not throw when the envelope is missing the array key', async () => {
+    fetchMock.mockResolvedValue(mockJsonResponse({ status: 'Success', message: 'OK' }));
+    expect(await lb.getBuyers()).toEqual([]);
+    fetchMock.mockResolvedValue(mockJsonResponse({ status: 'Success', message: 'OK' }));
+    expect(await lb.getDeliveries()).toEqual([]);
+  });
+
   it('updateBuyers sends PUT /buyers with buyers array', async () => {
     fetchMock.mockResolvedValue(mockJsonResponse({ status: 'ok', buyers: [] }));
     await lb.updateBuyers([{ id: 819, update: { status: 'Active', caps: { day: 3 } } }]);
