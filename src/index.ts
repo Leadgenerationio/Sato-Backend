@@ -72,10 +72,19 @@ app.use(
     },
   }),
 );
-// Global JSON parser. 10mb keeps backwards-compat with file metadata + invoice
-// attachments JSON that some routes accept inline. The webhook router above
-// runs first for /api/v1/webhooks paths.
-app.use(express.json({ limit: '10mb' }));
+// Larger JSON limit ONLY for routes that legitimately accept big bodies
+// (invoice attachments JSON, R2 presign requests with metadata, etc.).
+// The narrower mounts run before the global parser so they capture their
+// route paths. Both routes use multipart for the actual file bytes — the
+// JSON here is just metadata.
+app.use('/api/v1/uploads', express.json({ limit: '10mb' }));
+app.use('/api/v1/invoices', express.json({ limit: '5mb' }));
+
+// Global JSON parser. 1mb is plenty for every other endpoint (auth, list
+// queries, status updates) and shrinks the parser CPU + DoS surface area
+// on the bulk of requests. Webhook router (1mb, with rawBody capture)
+// already mounted above for /api/v1/webhooks.
+app.use(express.json({ limit: '1mb' }));
 
 // Rate limiting
 app.use(generalLimiter);
@@ -89,6 +98,19 @@ app.use((req, _res, next) => {
 // Health check
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Short-TTL Cache-Control on API GETs. Most list/detail endpoints are
+// per-user (auth-scoped) so we mark them `private` to prevent shared CDN
+// caching, but a 5-second max-age + 30s stale-while-revalidate smooths
+// rapid tab-thrashing and lets the browser back/forward cache feel instant
+// without ever serving cross-user data. Mutations (POST/PUT/PATCH/DELETE)
+// stay uncached. Webhooks already mounted earlier.
+app.use('/api/v1', (req, res, next) => {
+  if (req.method === 'GET' && !res.getHeader('Cache-Control')) {
+    res.setHeader('Cache-Control', 'private, max-age=5, stale-while-revalidate=30');
+  }
+  next();
 });
 
 // API routes
