@@ -23,7 +23,11 @@ export async function listNotifications(req: Request, res: Response) {
 }
 
 export async function markAsRead(req: Request, res: Response) {
-  const notification = await notificationService.markAsRead(req.params.id as string, req.user!);
+  if (!req.user?.userId) {
+    res.status(400).json({ status: 'error', message: 'Missing userId on request' });
+    return;
+  }
+  const notification = await notificationService.markAsRead(req.params.id as string, req.user);
 
   if (!notification) {
     res.status(404).json({ status: 'error', message: 'Notification not found' });
@@ -34,6 +38,10 @@ export async function markAsRead(req: Request, res: Response) {
 }
 
 export async function markAllAsRead(req: Request, res: Response) {
-  const result = await notificationService.markAllAsRead(req.user!);
+  if (!req.user?.userId) {
+    res.status(400).json({ status: 'error', message: 'Missing userId on request' });
+    return;
+  }
+  const result = await notificationService.markAllAsRead(req.user);
   res.json({ status: 'success', data: result });
 }

@@ -159,32 +159,32 @@ describe('Endole client — live API', () => {
     expect(url).toContain('sandbox=true');
   });
 
-  it('returns a fallback report on HTTP 404 (company not found) instead of throwing', async () => {
+  // Audit 2026-05-03: when configured, real upstream errors must surface to
+  // the caller (which writes a `system_error` notification) rather than being
+  // masked as a fabricated mock score. The previous "fall back to mock on
+  // error" behaviour was the bug — see endole-client.ts.
+  it('throws on HTTP 404 (company not found) when configured', async () => {
     global.fetch = vi.fn(async () =>
       mockEndoleErr(404, { error: { code: '301', message: 'company-not-found' } }),
     ) as unknown as typeof fetch;
 
-    const r = await endole.runCreditCheck('99999999', 'Missing Ltd');
-    expect(r.companyNumber).toBe('99999999');
-    expect(r.companyName).toBe('Missing Ltd');
+    await expect(endole.runCreditCheck('99999999', 'Missing Ltd')).rejects.toThrow(/404/);
   });
 
-  it('returns a fallback report on HTTP 429 (rate limit) instead of throwing', async () => {
+  it('throws on HTTP 429 (rate limit) when configured', async () => {
     global.fetch = vi.fn(async () =>
       mockEndoleErr(429, { error: { code: '204', message: 'throttling-too-many' } }),
     ) as unknown as typeof fetch;
 
-    const r = await endole.runCreditCheck('12345678', 'Busy Ltd');
-    expect(r.companyNumber).toBe('12345678');
+    await expect(endole.runCreditCheck('12345678', 'Busy Ltd')).rejects.toThrow(/429/);
   });
 
-  it('returns a fallback report on IP-not-whitelisted error (code 104)', async () => {
+  it('throws on IP-not-whitelisted error (code 104) when configured', async () => {
     global.fetch = vi.fn(async () =>
       mockEndoleErr(403, { error: { code: '104', message: 'whitelist-not-listed' } }),
     ) as unknown as typeof fetch;
 
-    const r = await endole.runCreditCheck('12345678', 'Blocked Ltd');
-    expect(r.companyNumber).toBe('12345678');
+    await expect(endole.runCreditCheck('12345678', 'Blocked Ltd')).rejects.toThrow(/403/);
   });
 });
 

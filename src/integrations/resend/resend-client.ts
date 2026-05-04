@@ -40,6 +40,7 @@ export async function sendEmail(req: ResendSendRequest): Promise<ResendSendRespo
       bcc: req.bcc,
       tags: req.tags,
     }),
+    signal: AbortSignal.timeout(15_000),
   });
 
   if (!res.ok) {

@@ -9,6 +9,7 @@ import { router } from './routes/index.js';
 import { seedDefaultUsers } from './data/users.js';
 import { registerSchedules } from './jobs/schedules.js';
 import { startWorkers } from './jobs/worker-entry.js';
+import { redis } from './config/redis.js';
 
 const app: Express = express();
 
@@ -24,8 +25,10 @@ app.set('trust proxy', 1);
 // is set.
 const DEV_ALLOWED_ORIGINS = [
   'http://localhost:5173',
+  'http://localhost:5174',
   'http://localhost:3000',
   'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
 ];
 const configuredOrigins = (env.CORS_ORIGINS || env.FRONTEND_URL || '')
   .split(',')
@@ -34,7 +37,13 @@ const configuredOrigins = (env.CORS_ORIGINS || env.FRONTEND_URL || '')
 if (env.NODE_ENV === 'production' && configuredOrigins.length === 0) {
   throw new Error('CORS_ORIGINS must be set in production (comma-separated allow-list)');
 }
-const ALLOWED_ORIGINS = env.NODE_ENV === 'development' ? DEV_ALLOWED_ORIGINS : configuredOrigins;
+// In dev, union the hardcoded localhost defaults with whatever FRONTEND_URL /
+// CORS_ORIGINS the user set — so when Vite picks a non-default port (5174,
+// 5175 etc. when 5173 is busy) the user can set FRONTEND_URL and not have to
+// edit code.
+const ALLOWED_ORIGINS = env.NODE_ENV === 'development'
+  ? Array.from(new Set([...DEV_ALLOWED_ORIGINS, ...configuredOrigins]))
+  : configuredOrigins;
 console.log('CORS allow-list:', ALLOWED_ORIGINS);
 app.use(
   cors({
@@ -51,7 +60,21 @@ app.use(
 );
 app.use(helmet());
 
-// Body parsing
+// Body parsing — capture raw body for webhook routes so HMAC signature
+// verification has access to the exact bytes the provider signed. Mounted
+// BEFORE the global json parser so the verify hook fires first on /webhooks.
+app.use(
+  '/api/v1/webhooks',
+  express.json({
+    limit: '1mb',
+    verify: (req: import('express').Request & { rawBody?: string }, _res, buf: Buffer) => {
+      req.rawBody = buf.toString('utf8');
+    },
+  }),
+);
+// Global JSON parser. 10mb keeps backwards-compat with file metadata + invoice
+// attachments JSON that some routes accept inline. The webhook router above
+// runs first for /api/v1/webhooks paths.
 app.use(express.json({ limit: '10mb' }));
 
 // Rate limiting
@@ -93,9 +116,54 @@ async function start() {
   } catch (err) {
     logger.error({ err }, 'Failed to start workers');
   }
-  app.listen(env.PORT, () => {
+  const server = app.listen(env.PORT, () => {
     logger.info(`Server running on http://localhost:${env.PORT}`);
   });
+
+  // Graceful shutdown — Railway sends SIGTERM on redeploy/scale-down.
+  // Stop accepting new connections, drain in-flight requests, close Redis,
+  // then exit. Hard-exit after 10s in case a connection refuses to drain.
+  let shuttingDown = false;
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info({ signal }, 'Received shutdown signal — closing server');
+
+    const forceTimer = setTimeout(() => {
+      logger.error('Graceful shutdown timed out after 10s — exiting');
+      process.exit(0);
+    }, 10_000);
+    forceTimer.unref();
+
+    const closeServer = new Promise<void>((resolve) => {
+      server.close((err) => {
+        if (err) logger.error({ err }, 'Error during server.close()');
+        else logger.info('HTTP server closed');
+        resolve();
+      });
+    });
+
+    closeServer
+      .then(async () => {
+        try {
+          await redis?.quit();
+          if (redis) logger.info('Redis connection closed');
+        } catch (err) {
+          logger.error({ err }, 'Error closing Redis');
+        }
+      })
+      .then(() => {
+        clearTimeout(forceTimer);
+        logger.info('Shutdown complete');
+        process.exit(0);
+      })
+      .catch((err) => {
+        logger.error({ err }, 'Unexpected error during shutdown');
+        process.exit(1);
+      });
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 start();

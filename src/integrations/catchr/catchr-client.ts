@@ -73,6 +73,7 @@ async function postMcp(body: object, extraHeaders: Record<string, string> = {}):
       ...extraHeaders,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
   });
 }
 
@@ -172,7 +173,14 @@ async function callTool<T>(name: string, args: Record<string, unknown>, retried 
     throw new Error(`Catchr MCP ${name}: missing result`);
   }
   if (envelope.result.isError) {
-    throw new Error(`Catchr MCP ${name}: tool reported error`);
+    // Surface whatever the MCP tool actually said in the content text — the
+    // bare "tool reported error" message hides the real cause (rate limit,
+    // missing field, expired auth, etc.) and makes debugging impossible.
+    const detail = envelope.result.content
+      .map((c) => (c.type === 'text' ? (c as { type: 'text'; text: string }).text : `[${c.type}]`))
+      .join(' | ')
+      .slice(0, 500);
+    throw new Error(`Catchr MCP ${name}: ${detail || 'tool reported error'}`);
   }
 
   const first = envelope.result.content[0];

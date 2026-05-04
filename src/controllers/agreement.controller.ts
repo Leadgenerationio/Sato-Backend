@@ -41,7 +41,7 @@ export async function send(req: Request, res: Response) {
 }
 
 export async function listForClient(req: Request, res: Response) {
-  const rows = await agreementService.listAgreementsForClient(req.params.clientId as string);
+  const rows = await agreementService.listAgreementsForClient(req.params.clientId as string, req.user);
   res.json({ status: 'success', data: { agreements: rows } });
 }
 
@@ -60,7 +60,7 @@ export async function refreshStatus(req: Request, res: Response) {
 }
 
 export async function getOne(req: Request, res: Response) {
-  const row = await agreementService.getAgreement(req.params.id as string);
+  const row = await agreementService.getAgreement(req.params.id as string, req.user);
   if (!row) {
     res.status(404).json({ status: 'error', message: 'Agreement not found' });
     return;
@@ -79,14 +79,27 @@ export async function signnowWebhook(req: Request, res: Response) {
     const secret = process.env.SIGNNOW_WEBHOOK_SECRET;
     if (secret) {
       const sig = req.header('x-signnow-signature') || req.header('X-SignNow-Signature') || '';
-      const rawBody = typeof (req as Request & { rawBody?: string }).rawBody === 'string'
-        ? (req as Request & { rawBody?: string }).rawBody!
-        : JSON.stringify(req.body);
+      // Use the raw request body bytes captured by the webhook-scoped JSON
+      // parser (see src/index.ts). HMAC must be computed over the exact bytes
+      // the provider signed — JSON.stringify(req.body) does NOT round-trip
+      // (key order, whitespace, escape sequences differ).
+      const rawBody = (req as Request & { rawBody?: string }).rawBody ?? '';
       if (!verifyWebhookSignature(rawBody, sig)) {
         logger.warn('SignNow webhook signature verification failed — rejecting');
         res.status(401).json({ status: 'error', message: 'Invalid signature' });
         return;
       }
+    } else if (process.env.NODE_ENV === 'production') {
+      // In prod, refuse unsigned webhooks. Returning 503 (rather than 200)
+      // surfaces the misconfiguration to SignNow's retry queue + monitoring
+      // so the missing secret gets noticed instead of silently accepting
+      // forged webhooks.
+      logger.error('SIGNNOW_WEBHOOK_SECRET not set in production — refusing webhook');
+      res.status(503).json({ status: 'error', message: 'Webhook secret not configured' });
+      return;
+    } else {
+      // Dev / non-prod: allow unsigned for local testing, but log loudly.
+      logger.warn('SignNow webhook accepted without signature (non-production environment)');
     }
 
     await agreementService.handleSignNowWebhook(req.body);

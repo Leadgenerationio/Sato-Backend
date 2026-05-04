@@ -60,10 +60,7 @@ async function seed() {
   }
 
   console.log('Seed complete!');
-  console.log('  owner@stato.app / <password>');
-  console.log('  finance@stato.app / <password>');
-  console.log('  ops@stato.app / <password>');
-  console.log('  readonly@stato.app / <password>');
+  console.log(`  ${seedUsers.length} internal users seeded (passwords NOT logged)`);
   if (SEED_DEMO_DATA) console.log('  + demo data seeded');
   process.exit(0);
 }

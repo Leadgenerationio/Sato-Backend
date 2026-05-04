@@ -205,11 +205,20 @@ describe('Task API', () => {
       expect(res.status).toBe(401);
     });
 
-    it('all roles can access tasks', async () => {
+    // Audit 2026-05-03: tasks are an internal ops surface — clients and
+    // readonly users no longer have access. Verify the gate works.
+    it('readonly is blocked from tasks (403)', async () => {
       const readonlyRes = await request(app).post('/api/v1/auth/login').send({ email: 'readonly@stato.app', password: 'readonly123' });
       const readonlyToken = readonlyRes.body.data.tokens.accessToken;
       const res = await request(app).get('/api/v1/tasks').set('Authorization', `Bearer ${readonlyToken}`);
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(403);
+    });
+
+    it('client is blocked from tasks (403)', async () => {
+      const clientRes = await request(app).post('/api/v1/auth/login').send({ email: 'client@stato.app', password: 'client123' });
+      const clientToken = clientRes.body.data.tokens.accessToken;
+      const res = await request(app).get('/api/v1/tasks').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(403);
     });
   });
 });

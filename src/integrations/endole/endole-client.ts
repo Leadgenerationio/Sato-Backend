@@ -103,25 +103,26 @@ export async function runCreditCheck(companyNumber: string, companyName: string)
   const qs = isSandbox() ? '?sandbox=true' : '';
   const url = `${baseUrl()}/company/${encodeURIComponent(companyNumber)}/credit_checks${qs}`;
 
-  try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: basicAuthHeader(),
-        Accept: 'application/json',
-      },
-    });
+  // When credentials are configured, surface real errors to the caller.
+  // The previous "fabricate a mock score on error" behaviour silently masked
+  // 401/403/429 issues and made the UI display fake credit data — caller
+  // (client.service.ts) wraps this in try/catch and writes a system_error
+  // notification, so throwing is the correct behaviour.
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: basicAuthHeader(),
+      Accept: 'application/json',
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
 
-    if (!res.ok) {
-      const body = await res.text();
-      logger.error({ status: res.status, companyNumber, body }, 'Endole credit_checks failed — returning fallback');
-      return mockReport(companyNumber, companyName);
-    }
-
-    const data = (await res.json()) as EndoleApiResponse;
-    return normalise(data, companyNumber, companyName);
-  } catch (err) {
-    logger.error({ err, companyNumber }, 'Endole runCreditCheck threw — returning fallback');
-    return mockReport(companyNumber, companyName);
+  if (!res.ok) {
+    const body = await res.text();
+    logger.error({ status: res.status, companyNumber, body }, 'Endole credit_checks failed');
+    throw new Error(`Endole credit_checks failed: ${res.status}`);
   }
+
+  const data = (await res.json()) as EndoleApiResponse;
+  return normalise(data, companyNumber, companyName);
 }

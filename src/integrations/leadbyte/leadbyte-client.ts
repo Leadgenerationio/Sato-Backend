@@ -65,7 +65,7 @@ async function lbGet<T>(path: string, params: Record<string, string | number | u
     if (v !== undefined && v !== '') qs.set(k, String(v));
   }
   const url = `${baseUrl()}${path}?${qs.toString()}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
   if (!res.ok) {
     const body = await res.text();
     logger.error({ status: res.status, path, body }, 'LeadByte GET failed');
@@ -83,6 +83,7 @@ async function lbWrite<T>(method: 'POST' | 'PUT', path: string, body: unknown): 
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
     const err = await res.text();
@@ -98,6 +99,7 @@ async function lbGetBody<T>(path: string, body: Record<string, unknown>): Promis
     method: 'GET',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ key: apiKey(), ...body }),
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
     const err = await res.text();

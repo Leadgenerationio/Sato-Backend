@@ -56,6 +56,7 @@ async function getAccessToken(): Promise<string> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
+      signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) {
       const body = await res.text();
@@ -76,6 +77,7 @@ async function csFetch<T>(path: string): Promise<T> {
   const token = await getAccessToken();
   const res = await fetch(`${baseUrl()}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
     const body = await res.text();

@@ -245,7 +245,12 @@ export async function listTemplates(): Promise<TaskTemplate[]> {
   return rows.map(templateToDto);
 }
 
-export async function createFromTemplate(templateId: string, assignee: string, requester: AuthPayload): Promise<Task | null> {
+export async function createFromTemplate(
+  templateId: string,
+  assignee: string,
+  requester: AuthPayload,
+  opts: { dueDate?: string } = {},
+): Promise<Task | null> {
   const [template] = await db.select().from(taskTemplates).where(eq(taskTemplates.id, templateId));
   if (!template) return null;
 
@@ -253,6 +258,8 @@ export async function createFromTemplate(templateId: string, assignee: string, r
   const stepsDescription = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
 
   const now = new Date();
+  // Honour caller-supplied dueDate (FE sends ISO string); fall back to +7 days.
+  const dueDate = opts.dueDate ? new Date(opts.dueDate) : new Date(Date.now() + 7 * 86400000);
   const [row] = await db
     .insert(tasks)
     .values({
@@ -262,7 +269,7 @@ export async function createFromTemplate(templateId: string, assignee: string, r
       assignee,
       priority: template.defaultPriority,
       status: 'todo',
-      dueDate: new Date(Date.now() + 7 * 86400000),
+      dueDate,
       category: template.defaultCategory ?? 'general',
       createdBy: requester.email,
       auditLog: [{ action: `Task created from template "${template.name}"`, user: requester.email, timestamp: now.toISOString() }],

@@ -87,8 +87,16 @@ export async function listTemplates(_req: Request, res: Response) {
 }
 
 export async function createFromTemplate(req: Request, res: Response) {
-  const { assignee } = req.body;
-  const task = await taskService.createFromTemplate(req.params.id as string, assignee || req.user!.email, req.user!);
+  const { assignee, templateId, dueDate } = req.body ?? {};
+  // Accept the templateId from either the path param (legacy
+  // /templates/:id/create route) or the request body (new /from-template
+  // alias the FE uses).
+  const id = (req.params.id as string | undefined) || templateId;
+  if (!id) {
+    res.status(400).json({ status: 'error', message: 'templateId is required' });
+    return;
+  }
+  const task = await taskService.createFromTemplate(id, assignee || req.user!.email, req.user!, { dueDate });
   if (!task) {
     res.status(404).json({ status: 'error', message: 'Template not found' });
     return;

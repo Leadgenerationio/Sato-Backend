@@ -1,4 +1,4 @@
-import { eq, desc } from 'drizzle-orm';
+import { and, eq, desc } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { notifications } from '../db/schema/notifications.js';
 import { sendEmail } from '../integrations/resend/resend-client.js';
@@ -89,33 +89,39 @@ export async function listNotifications(requester: AuthPayload): Promise<Notific
   });
 }
 
-export async function markAsRead(id: string, _requester: AuthPayload): Promise<Notification | null> {
+export async function markAsRead(id: string, requester: AuthPayload): Promise<Notification | null> {
+  // Caller's userId is required so we can scope the update — without it any
+  // authenticated user could mark anyone else's notifications as read.
+  if (!requester.userId) return null;
   if (useDb()) {
     const [row] = await db
       .update(notifications)
       .set({ read: true })
-      .where(eq(notifications.id, id))
+      .where(and(eq(notifications.id, id), eq(notifications.userId, requester.userId)))
       .returning();
     return row ? normalizeRow(row) : null;
   }
-  const row = memoryStore.find((n) => n.id === id);
+  const row = memoryStore.find(
+    (n) => n.id === id && (!n.userId || n.userId === requester.userId),
+  );
   if (!row) return null;
   row.read = true;
   return row;
 }
 
 export async function markAllAsRead(requester: AuthPayload): Promise<{ updated: number }> {
+  if (!requester.userId) return { updated: 0 };
   if (useDb()) {
     const rows = await db
       .update(notifications)
       .set({ read: true })
-      .where(requester.userId ? eq(notifications.userId, requester.userId) : undefined)
+      .where(eq(notifications.userId, requester.userId))
       .returning();
     return { updated: rows.length };
   }
   let count = 0;
   for (const n of memoryStore) {
-    if (!n.read) {
+    if (!n.read && (!n.userId || n.userId === requester.userId)) {
       n.read = true;
       count++;
     }

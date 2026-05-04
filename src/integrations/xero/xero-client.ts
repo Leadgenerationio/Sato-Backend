@@ -72,6 +72,7 @@ async function exchangeCredentials(): Promise<{ accessToken: string; expiresAt: 
       grant_type: 'client_credentials',
       scope: SCOPES,
     }),
+    signal: AbortSignal.timeout(15_000),
   });
 
   if (!res.ok) {
@@ -90,6 +91,7 @@ async function exchangeCredentials(): Promise<{ accessToken: string; expiresAt: 
 async function fetchBoundTenant(accessToken: string): Promise<{ tenantId: string; tenantName: string }> {
   const res = await fetch(`${API_HOST}/connections`, {
     headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
     const body = await res.text();
@@ -234,6 +236,7 @@ export async function createContact(input: CreateContactInput): Promise<XeroCont
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
   });
 
   if (!res.ok) {
@@ -304,7 +307,7 @@ export async function getBankBalances(): Promise<XeroBankAccount[]> {
 
   const accountsRes = await fetch(
     `${API_HOST}/api.xro/2.0/Accounts?where=${encodeURIComponent('Type=="BANK"&&Status=="ACTIVE"')}`,
-    { headers },
+    { headers, signal: AbortSignal.timeout(15_000) },
   );
   if (!accountsRes.ok) {
     const body = await accountsRes.text();
@@ -318,7 +321,7 @@ export async function getBankBalances(): Promise<XeroBankAccount[]> {
   const today = new Date().toISOString().slice(0, 10);
   const summaryRes = await fetch(
     `${API_HOST}/api.xro/2.0/Reports/BankSummary?date=${today}`,
-    { headers },
+    { headers, signal: AbortSignal.timeout(15_000) },
   );
   const balanceByAccountId = new Map<string, string>();
   if (summaryRes.ok) {
@@ -464,7 +467,7 @@ export async function getBankTransactions(
 
   for (let page = 1; page <= maxPages; page++) {
     const url = `${API_HOST}/api.xro/2.0/BankTransactions?where=${encodeURIComponent(where)}&order=Date%20DESC&page=${page}`;
-    const res = await fetch(url, { headers });
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
     if (!res.ok) {
       const body = await res.text();
       logger.error({ status: res.status, body, page }, 'Xero /BankTransactions failed');
@@ -511,10 +514,25 @@ export async function getVatLiability(fromDate: string, toDate: string): Promise
         'xero-tenant-id': tenantId,
         Accept: 'application/json',
       },
+      signal: AbortSignal.timeout(15_000),
     },
   );
   if (!res.ok) {
     const body = await res.text();
+    // 404 from Xero on TaxSummary almost always means the organisation isn't
+    // VAT/GST-registered — the report endpoint literally doesn't exist for
+    // non-tax orgs. Treat that as "no VAT to report" rather than an error so
+    // the dashboard widget can render £0 cleanly instead of an error state.
+    if (res.status === 404) {
+      logger.warn({ body }, 'Xero TaxSummary 404 — organisation likely not VAT-registered, returning zeros');
+      return {
+        fromDate,
+        toDate,
+        owed: '0.00',
+        collectedOnSales: '0.00',
+        paidOnPurchases: '0.00',
+      };
+    }
     logger.error({ status: res.status, body }, 'Xero /Reports/TaxSummary failed');
     throw new Error(`Xero TaxSummary failed: ${res.status}`);
   }

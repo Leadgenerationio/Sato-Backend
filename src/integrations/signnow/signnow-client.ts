@@ -69,6 +69,7 @@ async function getAccessToken(): Promise<string> {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
     body,
+    signal: AbortSignal.timeout(15_000),
   });
 
   if (!res.ok) {
@@ -93,6 +94,8 @@ async function authedJson<T>(path: string, init: RequestInit = {}): Promise<T> {
       ...(init.headers || {}),
       Authorization: `Bearer ${token}`,
     },
+    // Don't clobber an explicit caller-provided signal.
+    signal: init.signal ?? AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
     const body = await res.text();
@@ -123,6 +126,8 @@ export async function createEnvelope(input: CreateEnvelopeInput): Promise<Envelo
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: form,
+    // Larger timeout — the upload is a multipart PDF body.
+    signal: AbortSignal.timeout(30_000),
   });
 
   if (!uploadRes.ok) {
@@ -199,6 +204,8 @@ export async function downloadSignedPdf(envelopeId: string): Promise<Buffer> {
   const token = await getAccessToken();
   const res = await fetch(`${baseUrl()}/document/${envelopeId}/download?type=collapsed`, {
     headers: { Authorization: `Bearer ${token}` },
+    // Generous timeout — signed PDFs can take a few seconds to assemble.
+    signal: AbortSignal.timeout(30_000),
   });
 
   if (!res.ok) {

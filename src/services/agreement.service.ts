@@ -7,7 +7,9 @@ import { uploadFile, downloadFile } from '../integrations/r2/r2-client.js';
 import { createContact as createXeroContact, isXeroConfigured } from '../integrations/xero/xero-client.js';
 import { notify } from './notification.service.js';
 import { logger } from '../utils/logger.js';
+import { ForbiddenError } from '../utils/errors.js';
 import type { EnvelopeStatus, SignNowWebhookEvent } from '../integrations/signnow/signnow-types.js';
+import type { AuthPayload } from '../types/index.js';
 
 /**
  * When an agreement is signed, ensure the client has a Xero contact so they're
@@ -188,7 +190,22 @@ export async function handleSignNowWebhook(event: SignNowWebhookEvent) {
   logger.info({ agreementId: existing.id, status }, 'Agreement status updated');
 }
 
-export async function listAgreementsForClient(clientId: string) {
+export async function listAgreementsForClient(clientId: string, requester?: AuthPayload) {
+  if (requester) {
+    if (requester.role === 'client') {
+      // A client can only ever see their own agreements.
+      if (requester.clientId !== clientId) {
+        throw new ForbiddenError('Cannot view agreements for a different client');
+      }
+    } else if (requester.businessId) {
+      // Internal roles must stay within their business — fetch the client to
+      // verify the businessId matches before returning agreements.
+      const [client] = await db.select().from(clients).where(eq(clients.id, clientId));
+      if (client && client.businessId !== requester.businessId) {
+        throw new ForbiddenError('Client belongs to a different business');
+      }
+    }
+  }
   return db.select().from(agreements).where(eq(agreements.clientId, clientId));
 }
 
@@ -196,9 +213,22 @@ export async function listAllAgreements() {
   return db.select().from(agreements);
 }
 
-export async function getAgreement(id: string) {
+export async function getAgreement(id: string, requester?: AuthPayload) {
   const [row] = await db.select().from(agreements).where(eq(agreements.id, id));
-  return row ?? null;
+  if (!row) return null;
+  if (requester) {
+    if (requester.role === 'client') {
+      if (row.clientId !== requester.clientId) {
+        throw new ForbiddenError('Cannot view another client\'s agreement');
+      }
+    } else if (requester.businessId) {
+      const [client] = await db.select().from(clients).where(eq(clients.id, row.clientId));
+      if (client && client.businessId !== requester.businessId) {
+        throw new ForbiddenError('Agreement belongs to a different business');
+      }
+    }
+  }
+  return row;
 }
 
 export async function refreshAgreementStatus(id: string) {

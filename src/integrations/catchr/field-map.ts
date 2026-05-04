@@ -50,14 +50,14 @@ export const FIELD_MAP: Record<CatchrPlatform, PlatformFieldMap | null> = {
     accountCurrency: 'CurrencyCode',
     date: 'TimePeriod',
   },
-  'tik-tok': {
-    spend: 'spend',
-    campaignId: 'campaign_id',
-    campaignName: 'campaign_name',
-    accountName: 'advertiser_name',
-    accountCurrency: 'currency',
-    date: 'stat_time_day',
-  },
+  // 2026-05-03: Catchr returns FIELD_NOT_KNOW for advertiser_name / currency /
+  // campaign_name on TikTok accounts in Sam's tenant — the previous defaults
+  // are wrong. Skipping until the correct field IDs are confirmed via
+  // Catchr's list_fields_for_account / list_fields_by_platform tool. The
+  // sync handler treats null as "skip this platform" (see ad-spend.service.ts).
+  // Runbook: ask Catchr support or call list_fields_by_platform with platform
+  // 'tik-tok' to get the real field IDs, then restore this map.
+  'tik-tok': null,
   'taboola': {
     spend: 'spend',
     campaignId: 'campaign_id',
