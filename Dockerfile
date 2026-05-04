@@ -24,8 +24,17 @@ COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/drizzle.config.ts ./
 
 EXPOSE 3001
-# Run the defensive idempotent migrator (tolerates "already exists" so it
-# works whether prod was originally bootstrapped via db:push or db:migrate),
-# then start the server. If a real migration error happens, the container
-# exits and Railway surfaces the error.
-CMD ["sh", "-c", "pnpm db:auto-migrate && node dist/index.js"]
+# Boot order: migrate → seed-if-empty → start.
+#
+#   1. db:auto-migrate — defensive idempotent migrator (tolerates "already
+#      exists"; works whether prod was bootstrapped via db:push or db:migrate).
+#   2. db:seed-if-empty — creates the four internal users on a fresh DB only
+#      (no-op when users already exist). In production it refuses to seed
+#      unless SEED_OWNER_PASSWORD is set, so default passwords never reach
+#      production.
+#   3. node dist/index.js — start the API.
+#
+# A real migration error or missing prod password causes the container to
+# exit non-zero so Railway shows the failure instead of starting a broken
+# server.
+CMD ["sh", "-c", "pnpm db:auto-migrate && pnpm db:seed-if-empty && node dist/index.js"]
