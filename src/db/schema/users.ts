@@ -15,6 +15,7 @@ export const users = pgTable('users', {
   businessId: uuid('business_id').references(() => businesses.id),
   clientId: uuid('client_id').references(() => clients.id),
   isActive: boolean('is_active').notNull().default(true),
+  isPrimaryOwner: boolean('is_primary_owner').notNull().default(false),
   notificationPreferences: jsonb('notification_preferences'),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),

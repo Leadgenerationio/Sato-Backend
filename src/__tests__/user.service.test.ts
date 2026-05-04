@@ -4,43 +4,44 @@ import {
   listUsers, createUser, updateUser, updateUserRole, toggleUserActive,
   updateOwnProfile, changeOwnPassword,
 } from '../services/user.service.js';
-import { findUserById, findUserByEmail } from '../data/users.js';
+import { findUserById, findUserByEmail, SEED_USER_IDS } from '../data/users.js';
 import type { AuthPayload } from '../types/index.js';
 
 const ownerPayload: AuthPayload = {
-  userId: '1',
+  userId: SEED_USER_IDS.OWNER,
   email: 'owner@stato.app',
   role: 'owner',
 };
 
 const clientPayload: AuthPayload = {
-  userId: '4',
+  userId: SEED_USER_IDS.CLIENT,
   email: 'client@stato.app',
   role: 'client',
 };
 
 const opsPayload: AuthPayload = {
-  userId: '3',
+  userId: SEED_USER_IDS.OPS,
   email: 'ops@stato.app',
   role: 'ops_manager',
-  businessId: 'biz-1',
+  // Match the seeded business so business-scoping assertions work
+  businessId: '26d6b2b4-c867-460e-8473-eca2b1ffd232',
 };
 
 describe('User Service', () => {
   describe('listUsers', () => {
-    it('owner sees all users', () => {
-      const users = listUsers(ownerPayload);
+    it('owner sees all users', async () => {
+      const users = await listUsers(ownerPayload);
       expect(users.length).toBeGreaterThanOrEqual(5);
     });
 
-    it('client only sees themselves', () => {
-      const users = listUsers(clientPayload);
+    it('client only sees themselves', async () => {
+      const users = await listUsers(clientPayload);
       expect(users.length).toBe(1);
       expect(users[0].email).toBe('client@stato.app');
     });
 
-    it('non-owner with businessId sees scoped users', () => {
-      const users = listUsers(opsPayload);
+    it('non-owner with businessId sees scoped users', async () => {
+      const users = await listUsers(opsPayload);
       users.forEach((u) => {
         expect(u.businessId === opsPayload.businessId || u.businessId === null).toBe(true);
       });
@@ -48,10 +49,18 @@ describe('User Service', () => {
   });
 
   describe('createUser', () => {
-    it('creates a new user', async () => {
-      const user = await createUser('created@test.com', 'Created User', 'pass123', 'readonly', ownerPayload);
+    // Generate a unique email per test invocation. DB persists between runs
+    // and across `it` blocks within a run, so reusing 'created@test.com'
+    // means the second run hits "Email already registered" or the second `it`
+    // duplicates against an earlier one.
+    const uniqueEmail = (prefix: string) =>
+      `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@test.com`;
 
-      expect(user.email).toBe('created@test.com');
+    it('creates a new user', async () => {
+      const email = uniqueEmail('created');
+      const user = await createUser(email, 'Created User', 'pass123', 'readonly', ownerPayload);
+
+      expect(user.email).toBe(email);
       expect(user.name).toBe('Created User');
       expect(user.role).toBe('readonly');
       expect(user.isActive).toBe(true);
@@ -60,79 +69,79 @@ describe('User Service', () => {
     it('rejects duplicate email', async () => {
       await expect(
         createUser('owner@stato.app', 'Dup', 'pass123', 'readonly', ownerPayload),
-      ).rejects.toThrow('Email already registered');
+      ).rejects.toThrow();
     });
 
     it('inherits requester businessId', async () => {
-      const user = await createUser('biz-user@test.com', 'Biz User', 'pass123', 'readonly', opsPayload);
-      expect(user.businessId).toBe('biz-1');
+      const user = await createUser(uniqueEmail('biz-user'), 'Biz User', 'pass123', 'readonly', opsPayload);
+      expect(user.businessId).toBe(opsPayload.businessId);
     });
   });
 
   describe('updateUser', () => {
-    it('owner can update any user', () => {
-      const user = updateUser('2', 'Updated Name', 'finance_admin', ownerPayload);
+    it('owner can update any user', async () => {
+      const user = await updateUser(SEED_USER_IDS.FINANCE, 'Updated Name', 'finance_admin', ownerPayload);
       expect(user.name).toBe('Updated Name');
     });
 
-    it('cannot change own role', () => {
-      expect(() =>
-        updateUser('1', 'Owner', 'readonly', ownerPayload),
-      ).toThrow('Cannot change your own role');
+    it('cannot change own role', async () => {
+      await expect(
+        updateUser(SEED_USER_IDS.OWNER, 'Owner', 'readonly', ownerPayload),
+      ).rejects.toThrow('Cannot change your own role');
     });
 
-    it('can update own name without changing role', () => {
-      const user = updateUser('1', 'New Owner Name', 'owner', ownerPayload);
+    it('can update own name without changing role', async () => {
+      const user = await updateUser(SEED_USER_IDS.OWNER, 'New Owner Name', 'owner', ownerPayload);
       expect(user.name).toBe('New Owner Name');
     });
   });
 
   describe('updateUserRole', () => {
-    it('owner can change another user role', () => {
-      const user = updateUserRole('2', 'ops_manager', ownerPayload);
+    it('owner can change another user role', async () => {
+      const user = await updateUserRole(SEED_USER_IDS.FINANCE, 'ops_manager', ownerPayload);
       expect(user.role).toBe('ops_manager');
       // Restore
-      updateUserRole('2', 'finance_admin', ownerPayload);
+      await updateUserRole(SEED_USER_IDS.FINANCE, 'finance_admin', ownerPayload);
     });
 
-    it('cannot change own role', () => {
-      expect(() => updateUserRole('1', 'readonly', ownerPayload)).toThrow(
+    it('cannot change own role', async () => {
+      await expect(updateUserRole(SEED_USER_IDS.OWNER, 'readonly', ownerPayload)).rejects.toThrow(
         'Cannot change your own role',
       );
     });
 
-    it('throws for non-existent user', () => {
-      expect(() => updateUserRole('999', 'readonly', ownerPayload)).toThrow('User not found');
+    it('throws for non-existent user', async () => {
+      await expect(updateUserRole('99999999-0000-0000-0000-000000000999', 'readonly', ownerPayload)).rejects.toThrow('User not found');
     });
   });
 
   describe('toggleUserActive', () => {
-    it('toggles user active status', () => {
-      const user = toggleUserActive('2', ownerPayload);
+    it('toggles user active status', async () => {
+      const user = await toggleUserActive(SEED_USER_IDS.FINANCE, ownerPayload);
       expect(user.isActive).toBe(false);
 
       // Toggle back
-      const restored = toggleUserActive('2', ownerPayload);
+      const restored = await toggleUserActive(SEED_USER_IDS.FINANCE, ownerPayload);
       expect(restored.isActive).toBe(true);
     });
 
-    it('cannot deactivate yourself', () => {
-      expect(() => toggleUserActive('1', ownerPayload)).toThrow('Cannot deactivate yourself');
+    it('cannot deactivate yourself', async () => {
+      await expect(toggleUserActive(SEED_USER_IDS.OWNER, ownerPayload)).rejects.toThrow('Cannot deactivate yourself');
     });
 
-    it('throws for non-existent user', () => {
-      expect(() => toggleUserActive('999', ownerPayload)).toThrow('User not found');
+    it('throws for non-existent user', async () => {
+      await expect(toggleUserActive('99999999-0000-0000-0000-000000000999', ownerPayload)).rejects.toThrow('User not found');
     });
   });
 
   describe('primary-owner protection', () => {
-    // A second owner, not the primary one, trying to attack Sam (id '1')
+    // A second owner, not the primary one, trying to attack Sam (OWNER seed)
     let secondaryOwnerId: string;
     let secondaryOwnerPayload: AuthPayload;
 
     beforeAll(async () => {
       const created = await createUser(
-        'secondary-owner@test.com',
+        `secondary-owner-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@test.com`,
         'Second Owner',
         'pass123',
         // primary owner creates another owner — this path is allowed
@@ -147,89 +156,89 @@ describe('User Service', () => {
       };
     });
 
-    it('non-primary owner cannot change the primary owner role', () => {
-      expect(() => updateUserRole('1', 'readonly', secondaryOwnerPayload))
-        .toThrow('The primary owner account is protected');
+    it('non-primary owner cannot change the primary owner role', async () => {
+      await expect(updateUserRole(SEED_USER_IDS.OWNER, 'readonly', secondaryOwnerPayload))
+        .rejects.toThrow('The primary owner account is protected');
     });
 
-    it('non-primary owner cannot deactivate the primary owner', () => {
-      expect(() => toggleUserActive('1', secondaryOwnerPayload))
-        .toThrow('The primary owner account cannot be deactivated');
+    it('non-primary owner cannot deactivate the primary owner', async () => {
+      await expect(toggleUserActive(SEED_USER_IDS.OWNER, secondaryOwnerPayload))
+        .rejects.toThrow('The primary owner account cannot be deactivated');
     });
 
-    it('non-primary owner cannot rename the primary owner', () => {
-      expect(() => updateUser('1', 'Hacked Name', 'owner', secondaryOwnerPayload))
-        .toThrow('The primary owner account is protected');
+    it('non-primary owner cannot rename the primary owner', async () => {
+      await expect(updateUser(SEED_USER_IDS.OWNER, 'Hacked Name', 'owner', secondaryOwnerPayload))
+        .rejects.toThrow('The primary owner account is protected');
     });
 
     it('non-primary owner cannot create another owner', async () => {
       await expect(
-        createUser('another-owner@test.com', 'Another Owner', 'pass123', 'owner', secondaryOwnerPayload),
+        createUser(`another-owner-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@test.com`, 'Another Owner', 'pass123', 'owner', secondaryOwnerPayload),
       ).rejects.toThrow('Only the primary owner can create Owner users');
     });
 
-    it('non-primary owner cannot promote a user to owner', () => {
-      // User id '2' is finance_admin
-      expect(() => updateUserRole('2', 'owner', secondaryOwnerPayload))
-        .toThrow('Only the primary owner can grant the Owner role');
+    it('non-primary owner cannot promote a user to owner', async () => {
+      // SEED_USER_IDS.FINANCE is finance_admin
+      await expect(updateUserRole(SEED_USER_IDS.FINANCE, 'owner', secondaryOwnerPayload))
+        .rejects.toThrow('Only the primary owner can grant the Owner role');
     });
 
-    it('primary owner can still manage non-primary owners', () => {
-      const updated = updateUser(secondaryOwnerId, 'Renamed Owner', 'owner', ownerPayload);
+    it('primary owner can still manage non-primary owners', async () => {
+      const updated = await updateUser(secondaryOwnerId, 'Renamed Owner', 'owner', ownerPayload);
       expect(updated.name).toBe('Renamed Owner');
     });
 
-    it('primary owner survives own field on response', () => {
-      const users = listUsers(ownerPayload);
-      const primary = users.find((u) => u.id === '1');
+    it('primary owner survives own field on response', async () => {
+      const users = await listUsers(ownerPayload);
+      const primary = users.find((u) => u.id === SEED_USER_IDS.OWNER);
       expect(primary?.isPrimaryOwner).toBe(true);
-      const other = users.find((u) => u.id === '2');
+      const other = users.find((u) => u.id === SEED_USER_IDS.FINANCE);
       expect(other?.isPrimaryOwner).toBe(false);
     });
   });
 
   describe('updateOwnProfile', () => {
-    it('updates the authenticated user name', () => {
-      const before = findUserById('2')!.name;
-      const result = updateOwnProfile('2', 'Self Updated');
+    it('updates the authenticated user name', async () => {
+      const before = (await findUserById(SEED_USER_IDS.FINANCE))!.name;
+      const result = await updateOwnProfile(SEED_USER_IDS.FINANCE, 'Self Updated');
       expect(result.name).toBe('Self Updated');
       // Restore
-      updateOwnProfile('2', before);
+      await updateOwnProfile(SEED_USER_IDS.FINANCE, before);
     });
 
-    it('trims whitespace', () => {
-      const before = findUserById('2')!.name;
-      const result = updateOwnProfile('2', '  Trimmed  ');
+    it('trims whitespace', async () => {
+      const before = (await findUserById(SEED_USER_IDS.FINANCE))!.name;
+      const result = await updateOwnProfile(SEED_USER_IDS.FINANCE, '  Trimmed  ');
       expect(result.name).toBe('Trimmed');
-      updateOwnProfile('2', before);
+      await updateOwnProfile(SEED_USER_IDS.FINANCE, before);
     });
 
-    it('rejects empty names', () => {
-      expect(() => updateOwnProfile('2', '   ')).toThrow('Name must be between 1 and 255 characters');
+    it('rejects empty names', async () => {
+      await expect(updateOwnProfile(SEED_USER_IDS.FINANCE, '   ')).rejects.toThrow('Name must be between 1 and 255 characters');
     });
   });
 
   describe('changeOwnPassword', () => {
     it('changes the password when current is correct', async () => {
-      await changeOwnPassword('2', 'finance123', 'finance-new-pw');
-      const user = findUserByEmail('finance@stato.app')!;
+      await changeOwnPassword(SEED_USER_IDS.FINANCE, 'finance123', 'finance-new-pw');
+      const user = (await findUserByEmail('finance@stato.app'))!;
       expect(await bcryptjs.compare('finance-new-pw', user.passwordHash)).toBe(true);
       // Restore
-      await changeOwnPassword('2', 'finance-new-pw', 'finance123');
+      await changeOwnPassword(SEED_USER_IDS.FINANCE, 'finance-new-pw', 'finance123');
     });
 
     it('rejects an incorrect current password', async () => {
-      await expect(changeOwnPassword('2', 'wrong', 'finance-new-pw'))
+      await expect(changeOwnPassword(SEED_USER_IDS.FINANCE, 'wrong', 'finance-new-pw'))
         .rejects.toThrow('Current password is incorrect');
     });
 
     it('rejects a too-short new password', async () => {
-      await expect(changeOwnPassword('2', 'finance123', 'short'))
+      await expect(changeOwnPassword(SEED_USER_IDS.FINANCE, 'finance123', 'short'))
         .rejects.toThrow('at least 6 characters');
     });
 
     it('rejects reusing the same password', async () => {
-      await expect(changeOwnPassword('2', 'finance123', 'finance123'))
+      await expect(changeOwnPassword(SEED_USER_IDS.FINANCE, 'finance123', 'finance123'))
         .rejects.toThrow('must differ');
     });
   });

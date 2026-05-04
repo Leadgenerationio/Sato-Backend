@@ -53,12 +53,14 @@ describe('API Integration', () => {
 
   describe('POST /api/v1/auth/register', () => {
     it('registers a new user', async () => {
+      // Unique email per run — DB persists between runs
+      const email = `api-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@test.com`;
       const res = await request(app)
         .post('/api/v1/auth/register')
-        .send({ email: 'api-test@test.com', password: 'password123', name: 'API Test' });
+        .send({ email, password: 'password123', name: 'API Test' });
 
       expect(res.status).toBe(201);
-      expect(res.body.data.user.email).toBe('api-test@test.com');
+      expect(res.body.data.user.email).toBe(email);
       expect(res.body.data.tokens).toBeDefined();
     });
 

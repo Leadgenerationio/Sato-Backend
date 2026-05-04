@@ -1,5 +1,24 @@
 import bcryptjs from 'bcryptjs';
+import { eq } from 'drizzle-orm';
+import { db } from '../config/database.js';
+import { users } from '../db/schema/index.js';
+import { logger } from '../utils/logger.js';
 import type { UserRole } from '../types/index.js';
+
+// Stable UUIDs for the dev seed users — tests reference these by name so
+// they keep working after the migration from in-memory to DB. Synthetic prefix
+// 11111111-… so they're obviously test data and never collide with real
+// gen_random_uuid() output.
+export const SEED_USER_IDS = {
+  OWNER: '11111111-0000-0000-0000-000000000001',
+  FINANCE: '11111111-0000-0000-0000-000000000002',
+  OPS: '11111111-0000-0000-0000-000000000003',
+  CLIENT: '11111111-0000-0000-0000-000000000004',
+  READONLY: '11111111-0000-0000-0000-000000000005',
+} as const;
+
+const LEADGEN_BUSINESS_ID = '26d6b2b4-c867-460e-8473-eca2b1ffd232';
+const DEMO_CLIENT_ID = '00000000-0000-0000-0000-000000000001';
 
 export interface User {
   id: string;
@@ -11,116 +30,102 @@ export interface User {
   clientId: string | null;
   isActive: boolean;
   isPrimaryOwner: boolean;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: Date | null;
+  updatedAt: Date | null;
 }
 
-// In-memory user store — replace with Drizzle + PostgreSQL later
-const users: User[] = [];
+/**
+ * Seed default users into the DB. Idempotent (uses onConflictDoNothing on
+ * email). NEVER runs in production — these are dev/test creds with well-known
+ * passwords. Production seeding is via `pnpm db:seed` (db/seed.ts) with
+ * `SEED_*_PASSWORD` env vars.
+ */
+export async function seedDefaultUsers(): Promise<void> {
+  if (process.env.NODE_ENV === 'production') return;
+  if (!db) return; // No DB configured (e.g. some unit-test contexts)
 
-export async function seedDefaultUsers() {
-  if (users.length > 0) return;
-
-  const ownerHash = await bcryptjs.hash('owner123', 12);
-  const financeHash = await bcryptjs.hash('finance123', 12);
-  const opsHash = await bcryptjs.hash('ops123', 12);
-  const clientHash = await bcryptjs.hash('client123', 12);
-  const readonlyHash = await bcryptjs.hash('readonly123', 12);
-
-  users.push(
+  const seed = [
     {
-      id: '1',
+      id: SEED_USER_IDS.OWNER,
       email: 'owner@stato.app',
-      passwordHash: ownerHash,
+      password: 'owner123',
       name: 'Sam Owner',
-      role: 'owner',
-      businessId: '26d6b2b4-c867-460e-8473-eca2b1ffd232',
+      role: 'owner' as const,
+      businessId: LEADGEN_BUSINESS_ID,
       clientId: null,
-      isActive: true,
       isPrimaryOwner: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
     },
     {
-      id: '2',
+      id: SEED_USER_IDS.FINANCE,
       email: 'finance@stato.app',
-      passwordHash: financeHash,
+      password: 'finance123',
       name: 'Finance Admin',
-      role: 'finance_admin',
-      businessId: '26d6b2b4-c867-460e-8473-eca2b1ffd232',
+      role: 'finance_admin' as const,
+      businessId: LEADGEN_BUSINESS_ID,
       clientId: null,
-      isActive: true,
       isPrimaryOwner: false,
-      createdAt: new Date(),
-      updatedAt: new Date(),
     },
     {
-      id: '3',
+      id: SEED_USER_IDS.OPS,
       email: 'ops@stato.app',
-      passwordHash: opsHash,
+      password: 'ops123',
       name: 'Ops Manager',
-      role: 'ops_manager',
-      businessId: '26d6b2b4-c867-460e-8473-eca2b1ffd232',
+      role: 'ops_manager' as const,
+      businessId: LEADGEN_BUSINESS_ID,
       clientId: null,
-      isActive: true,
       isPrimaryOwner: false,
-      createdAt: new Date(),
-      updatedAt: new Date(),
     },
     {
-      id: '4',
+      id: SEED_USER_IDS.CLIENT,
       email: 'client@stato.app',
-      passwordHash: clientHash,
+      password: 'client123',
       name: 'Client User',
-      role: 'client',
+      role: 'client' as const,
       businessId: null,
-      // Matches the demo client UUID seeded by db/seed.ts when SEED_DEMO_DATA is on.
-      clientId: '00000000-0000-0000-0000-000000000001',
-      isActive: true,
+      clientId: DEMO_CLIENT_ID,
       isPrimaryOwner: false,
-      createdAt: new Date(),
-      updatedAt: new Date(),
     },
     {
-      id: '5',
+      id: SEED_USER_IDS.READONLY,
       email: 'readonly@stato.app',
-      passwordHash: readonlyHash,
+      password: 'readonly123',
       name: 'Readonly User',
-      role: 'readonly',
-      businessId: '26d6b2b4-c867-460e-8473-eca2b1ffd232',
+      role: 'readonly' as const,
+      businessId: LEADGEN_BUSINESS_ID,
       clientId: null,
-      isActive: true,
       isPrimaryOwner: false,
-      createdAt: new Date(),
-      updatedAt: new Date(),
     },
-  );
+  ];
 
-  console.log('Seeded default users:');
-  console.log('  owner@stato.app / owner123       (owner)');
-  console.log('  finance@stato.app / finance123   (finance_admin)');
-  console.log('  ops@stato.app / ops123           (ops_manager)');
-  console.log('  client@stato.app / client123     (client)');
-  console.log('  readonly@stato.app / readonly123 (readonly)');
+  for (const u of seed) {
+    const passwordHash = await bcryptjs.hash(u.password, 12);
+    await db
+      .insert(users)
+      .values({
+        id: u.id,
+        email: u.email,
+        passwordHash,
+        name: u.name,
+        role: u.role,
+        businessId: u.businessId,
+        clientId: u.clientId,
+        isPrimaryOwner: u.isPrimaryOwner,
+        isActive: true,
+      })
+      .onConflictDoNothing();
+  }
+
+  logger.info({ count: seed.length }, 'Seeded default users (dev only)');
 }
 
-export function findUserByEmail(email: string): User | undefined {
-  return users.find((u) => u.email === email);
+/** Backwards-compat helper — DB-backed lookup by email. */
+export async function findUserByEmail(email: string): Promise<User | undefined> {
+  const [row] = await db.select().from(users).where(eq(users.email, email));
+  return row as User | undefined;
 }
 
-export function findUserById(id: string): User | undefined {
-  return users.find((u) => u.id === id);
-}
-
-export function getAllUsers(): User[] {
-  return users;
-}
-
-export function addUser(user: User): void {
-  users.push(user);
-}
-
-let nextId = 6;
-export function getNextId(): string {
-  return String(nextId++);
+/** Backwards-compat helper — DB-backed lookup by id. */
+export async function findUserById(id: string): Promise<User | undefined> {
+  const [row] = await db.select().from(users).where(eq(users.id, id));
+  return row as User | undefined;
 }

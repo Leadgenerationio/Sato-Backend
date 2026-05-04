@@ -6,6 +6,7 @@ import {
   registerUser,
   getUserById,
 } from '../services/auth.service.js';
+import { SEED_USER_IDS } from '../data/users.js';
 
 describe('Auth Service', () => {
   describe('generateTokens', () => {
@@ -97,10 +98,17 @@ describe('Auth Service', () => {
   });
 
   describe('registerUser', () => {
-    it('registers a new user', async () => {
-      const result = await registerUser('new@test.com', 'password123', 'New User');
+    // Generate a unique email per test run so the persisted DB doesn't carry
+    // stale rows between runs. Each `uniqueEmail()` call returns a distinct
+    // address that won't collide with previous test runs.
+    const uniqueEmail = (prefix: string) =>
+      `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@test.com`;
 
-      expect(result.user.email).toBe('new@test.com');
+    it('registers a new user', async () => {
+      const email = uniqueEmail('new');
+      const result = await registerUser(email, 'password123', 'New User');
+
+      expect(result.user.email).toBe(email);
       expect(result.user.name).toBe('New User');
       expect(result.user.role).toBe('readonly');
       expect(result.user.isActive).toBe(true);
@@ -108,12 +116,12 @@ describe('Auth Service', () => {
     });
 
     it('defaults to readonly role', async () => {
-      const result = await registerUser('default-role@test.com', 'password123', 'Default Role');
+      const result = await registerUser(uniqueEmail('default-role'), 'password123', 'Default Role');
       expect(result.user.role).toBe('readonly');
     });
 
     it('accepts a custom role', async () => {
-      const result = await registerUser('custom@test.com', 'password123', 'Custom', 'ops_manager');
+      const result = await registerUser(uniqueEmail('custom'), 'password123', 'Custom', 'ops_manager');
       expect(result.user.role).toBe('ops_manager');
     });
 
@@ -126,18 +134,19 @@ describe('Auth Service', () => {
 
   describe('getUserById', () => {
     it('returns user for valid id', async () => {
-      const user = await getUserById('1');
+      const user = await getUserById(SEED_USER_IDS.OWNER);
 
       expect(user.email).toBe('owner@stato.app');
       expect(user.role).toBe('owner');
     });
 
     it('throws for non-existent id', async () => {
-      await expect(getUserById('999')).rejects.toThrow('User not found');
+      // Use a valid UUID shape that won't exist
+      await expect(getUserById('99999999-0000-0000-0000-000000000999')).rejects.toThrow('User not found');
     });
 
     it('does not expose password hash', async () => {
-      const user = await getUserById('1');
+      const user = await getUserById(SEED_USER_IDS.OWNER);
       expect((user as any).passwordHash).toBeUndefined();
     });
   });
