@@ -64,12 +64,16 @@ const mockNotifications: Notification[] = [
 let memoryStore: Notification[] = [...mockNotifications];
 
 /**
- * Opt-in DB mode. The rest of this codebase currently uses in-memory mocks
- * for everything except auth, so we default to the same. Flip this flag to
- * route notifications through Postgres once the full stack runs against DB.
+ * Use DB whenever it's configured. The hardcoded mockNotifications array
+ * below is reserved for unit tests that run without a DB — production and
+ * dev with a real DATABASE_URL go through Postgres so users see real
+ * activity, not the 15 fake "TradeFX / Apex Leads / GreenField" entries.
+ *
+ * Set USE_DB_NOTIFICATIONS=false to force the mock path (e.g. demo mode).
  */
 function useDb(): boolean {
-  return !!db && process.env.USE_DB_NOTIFICATIONS === 'true';
+  if (process.env.USE_DB_NOTIFICATIONS === 'false') return false;
+  return !!db;
 }
 
 export async function listNotifications(requester: AuthPayload): Promise<Notification[]> {

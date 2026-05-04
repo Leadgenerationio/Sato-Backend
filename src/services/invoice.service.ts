@@ -92,27 +92,90 @@ async function loadClientMap(businessId: string): Promise<Map<string, ClientRow>
   return map;
 }
 
-export async function listInvoices(requester: AuthPayload): Promise<InvoiceSummary[]> {
+export interface ListInvoicesParams {
+  status?: string;
+  clientId?: string;
+  search?: string;
+  page?: number;
+  limit?: number;
+}
+
+export interface ListInvoicesResult {
+  items: InvoiceSummary[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+/**
+ * Paginated, filter-aware invoice list scoped to the requester's business
+ * via JOIN through clients. Filters and pagination are pushed into Postgres
+ * so the response cost stays bounded regardless of invoice volume — was
+ * previously fetching the whole business's invoices and slicing in JS.
+ */
+export async function listInvoices(
+  requester: AuthPayload,
+  params: ListInvoicesParams = {},
+): Promise<ListInvoicesResult> {
   const businessId = requester.businessId;
-  if (!businessId) return [];
+  if (!businessId) return { items: [], total: 0, page: 1, pageSize: 10 };
 
-  const clientMap = await loadClientMap(businessId);
-  const clientIds = Array.from(clientMap.keys());
-  if (clientIds.length === 0) return [];
+  const page = Math.max(1, params.page ?? 1);
+  const pageSize = Math.min(100, Math.max(1, params.limit ?? 10));
+  const offset = (page - 1) * pageSize;
 
-  const rows = await db
-    .select()
-    .from(invoices)
-    .where(sql`${invoices.clientId} IN (${sql.join(clientIds.map((id) => sql`${id}::uuid`), sql`, `)})`)
-    .orderBy(desc(invoices.createdAt));
+  const filters = [eq(clients.businessId, businessId)];
+  if (params.status && params.status !== 'all') {
+    filters.push(eq(invoices.status, params.status));
+  }
+  if (params.clientId) {
+    filters.push(eq(invoices.clientId, params.clientId));
+  }
+  if (params.search) {
+    const q = `%${params.search.toLowerCase()}%`;
+    filters.push(sql`(
+      lower(coalesce(${invoices.invoiceNumber}, '')) like ${q}
+      or lower(${clients.companyName}) like ${q}
+    )`);
+  }
+  const whereClause = and(...filters);
 
-  return rows
+  // Page rows, total count, and the client-row map (for invoiceToSummary)
+  // run in parallel. The client map is scoped per-business and stays small;
+  // bundling the join into the page query is possible but Drizzle's row
+  // materialisation is cleaner with the existing helper that already takes
+  // a ClientRow.
+  const [rows, countResult, clientMap] = await Promise.all([
+    db
+      .select({ inv: invoices, client: clients })
+      .from(invoices)
+      .innerJoin(clients, eq(clients.id, invoices.clientId))
+      .where(whereClause)
+      .orderBy(desc(invoices.createdAt))
+      .limit(pageSize)
+      .offset(offset),
+    db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(invoices)
+      .innerJoin(clients, eq(clients.id, invoices.clientId))
+      .where(whereClause),
+    loadClientMap(businessId),
+  ]);
+
+  const items = rows
     .map((r) => {
-      const client = clientMap.get(r.clientId);
+      const client = clientMap.get(r.inv.clientId) ?? r.client;
       if (!client) return null;
-      return invoiceToSummary(r, client);
+      return invoiceToSummary(r.inv, client);
     })
     .filter((x): x is InvoiceSummary => x !== null);
+
+  return {
+    items,
+    total: countResult[0]?.n ?? 0,
+    page,
+    pageSize,
+  };
 }
 
 export async function getInvoice(id: string, requester: AuthPayload): Promise<InvoiceDetail | null> {
@@ -132,8 +195,11 @@ export async function getInvoice(id: string, requester: AuthPayload): Promise<In
 }
 
 export async function getOverdueInvoices(requester: AuthPayload): Promise<InvoiceSummary[]> {
-  const all = await listInvoices(requester);
-  return all.filter((inv) => inv.status === 'overdue');
+  // Push the status='overdue' filter into the SQL via the new paginated
+  // listInvoices. Cap at 100 — dashboard doesn't show more than a handful
+  // of overdue rows anyway, and we don't want this becoming a slow path.
+  const result = await listInvoices(requester, { status: 'overdue', limit: 100 });
+  return result.items;
 }
 
 export async function createInvoice(
@@ -153,32 +219,30 @@ export async function createInvoice(
   const vatAmount = data.addVat ? Math.round(subtotal * 0.2 * 100) / 100 : 0;
   const total = Math.round((subtotal + vatAmount) * 100) / 100;
 
-  // Generate a simple invoice number. For prod, Xero will assign its own
-  // number when pushed; this is just our local reference.
-  //
-  // Wrap count + insert in a transaction so two concurrent createInvoice
-  // calls can't both read the same count and produce duplicate invoice
-  // numbers.
-  const row = await db.transaction(async (tx) => {
-    const [{ count }] = await tx.select({ count: sql<number>`count(*)::int` }).from(invoices);
-    const invoiceNumber = `INV-${1000 + (count ?? 0) + 1}`;
+  // Generate the invoice number from a Postgres SEQUENCE (created in
+  // migration 0010_invoice_number_seq.sql). nextval() is atomic and
+  // O(1) — no race between concurrent inserts and no full table scan.
+  // For prod, Xero will assign its own number when pushed; this is just
+  // our local reference.
+  const seqResult = await db.execute(sql`SELECT nextval('invoice_number_seq')::int AS n`);
+  const seqRows = seqResult as unknown as Array<{ n: number }> & { rows?: Array<{ n: number }> };
+  const next = (seqRows.rows ? seqRows.rows[0]?.n : seqRows[0]?.n) ?? 1001;
+  const invoiceNumber = `INV-${next}`;
 
-    const [inserted] = await tx
-      .insert(invoices)
-      .values({
-        clientId: data.clientId,
-        invoiceNumber,
-        status: 'draft',
-        currency: data.currency,
-        subtotal: String(subtotal),
-        vatAmount: String(vatAmount),
-        total: String(total),
-        dueDate: new Date(Date.now() + 30 * 86_400_000),
-        lineItems: data.lineItems,
-      })
-      .returning();
-    return inserted;
-  });
+  const [row] = await db
+    .insert(invoices)
+    .values({
+      clientId: data.clientId,
+      invoiceNumber,
+      status: 'draft',
+      currency: data.currency,
+      subtotal: String(subtotal),
+      vatAmount: String(vatAmount),
+      total: String(total),
+      dueDate: new Date(Date.now() + 30 * 86_400_000),
+      lineItems: data.lineItems,
+    })
+    .returning();
 
   return invoiceToDetail(row, client);
 }

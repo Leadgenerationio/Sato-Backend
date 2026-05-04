@@ -65,7 +65,7 @@ async function lbGet<T>(path: string, params: Record<string, string | number | u
     if (v !== undefined && v !== '') qs.set(k, String(v));
   }
   const url = `${baseUrl()}${path}?${qs.toString()}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+  const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
   if (!res.ok) {
     const body = await res.text();
     logger.error({ status: res.status, path, body }, 'LeadByte GET failed');
@@ -83,7 +83,7 @@ async function lbWrite<T>(method: 'POST' | 'PUT', path: string, body: unknown): 
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(5_000),
   });
   if (!res.ok) {
     const err = await res.text();
@@ -99,7 +99,7 @@ async function lbGetBody<T>(path: string, body: Record<string, unknown>): Promis
     method: 'GET',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ key: apiKey(), ...body }),
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(5_000),
   });
   if (!res.ok) {
     const err = await res.text();
@@ -444,12 +444,22 @@ export async function getSupplierSpend(window: DeliveryWindow): Promise<LeadByte
     ...windowToQuery(window),
   });
   return unwrapReport<LeadByteSupplierReportRow>(res).map((r, i): LeadByteSupplierSpend => {
-    const supplierName = flatRef(r.supplier);
+    // LeadByte returns supplier as a `{name, id}` ref or a flat string. For
+    // direct/internal traffic (no supplier configured on the campaign) the
+    // field comes back as an empty string. Label those rows "Direct" so the
+    // UI shows a meaningful name instead of a blank cell, and stable-key
+    // them so all "direct" rows for the same campaign aggregate together.
+    const rawSupplierName = flatRef(r.supplier);
+    const supplierName = rawSupplierName || 'Direct';
+    const platform = rawSupplierName || 'Direct';
     const campaignName = flatRef(r.campaign);
+    const supplierKey = rawSupplierName
+      ? `lb-sup-${rawSupplierName}`
+      : `lb-sup-direct-${refId(r.campaign) || campaignName || i}`;
     return {
-      supplierId: `lb-sup-${i}-${supplierName}`,
+      supplierId: supplierKey,
       supplierName,
-      platform: supplierName,
+      platform,
       campaignId: refId(r.campaign) || campaignName,
       campaignName,
       window,

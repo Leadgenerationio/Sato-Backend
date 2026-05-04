@@ -137,17 +137,82 @@ async function getRevenueForClient(clientId: string): Promise<number> {
 
 // ─── Service ───
 
-export async function listClients(requester: AuthPayload): Promise<ClientSummary[]> {
-  const businessId = requester.businessId;
-  if (!businessId) return [];
+export interface ListClientsParams {
+  status?: string;
+  search?: string;
+  page?: number;
+  limit?: number;
+}
 
-  const [rows, countMap, revenueMap] = await Promise.all([
-    db.select().from(clients).where(eq(clients.businessId, businessId)).orderBy(desc(clients.createdAt)),
+export interface ListClientsResult {
+  items: ClientSummary[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+/**
+ * Paginated, filter-aware list of clients for the requester's business.
+ *
+ * Filters and pagination are pushed into Postgres so the cost stays bounded
+ * regardless of table size (the previous implementation fetched the whole
+ * table and sliced in JS — at 10k+ clients that's a network/CPU hit per
+ * request even when the response is just 10 rows).
+ */
+export async function listClients(
+  requester: AuthPayload,
+  params: ListClientsParams = {},
+): Promise<ListClientsResult> {
+  const businessId = requester.businessId;
+  if (!businessId) return { items: [], total: 0, page: 1, pageSize: 10 };
+
+  const page = Math.max(1, params.page ?? 1);
+  const pageSize = Math.min(100, Math.max(1, params.limit ?? 10));
+  const offset = (page - 1) * pageSize;
+
+  const filters = [eq(clients.businessId, businessId)];
+  if (params.status && params.status !== 'all') {
+    // status is a PG enum — cast through sql to satisfy Drizzle's strict
+    // enum-literal type when the value comes from a query string.
+    filters.push(sql`${clients.status} = ${params.status}`);
+  }
+  if (params.search) {
+    const q = `%${params.search.toLowerCase()}%`;
+    filters.push(sql`(
+      lower(${clients.companyName}) like ${q}
+      or lower(coalesce(${clients.contactName}, '')) like ${q}
+      or lower(coalesce(${clients.contactEmail}, '')) like ${q}
+    )`);
+  }
+  const whereClause = and(...filters);
+
+  // 4 queries in parallel: page rows, total count, active-campaign map,
+  // revenue map. The aggregate maps are scoped to the same business but not
+  // to this page — at typical sizes the full per-client maps stay in
+  // single-digit kB and feed cheap Map.get() lookups for the slice we
+  // return.
+  const [rows, countResult, countMap, revenueMap] = await Promise.all([
+    db
+      .select()
+      .from(clients)
+      .where(whereClause)
+      .orderBy(desc(clients.createdAt))
+      .limit(pageSize)
+      .offset(offset),
+    db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(clients)
+      .where(whereClause),
     loadActiveCampaignCounts(businessId),
     loadRevenueByClient(businessId),
   ]);
 
-  return rows.map((r) => toSummary(r, countMap.get(r.id) ?? 0, revenueMap.get(r.id) ?? 0));
+  return {
+    items: rows.map((r) => toSummary(r, countMap.get(r.id) ?? 0, revenueMap.get(r.id) ?? 0)),
+    total: countResult[0]?.n ?? 0,
+    page,
+    pageSize,
+  };
 }
 
 export async function getClient(id: string, requester: AuthPayload): Promise<ClientDetail | null> {

@@ -1,3 +1,10 @@
+// Force the notification service to use the in-memory mock store rather than
+// the DB. The 15 hardcoded mock notifications give these tests deterministic
+// data — the actual DB-backed path is exercised via the prod deploy, where
+// the table is empty and these list/filter assertions wouldn't make sense.
+// Set BEFORE importing the app so the service module sees it during init.
+process.env.USE_DB_NOTIFICATIONS = 'false';
+
 import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 import app from '../index.js';

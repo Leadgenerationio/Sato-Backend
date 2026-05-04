@@ -3,27 +3,22 @@ import * as clientService from '../services/client.service.js';
 import { NotFoundError } from '../utils/errors.js';
 
 export async function listClients(req: Request, res: Response) {
-  let clients = await clientService.listClients(req.user!);
+  const result = await clientService.listClients(req.user!, {
+    status: req.query.status as string | undefined,
+    search: req.query.search as string | undefined,
+    page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+    limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+  });
 
-  const { status, search } = req.query;
-  if (status && status !== 'all') {
-    clients = clients.filter((c) => c.status === status);
-  }
-  if (search) {
-    const q = (search as string).toLowerCase();
-    clients = clients.filter((c) =>
-      c.companyName.toLowerCase().includes(q) || c.contactName.toLowerCase().includes(q) || c.contactEmail.toLowerCase().includes(q),
-    );
-  }
-
-  // Pagination
-  const page = Math.max(1, parseInt(req.query.page as string) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 10));
-  const total = clients.length;
-  const start = (page - 1) * limit;
-  const items = clients.slice(start, start + limit);
-
-  res.json({ status: 'success', data: { clients: items, total, page, pageSize: limit } });
+  res.json({
+    status: 'success',
+    data: {
+      clients: result.items,
+      total: result.total,
+      page: result.page,
+      pageSize: result.pageSize,
+    },
+  });
 }
 
 export async function getClient(req: Request, res: Response) {

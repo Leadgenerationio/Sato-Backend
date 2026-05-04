@@ -173,4 +173,82 @@ export async function getRecentActivity(_requester: AuthPayload, limit = 10): Pr
     .slice(0, safeLimit);
 }
 
+export interface DashboardStats {
+  totalRevenue: number;
+  totalCost: number;
+  netProfit: number;
+  profitMargin: number;
+  activeClients: number;
+  activeCampaigns: number;
+  leadsThisMonth: number;
+  /** ISO timestamp the stats were computed. Useful for "as of" labelling on the FE. */
+  asOf: string;
+}
+
+/**
+ * Aggregate counts and sums for the dashboard top-row KPI cards.
+ *
+ * Replaces the FE pattern of fetching three list endpoints with `?limit=100`
+ * and summing in JS — which capped totals at 100 records and fired three
+ * round-trips to render four numbers. This single endpoint runs four small
+ * SQL queries server-side (each index-backed, no LIMIT cap) and returns the
+ * full picture.
+ *
+ * Revenue / cost are sourced from `invoices` (paid) and `lead_deliveries`
+ * cost respectively — same definition as the per-client P&L report.
+ * leadsThisMonth is summed from `lead_deliveries.deliveryDate >= start of
+ * current month`. Active clients / campaigns are simple status filters.
+ */
+export async function getDashboardStats(_requester: AuthPayload): Promise<DashboardStats> {
+  // Start of current calendar month in YYYY-MM-DD (UTC). Postgres compares
+  // string dates lexicographically when both are ISO-formatted.
+  const now = new Date();
+  const monthStart = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`;
+
+  const [revenueRow, costRow, clientsRow, campaignsRow, leadsRow] = await Promise.all([
+    // Revenue: sum of paid invoices, all-time.
+    db
+      .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
+      .from(invoices)
+      .where(eq(invoices.status, 'paid')),
+    // Cost: sum of lead-delivery cost, all-time.
+    db
+      .select({ cost: sql<string>`coalesce(sum(${leadDeliveries.cost}), 0)::text` })
+      .from(leadDeliveries),
+    // Active clients: status='active' (excludes prospects/paused/churned).
+    db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(clients)
+      .where(eq(clients.status, 'active')),
+    // Active campaigns: status='active'.
+    db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(campaigns)
+      .where(eq(campaigns.status, 'active')),
+    // Leads this month: sum of leadCount on deliveries from start of month.
+    db
+      .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
+      .from(leadDeliveries)
+      .where(gte(leadDeliveries.deliveryDate, monthStart)),
+  ]);
+
+  const totalRevenue = Number(revenueRow[0]?.revenue ?? '0');
+  const totalCost = Number(costRow[0]?.cost ?? '0');
+  const netProfit = totalRevenue - totalCost;
+  const profitMargin = totalRevenue > 0
+    ? Math.round((netProfit / totalRevenue) * 1000) / 10
+    : 0;
+
+  return {
+    totalRevenue: Math.round(totalRevenue * 100) / 100,
+    totalCost: Math.round(totalCost * 100) / 100,
+    netProfit: Math.round(netProfit * 100) / 100,
+    profitMargin,
+    activeClients: clientsRow[0]?.n ?? 0,
+    activeCampaigns: campaignsRow[0]?.n ?? 0,
+    leadsThisMonth: leadsRow[0]?.leads ?? 0,
+    asOf: now.toISOString(),
+  };
+}
+
 void and;  // and is exported just-in-case future filters need scoping

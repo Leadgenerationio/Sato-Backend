@@ -5,30 +5,23 @@ import { uuidShape } from '../utils/zod-helpers.js';
 import { classifyXeroError } from '../utils/xero-errors.js';
 
 export async function listInvoices(req: Request, res: Response) {
-  let invoices = await invoiceService.listInvoices(req.user!);
+  const result = await invoiceService.listInvoices(req.user!, {
+    status: req.query.status as string | undefined,
+    clientId: req.query.client as string | undefined,
+    search: req.query.search as string | undefined,
+    page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+    limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+  });
 
-  const { status, client, search } = req.query;
-  if (status && status !== 'all') {
-    invoices = invoices.filter((inv) => inv.status === status);
-  }
-  if (client) {
-    invoices = invoices.filter((inv) => inv.clientId === client);
-  }
-  if (search) {
-    const q = (search as string).toLowerCase();
-    invoices = invoices.filter((inv) =>
-      inv.invoiceNumber.toLowerCase().includes(q) || inv.clientName.toLowerCase().includes(q),
-    );
-  }
-
-  // Pagination
-  const page = Math.max(1, parseInt(req.query.page as string) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 10));
-  const total = invoices.length;
-  const start = (page - 1) * limit;
-  const items = invoices.slice(start, start + limit);
-
-  res.json({ status: 'success', data: { invoices: items, total, page, pageSize: limit } });
+  res.json({
+    status: 'success',
+    data: {
+      invoices: result.items,
+      total: result.total,
+      page: result.page,
+      pageSize: result.pageSize,
+    },
+  });
 }
 
 export async function getInvoice(req: Request, res: Response) {

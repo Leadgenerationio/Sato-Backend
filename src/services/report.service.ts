@@ -3,6 +3,7 @@ import { db } from '../config/database.js';
 import { invoices } from '../db/schema/invoices.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { clients } from '../db/schema/clients.js';
+import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
 import type { AuthPayload } from '../types/index.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
@@ -57,22 +58,34 @@ export interface FinancialOverviewRow {
 // when there's nothing to show — UI renders "No data available".
 
 /**
- * Join LeadByte's campaign report with Sato's campaign metadata
- * (LeadByte doesn't store client/vertical on its end).
+ * Build a name → {clientName, vertical} map from the real `campaigns` table
+ * (synced from LeadByte). LeadByte's report rows are keyed by campaign NAME,
+ * so we look up by name rather than by id. Falls back to 'Unknown' when a
+ * report row doesn't have a matching synced campaign yet.
+ *
+ * Replaces a previous hardcoded `CAMPAIGN_META` map that pre-dated LeadByte
+ * sync — real LeadByte campaign names never matched those keys, so every
+ * report row showed clientName='Unknown'/vertical='Unknown' in production.
  */
-// Stale hardcoded mapping from a pre-LeadByte-sync era. Real LeadByte campaign
-// names rarely match these keys, so production lookups land on 'Unknown'
-// (which is honest). Kept here only as a fallback for the unlikely match;
-// labelled " (for demo)" on the off-chance it ever fires.
-const CAMPAIGN_META: Record<string, { clientName: string; vertical: string }> = {
-  'Solar Panel Leads UK': { clientName: 'Apex Media Ltd (for demo)', vertical: 'Solar' },
-  'Home Insurance Quotes': { clientName: 'Brightfield Corp (for demo)', vertical: 'Insurance' },
-  'Mortgage Leads London': { clientName: 'Clearwater Digital (for demo)', vertical: 'Finance' },
-  'Debt Management Leads': { clientName: 'Delta Solutions (for demo)', vertical: 'Finance' },
-  'Boiler Installation UK': { clientName: 'Apex Media Ltd (for demo)', vertical: 'Home Services' },
-  'Life Insurance Over 50s': { clientName: 'Echo Marketing (for demo)', vertical: 'Insurance' },
-  'Personal Injury Claims': { clientName: 'Clearwater Digital (for demo)', vertical: 'Legal' },
-};
+async function loadCampaignMetaByName(): Promise<Map<string, { clientName: string; vertical: string }>> {
+  const rows = await db
+    .select({
+      name: campaignsTable.name,
+      vertical: campaignsTable.vertical,
+      clientName: clients.companyName,
+    })
+    .from(campaignsTable)
+    .leftJoin(clients, eq(campaignsTable.clientId, clients.id));
+  const map = new Map<string, { clientName: string; vertical: string }>();
+  for (const r of rows) {
+    if (!r.name) continue;
+    map.set(r.name, {
+      clientName: r.clientName ?? 'Unmapped',
+      vertical: r.vertical ?? 'Unmapped',
+    });
+  }
+  return map;
+}
 
 // ─── Service ───
 
@@ -80,7 +93,10 @@ export async function getCampaignPerformance(
   _requester: AuthPayload,
   window: DeliveryWindow = 'this_month',
 ): Promise<CampaignReportRow[]> {
-  const rows = await leadbyte.getCampaignReport(window);
+  const [rows, metaByName] = await Promise.all([
+    leadbyte.getCampaignReport(window),
+    loadCampaignMetaByName(),
+  ]);
 
   // Empty when LeadByte returns nothing for the window — the UI shows an
   // empty state. Previously fell back to a mock generator which displayed
@@ -89,7 +105,7 @@ export async function getCampaignPerformance(
   if (rows.length === 0) return [];
 
   return rows.map((r): CampaignReportRow => {
-    const meta = CAMPAIGN_META[r.campaign] ?? { clientName: 'Unknown', vertical: 'Unknown' };
+    const meta = metaByName.get(r.campaign) ?? { clientName: 'Unmapped', vertical: 'Unmapped' };
     const totalCost =
       r.payout + (r.emailCost ?? 0) + (r.smsCost ?? 0) + (r.validationCost ?? 0);
     return {
@@ -108,10 +124,15 @@ export async function getCampaignPerformance(
   });
 }
 
-export async function getClientPnl(_requester: AuthPayload): Promise<ClientPnlRow[]> {
+export async function getClientPnl(requester: AuthPayload): Promise<ClientPnlRow[]> {
   // Real query: per-client per-month revenue (sum of paid invoices) + cost
   // (sum of lead-delivery costs) over the last 6 months.
-  // Falls back to demo data only if there's nothing in the DB at all.
+  // Both queries are scoped via INNER JOIN through clients to enforce the
+  // requester's businessId — without this, P&L for one tenant would leak
+  // rows from every other tenant once we move past Phase 1.
+  const businessId = requester.businessId;
+  if (!businessId) return [];
+
   const sixMonthsAgo = new Date();
   sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
   sixMonthsAgo.setDate(1);
@@ -125,7 +146,12 @@ export async function getClientPnl(_requester: AuthPayload): Promise<ClientPnlRo
         revenue: sql<string>`coalesce(sum(${invoices.total}), 0)`,
       })
       .from(invoices)
-      .where(and(eq(invoices.status, 'paid'), gte(invoices.createdAt, sixMonthsAgo)))
+      .innerJoin(clients, eq(clients.id, invoices.clientId))
+      .where(and(
+        eq(clients.businessId, businessId),
+        eq(invoices.status, 'paid'),
+        gte(invoices.createdAt, sixMonthsAgo),
+      ))
       .groupBy(invoices.clientId, sql`to_char(${invoices.createdAt}, 'YYYY-MM')`),
     db
       .select({
@@ -135,7 +161,11 @@ export async function getClientPnl(_requester: AuthPayload): Promise<ClientPnlRo
         leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int`,
       })
       .from(leadDeliveries)
-      .where(gte(leadDeliveries.deliveryDate, sixMonthsAgoIso))
+      .innerJoin(clients, eq(clients.id, leadDeliveries.clientId))
+      .where(and(
+        eq(clients.businessId, businessId),
+        gte(leadDeliveries.deliveryDate, sixMonthsAgoIso),
+      ))
       .groupBy(leadDeliveries.clientId, sql`to_char(${leadDeliveries.deliveryDate}, 'YYYY-MM')`),
   ]);
 

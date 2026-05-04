@@ -50,27 +50,33 @@ export async function cached<T>(
 
   const fresh = await fn();
 
-  // Don't cache empty results. We had a recurring bug where a transient empty
-  // response (LeadByte returning [] under brief rate-limiting / cold-start)
-  // got cached with the long TTL, blanking the dashboard for 5+ minutes
-  // even though the next live call would have returned real data. Forcing
-  // a re-fetch on empty is safer than trusting a one-shot empty.
+  // Empty-result handling. Previously we never cached empty results — that
+  // worked for typical "no data yet" cases but produced a thundering-herd
+  // problem when LeadByte was momentarily slow or rate-limited: every
+  // request would skip the cache, hit the slow upstream serially, and pile
+  // up to multi-second/timeout responses on the user path.
+  //
+  // Now: cache empty for a short TTL (NEGATIVE_TTL_SECONDS) so a single
+  // miss can't trigger a thundering herd. Real "data appeared upstream"
+  // cases recover within 30s, while we still avoid trusting a one-shot
+  // empty for the full normal TTL.
   const looksEmpty =
     fresh === null ||
     fresh === undefined ||
     (Array.isArray(fresh) && fresh.length === 0) ||
     (typeof fresh === 'object' && fresh !== null && !Array.isArray(fresh) && Object.keys(fresh).length === 0);
 
-  if (!looksEmpty && isRedisReady()) {
+  if (isRedisReady()) {
     // Fire-and-forget the set so a slow Redis write never delays the response.
-    withTimeout(redis!.set(key, JSON.stringify(fresh), 'EX', ttlSeconds), REDIS_OP_TIMEOUT_MS)
+    const effectiveTtl = looksEmpty ? Math.min(NEGATIVE_TTL_SECONDS, ttlSeconds) : ttlSeconds;
+    withTimeout(redis!.set(key, JSON.stringify(fresh), 'EX', effectiveTtl), REDIS_OP_TIMEOUT_MS)
       .catch((err) => logger.warn({ err, key }, 'Redis cache write failed/slow'));
-  } else if (looksEmpty) {
-    logger.info({ key }, 'Cache skip: result was empty — letting next call retry');
   }
 
   return fresh;
 }
+
+const NEGATIVE_TTL_SECONDS = 30;
 
 /**
  * Invalidate one or more keys. Safe no-op when Redis is unavailable.

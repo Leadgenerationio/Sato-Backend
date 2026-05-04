@@ -9,5 +9,6 @@ dashboardRoutes.use(authMiddleware);
 // All admin roles can view the dashboard. Client portal uses /portal/* routes.
 dashboardRoutes.use(requireRole('owner', 'finance_admin', 'ops_manager', 'readonly'));
 
+dashboardRoutes.get('/stats', dashboardController.stats);
 dashboardRoutes.get('/leads-by-day', dashboardController.leadsByDay);
 dashboardRoutes.get('/recent-activity', dashboardController.recentActivity);

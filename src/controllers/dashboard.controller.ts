@@ -12,3 +12,8 @@ export async function recentActivity(req: Request, res: Response) {
   const data = await dashboardService.getRecentActivity(req.user!, limit);
   res.json({ status: 'success', data: { items: data } });
 }
+
+export async function stats(req: Request, res: Response) {
+  const data = await dashboardService.getDashboardStats(req.user!);
+  res.json({ status: 'success', data });
+}
