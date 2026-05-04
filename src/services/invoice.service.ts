@@ -336,48 +336,77 @@ export async function pushInvoiceToXero(invoiceId: string, requester: AuthPayloa
 /**
  * Append a file attachment to an invoice. Frontend uploads via signed R2
  * URL first, then calls this with the resulting key + metadata.
+ *
+ * Optimised from a 5-query path (getInvoice ×2 → update → getInvoice ×2)
+ * to 2 queries: a single SELECT-with-authz-join, then UPDATE...RETURNING.
  */
 export async function addInvoiceAttachment(
   invoiceId: string,
   attachment: Omit<InvoiceAttachment, 'uploadedAt' | 'uploadedBy'>,
   requester: AuthPayload,
 ): Promise<InvoiceDetail | null> {
-  const existing = await getInvoice(invoiceId, requester);
-  if (!existing) return null;
+  const businessId = requester.businessId;
+  if (!businessId) return null;
 
+  // SELECT invoice + client in one query, with business scoping enforced
+  // via the JOIN. Returns null if invoice doesn't exist OR belongs to
+  // another business.
+  const [row] = await db
+    .select({ inv: invoices, client: clients })
+    .from(invoices)
+    .innerJoin(clients, eq(clients.id, invoices.clientId))
+    .where(and(eq(invoices.id, invoiceId), eq(clients.businessId, businessId)));
+  if (!row) return null;
+
+  const existingAttachments = (row.inv.attachments as InvoiceAttachment[] | null) ?? [];
   const newItem: InvoiceAttachment = {
     ...attachment,
     uploadedAt: new Date().toISOString(),
     uploadedBy: requester.userId,
   };
-  const updated = [...existing.attachments, newItem];
+  const updatedAttachments = [...existingAttachments, newItem];
 
-  await db
+  // UPDATE...RETURNING gives us the fresh row in one round-trip.
+  const [updated] = await db
     .update(invoices)
-    .set({ attachments: updated, updatedAt: new Date() })
-    .where(eq(invoices.id, invoiceId));
+    .set({ attachments: updatedAttachments, updatedAt: new Date() })
+    .where(eq(invoices.id, invoiceId))
+    .returning();
 
   logger.info({ invoiceId, key: attachment.key }, 'Invoice attachment added');
-  return getInvoice(invoiceId, requester);
+  return invoiceToDetail(updated, row.client);
 }
 
-/** Remove an attachment by key. R2 file is left in place (orphaned). */
+/**
+ * Remove an attachment by key. R2 file is left in place (orphaned).
+ * Same 2-query optimisation as addInvoiceAttachment.
+ */
 export async function removeInvoiceAttachment(
   invoiceId: string,
   key: string,
   requester: AuthPayload,
 ): Promise<InvoiceDetail | null> {
-  const existing = await getInvoice(invoiceId, requester);
-  if (!existing) return null;
+  const businessId = requester.businessId;
+  if (!businessId) return null;
 
-  const updated = existing.attachments.filter((a) => a.key !== key);
-  await db
+  const [row] = await db
+    .select({ inv: invoices, client: clients })
+    .from(invoices)
+    .innerJoin(clients, eq(clients.id, invoices.clientId))
+    .where(and(eq(invoices.id, invoiceId), eq(clients.businessId, businessId)));
+  if (!row) return null;
+
+  const existingAttachments = (row.inv.attachments as InvoiceAttachment[] | null) ?? [];
+  const updatedAttachments = existingAttachments.filter((a) => a.key !== key);
+
+  const [updated] = await db
     .update(invoices)
-    .set({ attachments: updated, updatedAt: new Date() })
-    .where(eq(invoices.id, invoiceId));
+    .set({ attachments: updatedAttachments, updatedAt: new Date() })
+    .where(eq(invoices.id, invoiceId))
+    .returning();
 
   logger.info({ invoiceId, key }, 'Invoice attachment removed');
-  return getInvoice(invoiceId, requester);
+  return invoiceToDetail(updated, row.client);
 }
 
 /**

@@ -2,23 +2,20 @@ import { Request, Response } from 'express';
 import * as notificationService from '../services/notification.service.js';
 
 export async function listNotifications(req: Request, res: Response) {
-  let notifications = await notificationService.listNotifications(req.user!);
-
-  const { filter } = req.query;
-  if (filter === 'unread') {
-    notifications = notifications.filter((n) => !n.read);
-  }
-
-  // Pagination
-  const page = Math.max(1, parseInt(req.query.page as string) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
-  const total = notifications.length;
-  const start = (page - 1) * limit;
-  const items = notifications.slice(start, start + limit);
+  const result = await notificationService.listNotifications(req.user!, {
+    unreadOnly: req.query.filter === 'unread',
+    page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+    limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+  });
 
   res.json({
     status: 'success',
-    data: { notifications: items, total, page, pageSize: limit },
+    data: {
+      notifications: result.items,
+      total: result.total,
+      page: result.page,
+      pageSize: result.pageSize,
+    },
   });
 }
 

@@ -1,4 +1,4 @@
-import { and, eq, desc } from 'drizzle-orm';
+import { and, eq, desc, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { notifications } from '../db/schema/notifications.js';
 import { sendEmail } from '../integrations/resend/resend-client.js';
@@ -76,21 +76,67 @@ function useDb(): boolean {
   return !!db;
 }
 
-export async function listNotifications(requester: AuthPayload): Promise<Notification[]> {
+export interface ListNotificationsParams {
+  unreadOnly?: boolean;
+  page?: number;
+  limit?: number;
+}
+
+export interface ListNotificationsResult {
+  items: Notification[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export async function listNotifications(
+  requester: AuthPayload,
+  params: ListNotificationsParams = {},
+): Promise<ListNotificationsResult> {
+  const page = Math.max(1, params.page ?? 1);
+  const pageSize = Math.min(100, Math.max(1, params.limit ?? 20));
+  const offset = (page - 1) * pageSize;
+
   if (useDb()) {
-    const rows = await db
-      .select()
-      .from(notifications)
-      .where(requester.userId ? eq(notifications.userId, requester.userId) : undefined)
-      .orderBy(desc(notifications.createdAt))
-      .limit(200);
-    return rows.map(normalizeRow);
+    const filters = [];
+    if (requester.userId) filters.push(eq(notifications.userId, requester.userId));
+    if (params.unreadOnly) filters.push(eq(notifications.read, false));
+    const whereClause = filters.length > 0 ? and(...filters) : undefined;
+
+    const [rows, countResult] = await Promise.all([
+      db
+        .select()
+        .from(notifications)
+        .where(whereClause)
+        .orderBy(desc(notifications.createdAt))
+        .limit(pageSize)
+        .offset(offset),
+      db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(notifications)
+        .where(whereClause),
+    ]);
+    return {
+      items: rows.map(normalizeRow),
+      total: countResult[0]?.n ?? 0,
+      page,
+      pageSize,
+    };
   }
-  return [...memoryStore].sort((a, b) => {
+
+  // In-memory mock path — slice after filtering. Total before slice.
+  const sorted = [...memoryStore].sort((a, b) => {
     const at = a.createdAt ? new Date(a.createdAt).getTime() : 0;
     const bt = b.createdAt ? new Date(b.createdAt).getTime() : 0;
     return bt - at;
   });
+  const filtered = params.unreadOnly ? sorted.filter((n) => !n.read) : sorted;
+  return {
+    items: filtered.slice(offset, offset + pageSize),
+    total: filtered.length,
+    page,
+    pageSize,
+  };
 }
 
 export async function markAsRead(id: string, requester: AuthPayload): Promise<Notification | null> {

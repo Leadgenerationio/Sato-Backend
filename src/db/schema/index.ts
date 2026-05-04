@@ -7,7 +7,6 @@ export * from './invoices.js';
 export * from './workflows.js';
 export * from './notifications.js';
 export * from './credit-checks.js';
-export * from './xero-tokens.js';
 export * from './bank-accounts.js';
 export * from './traffic-sources.js';
 export * from './landing-pages.js';

@@ -407,28 +407,35 @@ export async function getCreditAlerts(requester: AuthPayload): Promise<{ clientI
   // Latest credit check per client, filtered to "concerning" scores. For now
   // we consider any score below 55 an alert; a more sophisticated rule
   // (e.g. recent drop > 10) can be layered on later.
-  const rows = await db
-    .select()
-    .from(clients)
-    .where(and(eq(clients.businessId, businessId), sql`${clients.creditScore} IS NOT NULL`, sql`${clients.creditScore} < 55`));
-
-  // Fetch latest credit_check per client for scoreChange. Simple per-row query
-  // keeps the code obvious; not high-volume.
-  const results = await Promise.all(
-    rows.map(async (r) => {
-      const [latest] = await db
-        .select()
-        .from(creditChecks)
-        .where(eq(creditChecks.clientId, r.id))
-        .orderBy(desc(creditChecks.checkedAt))
-        .limit(1);
-      return {
-        clientId: r.id,
-        clientName: r.companyName,
-        scoreChange: latest?.scoreChange ?? 0,
-        currentScore: r.creditScore ?? 0,
-      };
-    }),
-  );
-  return results;
+  //
+  // Single query (was N+1): joins clients to the latest credit_check per
+  // client via DISTINCT ON. At 1k clients the previous loop fired 1k+1
+  // round-trips; this is one. Postgres uses the
+  // (clientId, checkedAt DESC) ordering to pick the latest row per client.
+  const rows = await db.execute(sql`
+    SELECT
+      c.id            AS "clientId",
+      c.company_name  AS "clientName",
+      c.credit_score  AS "currentScore",
+      cc.score_change AS "scoreChange"
+    FROM clients c
+    LEFT JOIN LATERAL (
+      SELECT score_change
+      FROM credit_checks
+      WHERE client_id = c.id
+      ORDER BY checked_at DESC
+      LIMIT 1
+    ) cc ON true
+    WHERE c.business_id = ${businessId}
+      AND c.credit_score IS NOT NULL
+      AND c.credit_score < 55
+  `);
+  type AlertRow = { clientId: string; clientName: string; currentScore: number | null; scoreChange: number | null };
+  const list = (rows as unknown as { rows?: AlertRow[] }).rows ?? (rows as unknown as AlertRow[]);
+  return list.map((r) => ({
+    clientId: r.clientId,
+    clientName: r.clientName,
+    scoreChange: r.scoreChange ?? 0,
+    currentScore: r.currentScore ?? 0,
+  }));
 }

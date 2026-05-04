@@ -50,6 +50,8 @@ export interface FinancialOverviewRow {
   profit: number;
   invoicesPaid: number;
   invoicesOverdue: number;
+  /** Invoices that are neither paid nor overdue — i.e. drafts + sent + due-but-not-late. */
+  invoicesPending: number;
   vatCollected: number;
 }
 
@@ -315,9 +317,19 @@ export async function getFinancialOverview(_requester: AuthPayload): Promise<Fin
   const expensesByMonth = new Map(expenseRows.map((r) => [r.month, Number(r.expenses)]));
   const paidByMonth = new Map<string, number>();
   const overdueByMonth = new Map<string, number>();
+  // Pending = anything that's not 'paid' and not 'overdue' (drafts, sent,
+  // due-but-not-late). Sum into a single bucket per month so the dashboard
+  // Invoice Status chart's third bar shows real numbers instead of the
+  // hardcoded zero it used to.
+  const pendingByMonth = new Map<string, number>();
   for (const c of invoiceCountRows) {
-    if (c.status === 'paid') paidByMonth.set(c.month, c.count);
-    if (c.status === 'overdue') overdueByMonth.set(c.month, c.count);
+    if (c.status === 'paid') {
+      paidByMonth.set(c.month, c.count);
+    } else if (c.status === 'overdue') {
+      overdueByMonth.set(c.month, c.count);
+    } else {
+      pendingByMonth.set(c.month, (pendingByMonth.get(c.month) ?? 0) + c.count);
+    }
   }
 
   return months.map((m): FinancialOverviewRow => {
@@ -335,6 +347,7 @@ export async function getFinancialOverview(_requester: AuthPayload): Promise<Fin
       profit: Math.round((r.revenue - expenses) * 100) / 100,
       invoicesPaid: paidByMonth.get(m) ?? 0,
       invoicesOverdue: overdueByMonth.get(m) ?? 0,
+      invoicesPending: pendingByMonth.get(m) ?? 0,
       vatCollected: Math.round(r.vat * 100) / 100,
     };
   });
