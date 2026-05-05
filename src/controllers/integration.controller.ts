@@ -9,7 +9,16 @@ import { isR2Configured } from '../integrations/r2/r2-client.js';
 import { isCatchrConfigured } from '../integrations/catchr/catchr-client.js';
 import { getLastCatchrSyncAt } from './ad-spend.controller.js';
 import { syncQueue } from '../jobs/queue.js';
+import { cached } from '../utils/cache.js';
 import { logger } from '../utils/logger.js';
+
+// Xero balances + VAT change slowly. Caching their server-side fetches
+// dramatically smooths the dashboard — every user that opens the dashboard
+// in the next 5 / 15 min gets the cached payload (~10ms) instead of a
+// fresh 700-1000ms Xero round-trip. Xero docs explicitly support this
+// access pattern; balances are end-of-day-accurate, not minute-accurate.
+const XERO_BANK_TTL_SECONDS = 300;   // 5 min
+const XERO_VAT_TTL_SECONDS = 900;    // 15 min — VAT moves quarterly
 
 let lastLeadByteSyncAt: string | null = null;
 export function recordLeadByteSync(ts: string): void {
@@ -53,7 +62,15 @@ export async function xeroVatLiability(_req: Request, res: Response) {
   const fromDate = vatService.vatPeriodFromDate();
   const toDate = vatService.todayIso();
   try {
-    const liability = await xeroClient.getVatLiability(fromDate, toDate);
+    // Cache the live Xero TaxSummary fetch — VAT is quarterly so 15 min
+    // is fresh enough, and Xero's response time is one of our slowest
+    // upstream calls (~700ms). Cache key includes the date range so
+    // crossing a quarter boundary invalidates naturally.
+    const liability = await cached(
+      `xero:vat:${fromDate}:${toDate}`,
+      XERO_VAT_TTL_SECONDS,
+      () => xeroClient.getVatLiability(fromDate, toDate),
+    );
     res.json({ status: 'success', data: { configured: true, ...liability, currency: 'GBP' } });
   } catch (err) {
     logger.warn({ err }, 'Xero VAT liability fetch failed');
@@ -80,7 +97,14 @@ export async function xeroBankAccounts(_req: Request, res: Response) {
     return;
   }
   try {
-    const accounts = await xeroClient.getBankBalances();
+    // Cache bank balances for 5 minutes — they're end-of-day-accurate
+    // anyway, and the live fetch is ~900ms (slowest dashboard widget).
+    // Every dashboard mount in the next 5 min pays ~10ms instead.
+    const accounts = await cached(
+      'xero:bank-balances',
+      XERO_BANK_TTL_SECONDS,
+      () => xeroClient.getBankBalances(),
+    );
     res.json({ status: 'success', data: { configured: true, accounts } });
   } catch (err) {
     logger.warn({ err }, 'Xero bank-balances fetch failed');

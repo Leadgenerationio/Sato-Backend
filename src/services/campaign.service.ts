@@ -7,17 +7,18 @@ import { logger } from '../utils/logger.js';
 import type { AuthPayload } from '../types/index.js';
 
 // LeadByte campaign aggregates change slowly relative to dashboard load
-// frequency. Caching them for 5 minutes is the sweet spot:
-// - Long enough that idle periods (lunch break, AFK, async work) don't flush
-//   the cache and force the next user to wait 1.5-2s on a cold miss.
-// - Short enough that sync changes (hourly LeadByte sync at minute 0/30)
-//   show up within ~5 min in the worst case.
-// - The 45s prewarm worker refreshes the cache before TTL expires when
-//   running, but if the worker is down for any reason, users still get
-//   acceptable freshness from the longer TTL alone.
-const CAMPAIGN_LIST_TTL_SECONDS = 300;
-const DELIVERY_REPORT_TTL_SECONDS = 300;
-const TYPE_MAP_TTL_SECONDS = 600;
+// frequency. Caching them for 15 minutes is the sweet spot:
+// - Long enough that meeting/demo gaps (5-15 min away from desk) don't
+//   flush the cache and force the next user to wait 2-5s on a cold miss.
+// - Short enough that the hourly LeadByte sync shows up in roughly the
+//   right window — the prewarm worker keeps the cache fresh during active
+//   use anyway, and the negative-cache (utils/cache.ts) absorbs blips.
+// - Bumped from 5 min → 15 min on 2026-05-05 after measuring 2.5s warm
+//   responses on /campaigns when cache TTL expired between visits during
+//   a demo-prep walkthrough.
+const CAMPAIGN_LIST_TTL_SECONDS = 900;
+const DELIVERY_REPORT_TTL_SECONDS = 900;
+const TYPE_MAP_TTL_SECONDS = 1800;
 
 export type CampaignType = 'pay_per_lead' | 'managed' | 'internal';
 
