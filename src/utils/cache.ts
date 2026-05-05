@@ -2,11 +2,18 @@ import { redis } from '../config/redis.js';
 import { logger } from './logger.js';
 
 /**
- * How long we wait on a Redis op before bailing to a direct fetch. Keeping
- * this aggressive — Redis is in-region; if it doesn't respond within 200ms
- * something is wrong and the user shouldn't pay for our retry storm.
+ * How long we wait on a Redis op before bailing to a direct fetch.
+ *
+ * Bumped from 200ms → 1000ms on 2026-05-05 after measuring production:
+ * Railway's Redis lives in a different availability zone from the API
+ * pod, so cross-AZ Redis ops can spike to 200-500ms — hitting the
+ * previous timeout silently bypassed the cache and forced every
+ * /xero/bank-accounts call to do a full 700-1000ms upstream fetch.
+ * Local Redis is sub-5ms; production cross-AZ is ~50-200ms typical.
+ * 1000ms gives plenty of slack while still bailing on a real Redis
+ * outage.
  */
-const REDIS_OP_TIMEOUT_MS = 200;
+const REDIS_OP_TIMEOUT_MS = 1000;
 
 function isRedisReady(): boolean {
   // ioredis reports 'ready' once a connection + handshake completes.
