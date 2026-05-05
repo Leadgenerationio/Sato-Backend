@@ -69,6 +69,41 @@ export interface FinancialOverviewRow {
  * sync — real LeadByte campaign names never matched those keys, so every
  * report row showed clientName='Unknown'/vertical='Unknown' in production.
  */
+/**
+ * Best-effort vertical guess from campaign name when the synced campaign row
+ * has no vertical column populated. Looks for keywords in the name —
+ * "Hearing Aids", "Solar", "Insulation", etc. Falls back to 'Other' if no
+ * keyword matches. Replaces showing "Unmapped" everywhere.
+ */
+function deriveVerticalFromName(name: string): string {
+  const lower = name.toLowerCase();
+  // Order matters — more specific phrases first so they match before generics.
+  const keywords: Array<{ match: string | RegExp; label: string }> = [
+    { match: 'hearing aid', label: 'Hearing Aids' },
+    { match: 'solar', label: 'Solar' },
+    { match: 'insulation', label: 'Insulation' },
+    { match: 'lasting power of attorney', label: 'Legal — LPA' },
+    { match: 'pcp claim', label: 'PCP Claims' },
+    { match: 'tax claim', label: 'Tax Claims' },
+    { match: 'will writ', label: 'Will Writing' },
+    { match: 'mortgage', label: 'Mortgage' },
+    { match: 'life insurance', label: 'Life Insurance' },
+    { match: 'home insurance', label: 'Home Insurance' },
+    { match: 'pmi', label: 'Private Medical Insurance' },
+    { match: 'house sale', label: 'Property Sales' },
+    { match: 'property sale', label: 'Property Sales' },
+    { match: 'boiler', label: 'Boiler' },
+    { match: 'debt', label: 'Debt Management' },
+    { match: 'personal injury', label: 'Personal Injury' },
+  ];
+  for (const k of keywords) {
+    if (typeof k.match === 'string' ? lower.includes(k.match) : k.match.test(lower)) {
+      return k.label;
+    }
+  }
+  return 'Other';
+}
+
 async function loadCampaignMetaByName(): Promise<Map<string, { clientName: string; vertical: string }>> {
   const rows = await db
     .select({
@@ -82,8 +117,15 @@ async function loadCampaignMetaByName(): Promise<Map<string, { clientName: strin
   for (const r of rows) {
     if (!r.name) continue;
     map.set(r.name, {
+      // clientName stays "Unmapped" until Sam delivers the LeadByte→client
+      // CSV — we genuinely don't know which client owns each campaign.
       clientName: r.clientName ?? 'Unmapped',
-      vertical: r.vertical ?? 'Unmapped',
+      // Vertical, however, can be derived from the campaign name itself
+      // ("Hearing Aids (PL)" → Hearing Aids). Falls back to derived even
+      // when the synced row exists but has no vertical column.
+      vertical: r.vertical && r.vertical !== 'Unmapped'
+        ? r.vertical
+        : deriveVerticalFromName(r.name),
     });
   }
   return map;
@@ -107,7 +149,13 @@ export async function getCampaignPerformance(
   if (rows.length === 0) return [];
 
   return rows.map((r): CampaignReportRow => {
-    const meta = metaByName.get(r.campaign) ?? { clientName: 'Unmapped', vertical: 'Unmapped' };
+    // If the synced campaign row exists, use its meta; otherwise derive
+    // vertical from the LeadByte campaign name itself. Client stays
+    // "Unmapped" until Sam's CSV arrives.
+    const meta = metaByName.get(r.campaign) ?? {
+      clientName: 'Unmapped',
+      vertical: deriveVerticalFromName(r.campaign),
+    };
     const totalCost =
       r.payout + (r.emailCost ?? 0) + (r.smsCost ?? 0) + (r.validationCost ?? 0);
     return {

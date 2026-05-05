@@ -181,6 +181,11 @@ export interface DashboardStats {
   activeClients: number;
   activeCampaigns: number;
   leadsThisMonth: number;
+  // Period-over-period deltas. Null when there's no prior-period baseline
+  // to compare against (e.g. brand-new account, or last month had zero).
+  // Frontend hides the trend chip when null.
+  revenueChange: number | null;
+  leadsChange: number | null;
   /** ISO timestamp the stats were computed. Useful for "as of" labelling on the FE. */
   asOf: string;
 }
@@ -204,8 +209,15 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
   // string dates lexicographically when both are ISO-formatted.
   const now = new Date();
   const monthStart = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`;
+  // Start + end of LAST calendar month for period-over-period deltas.
+  const lastMonthDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const lastMonthStart = `${lastMonthDate.getUTCFullYear()}-${String(lastMonthDate.getUTCMonth() + 1).padStart(2, '0')}-01`;
+  const lastMonthEnd = monthStart; // exclusive end
 
-  const [revenueRow, costRow, clientsRow, campaignsRow, leadsRow] = await Promise.all([
+  const [
+    revenueRow, costRow, clientsRow, campaignsRow, leadsRow,
+    lastMonthRevenueRow, lastMonthLeadsRow,
+  ] = await Promise.all([
     // Revenue: sum of paid invoices, all-time.
     db
       .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
@@ -230,6 +242,16 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
       .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
       .from(leadDeliveries)
       .where(gte(leadDeliveries.deliveryDate, monthStart)),
+    // Last month revenue: paid invoices created in last calendar month.
+    db
+      .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
+      .from(invoices)
+      .where(sql`${invoices.status} = 'paid' AND ${invoices.createdAt} >= ${lastMonthStart}::date AND ${invoices.createdAt} < ${lastMonthEnd}::date`),
+    // Last month leads: deliveries in last calendar month.
+    db
+      .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
+      .from(leadDeliveries)
+      .where(sql`${leadDeliveries.deliveryDate} >= ${lastMonthStart}::date AND ${leadDeliveries.deliveryDate} < ${lastMonthEnd}::date`),
   ]);
 
   const totalRevenue = Number(revenueRow[0]?.revenue ?? '0');
@@ -239,6 +261,18 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
     ? Math.round((netProfit / totalRevenue) * 1000) / 10
     : 0;
 
+  // Period-over-period deltas. Only compute when last month had a non-zero
+  // baseline — avoids dividing by zero and showing nonsensical "+∞%" chips.
+  const lastMonthRevenue = Number(lastMonthRevenueRow[0]?.revenue ?? '0');
+  const lastMonthLeads = lastMonthLeadsRow[0]?.leads ?? 0;
+  const thisMonthLeads = leadsRow[0]?.leads ?? 0;
+  const revenueChange = lastMonthRevenue > 0
+    ? Math.round(((totalRevenue - lastMonthRevenue) / lastMonthRevenue) * 1000) / 10
+    : null;
+  const leadsChange = lastMonthLeads > 0
+    ? Math.round(((thisMonthLeads - lastMonthLeads) / lastMonthLeads) * 1000) / 10
+    : null;
+
   return {
     totalRevenue: Math.round(totalRevenue * 100) / 100,
     totalCost: Math.round(totalCost * 100) / 100,
@@ -246,7 +280,9 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
     profitMargin,
     activeClients: clientsRow[0]?.n ?? 0,
     activeCampaigns: campaignsRow[0]?.n ?? 0,
-    leadsThisMonth: leadsRow[0]?.leads ?? 0,
+    leadsThisMonth: thisMonthLeads,
+    revenueChange,
+    leadsChange,
     asOf: now.toISOString(),
   };
 }
