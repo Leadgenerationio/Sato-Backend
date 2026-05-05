@@ -5,11 +5,29 @@ import * as svc from '../services/ad-spend.service.js';
 import { isCatchrConfigured } from '../integrations/catchr/index.js';
 
 let lastCatchrSyncAt: string | null = null;
-export function recordCatchrSync(ts: string): void {
+let lastCatchrSyncSummary: {
+  platformsSynced: number;
+  accountsSynced: number;
+  rowsWritten: number;
+  skippedPlatforms: string[];
+  errorAccounts: number;
+} | null = null;
+
+export function recordCatchrSync(ts: string, summary?: {
+  platformsSynced: number;
+  accountsSynced: number;
+  rowsWritten: number;
+  skippedPlatforms: string[];
+  errorAccounts: number;
+}): void {
   lastCatchrSyncAt = ts;
+  if (summary) lastCatchrSyncSummary = summary;
 }
 export function getLastCatchrSyncAt(): string | null {
   return lastCatchrSyncAt;
+}
+export function getLastCatchrSyncSummary() {
+  return lastCatchrSyncSummary;
 }
 
 function filtersFromQuery(req: Request): svc.AdSpendFilters {
@@ -32,6 +50,9 @@ export async function status(_req: Request, res: Response) {
     data: {
       configured: isCatchrConfigured(),
       lastSyncAt: lastCatchrSyncAt,
+      // Surface last-sync coverage so the FE can show a status banner —
+      // "9 accounts working, 6 blocked by Google permissions, TikTok skipped".
+      lastSync: lastCatchrSyncSummary,
     },
   });
 }

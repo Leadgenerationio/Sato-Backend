@@ -119,7 +119,7 @@ async function loadCampaignMetaByName(): Promise<Map<string, { clientName: strin
     map.set(r.name, {
       // clientName stays "Unmapped" until Sam delivers the LeadByte→client
       // CSV — we genuinely don't know which client owns each campaign.
-      clientName: r.clientName ?? 'Unmapped',
+      clientName: r.clientName ?? 'Pending client mapping',
       // Vertical, however, can be derived from the campaign name itself
       // ("Hearing Aids (PL)" → Hearing Aids). Falls back to derived even
       // when the synced row exists but has no vertical column.
@@ -153,7 +153,7 @@ export async function getCampaignPerformance(
     // vertical from the LeadByte campaign name itself. Client stays
     // "Unmapped" until Sam's CSV arrives.
     const meta = metaByName.get(r.campaign) ?? {
-      clientName: 'Unmapped',
+      clientName: 'Pending client mapping',
       vertical: deriveVerticalFromName(r.campaign),
     };
     const totalCost =

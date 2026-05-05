@@ -162,10 +162,12 @@ describe('Credit-check provider router', () => {
     expect(getActiveProvider()).toBe('creditsafe');
   });
 
-  it('mock path stamps source=mock on the report', async () => {
-    const r = await runCredit('87654321', 'Brightfield Corp');
-    expect(r.source).toBe('mock');
-    expect(r.companyName).toBe('Brightfield Corp');
+  // 2026-05-05: removed the silent mock fallback. When neither provider is
+  // configured, the router now throws CreditProviderNotConfiguredError so the
+  // FE can show a clear "set up Endole/Creditsafe" message instead of
+  // displaying a fabricated random score that looks real.
+  it('throws CreditProviderNotConfiguredError when no provider is set', async () => {
+    await expect(runCredit('87654321', 'Brightfield Corp')).rejects.toThrow(/not configured/i);
   });
 });
 

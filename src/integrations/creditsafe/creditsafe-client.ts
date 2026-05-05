@@ -130,26 +130,29 @@ async function findConnectId(companyNumber: string): Promise<string | null> {
 
 /**
  * Run a Creditsafe credit check on a UK company by registration number.
- * Falls back to a mock report when not configured.
+ * When credentials are configured, real errors throw — the previous
+ * "fall back to mock on error" behaviour silently produced fabricated
+ * scores indistinguishable from real data, which is a no-fake-data
+ * policy violation. The router (integrations/credit-check/index.ts)
+ * handles the unconfigured case by throwing CreditProviderNotConfiguredError
+ * before this function is even called.
  */
 export async function runCreditCheck(companyNumber: string, companyName: string): Promise<CreditReport> {
   if (!isCreditsafeConfigured()) {
-    logger.warn('Creditsafe running in MOCK mode — no CREDITSAFE_API_KEY configured');
+    // Router shouldn't call us when unconfigured, but guard anyway.
+    logger.warn('Creditsafe runCreditCheck called but not configured');
     return mockReport(companyNumber, companyName);
   }
 
-  try {
-    const connectId = await findConnectId(companyNumber);
-    if (!connectId) {
-      logger.warn({ companyNumber }, 'Creditsafe: company not found, returning mock');
-      return mockReport(companyNumber, companyName);
-    }
-    const res = await csFetch<CreditsafeReportResponse>(`/v1/companies/${connectId}/report`);
-    return normalise(res.report, companyName, companyNumber);
-  } catch (err) {
-    logger.error({ err, companyNumber }, 'Creditsafe runCreditCheck failed — returning mock');
-    return mockReport(companyNumber, companyName);
+  const connectId = await findConnectId(companyNumber);
+  if (!connectId) {
+    // Genuine "company not found in Creditsafe DB" — distinct error so the
+    // FE can show "Company X not registered with Creditsafe" instead of a
+    // generic failure or fabricated score.
+    throw new Error(`Creditsafe: company ${companyNumber} not found in their database`);
   }
+  const res = await csFetch<CreditsafeReportResponse>(`/v1/companies/${connectId}/report`);
+  return normalise(res.report, companyName, companyNumber);
 }
 
 function mockReport(companyNumber: string, companyName: string): CreditReport {

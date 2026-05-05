@@ -8,10 +8,10 @@
  * so swapping providers is a single env flag — no code change.
  */
 import { logger } from '../../utils/logger.js';
+import { AppError } from '../../utils/errors.js';
 import * as endole from '../endole/endole-client.js';
 import * as creditsafe from '../creditsafe/creditsafe-client.js';
 import type { CreditReport, CreditProvider } from './types.js';
-import { scoreToRiskRating } from './types.js';
 
 export type { CreditReport, CreditProvider } from './types.js';
 
@@ -19,6 +19,23 @@ export function getActiveProvider(): CreditProvider {
   if (creditsafe.isCreditsafeConfigured()) return 'creditsafe';
   if (endole.isEndoleConfigured()) return 'endole';
   return 'mock';
+}
+
+/**
+ * Thrown when a credit check is requested but no real provider is configured.
+ * Carries a stable `code` so the FE can show a specific message ("Credit
+ * check provider not configured — contact admin to set Endole or Creditsafe
+ * API keys") instead of a generic 500.
+ */
+export class CreditProviderNotConfiguredError extends AppError {
+  code = 'credit_provider_not_configured';
+  constructor() {
+    super(
+      503,
+      'Credit-check provider not configured. Add ENDOLE_APP_ID + ENDOLE_APP_KEY (or CREDITSAFE_API_KEY) to enable real credit checks.',
+    );
+    this.name = 'CreditProviderNotConfiguredError';
+  }
 }
 
 export async function runCreditCheck(companyNumber: string, companyName: string): Promise<CreditReport> {
@@ -35,22 +52,11 @@ export async function runCreditCheck(companyNumber: string, companyName: string)
     }
     case 'mock':
     default:
-      return mockReport(companyNumber, companyName);
+      // No real provider configured. Refuse cleanly so the user sees a
+      // clear "provider not set up" message instead of fabricated random
+      // scores being persisted to the DB. The previous `mockReport` path
+      // generated random 40-99 numbers indistinguishable from real data
+      // — that was a no-fake-data policy violation.
+      throw new CreditProviderNotConfiguredError();
   }
-}
-
-function mockReport(companyNumber: string, companyName: string): CreditReport {
-  const score = Math.floor(Math.random() * 60) + 40;
-  return {
-    companyId: `mock-${companyNumber}`,
-    companyName,
-    companyNumber,
-    creditScore: score,
-    riskRating: scoreToRiskRating(score),
-    ccjCount: score < 50 ? Math.floor(Math.random() * 3) + 1 : 0,
-    ccjTotal: score < 50 ? Math.floor(Math.random() * 15000) : 0,
-    registrationDate: '2018-03-15',
-    checkedAt: new Date().toISOString(),
-    source: 'mock',
-  };
 }

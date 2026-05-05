@@ -244,7 +244,13 @@ new Worker('sync', async (job) => {
     }
     case 'catchr-hourly-sync': {
       const result = await catchrSyncAll({ db });
-      recordCatchrSync(result.finishedAt);
+      recordCatchrSync(result.finishedAt, {
+        platformsSynced: result.platformsSynced,
+        accountsSynced: result.accountsSynced,
+        rowsWritten: result.rowsWritten,
+        skippedPlatforms: result.skippedPlatforms,
+        errorAccounts: result.errors.length,
+      });
       return result;
     }
     case 'bank-feed-hourly-sync': {
