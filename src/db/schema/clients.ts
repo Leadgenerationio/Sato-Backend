@@ -13,6 +13,10 @@ export const billingWorkflowEnum = pgEnum('billing_workflow', [
   'weekly_auto', 'monthly_validated', 'custom',
 ]);
 
+// `managed` = bundled monthly retainer (no per-lead pricing, no ad-spend visible).
+// `ppl` = pay-per-lead (default). Drives portal widget/tab visibility.
+export const clientTypeEnum = pgEnum('client_type', ['managed', 'ppl']);
+
 export const clients = pgTable('clients', {
   id: uuid('id').primaryKey().defaultRandom(),
   businessId: uuid('business_id').references(() => businesses.id).notNull(),
@@ -30,6 +34,7 @@ export const clients = pgTable('clients', {
   creditLastChecked: timestamp('credit_last_checked'),
   status: clientStatusEnum('status').default('prospect'),
   onboardingStatus: onboardingStatusEnum('onboarding_status').default('pending'),
+  clientType: clientTypeEnum('client_type').default('ppl').notNull(),
   billingWorkflow: billingWorkflowEnum('billing_workflow').default('weekly_auto'),
   leadPrice: decimal('lead_price', { precision: 10, scale: 2 }),
   leadPriceCurrency: varchar('lead_price_currency', { length: 3 }).default('GBP'),

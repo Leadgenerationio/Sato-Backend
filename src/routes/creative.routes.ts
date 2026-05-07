@@ -11,3 +11,5 @@ creativeRoutes.use(requireRole('owner', 'ops_manager'));
 creativeRoutes.get('/campaigns/:campaignId/creatives', creativeController.listForCampaign);
 creativeRoutes.post('/creatives', creativeController.create);
 creativeRoutes.delete('/creatives/:id', creativeController.remove);
+// Audit trail of every client approve/reject decision for legal-evidence use.
+creativeRoutes.get('/creatives/:id/approval-history', creativeController.approvalHistory);

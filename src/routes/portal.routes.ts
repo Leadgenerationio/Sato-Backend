@@ -14,3 +14,8 @@ portalRoutes.get('/leads', portalController.leads);
 portalRoutes.get('/invoices', portalController.invoices);
 portalRoutes.get('/compliance', portalController.compliance);
 portalRoutes.get('/agreement', portalController.agreement);
+
+// Asset approval (Roadmap C). Append-only: each call adds a new audit row,
+// never updates the prior one — the chronology IS the legal evidence.
+portalRoutes.post('/creatives/:creativeId/approve', portalController.approveCreative);
+portalRoutes.post('/creatives/:creativeId/reject', portalController.rejectCreative);

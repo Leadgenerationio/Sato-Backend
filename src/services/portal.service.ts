@@ -7,10 +7,12 @@ import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { creatives } from '../db/schema/creatives.js';
 import { landingPages } from '../db/schema/landing-pages.js';
 import { agreements } from '../db/schema/agreements.js';
+import { getApprovalStatesForCreatives } from './creative-approval.service.js';
 import type { AuthPayload } from '../types/index.js';
 
 export interface PortalDashboard {
   companyName: string;
+  clientType: 'managed' | 'ppl';
   activeCampaigns: number;
   totalLeadsThisMonth: number;
   totalLeadsAllTime: number;
@@ -34,6 +36,7 @@ export interface PortalCampaign {
 
 export interface PortalLeadDay {
   date: string;
+  campaignId: string;
   campaignName: string;
   leadCount: number;
   validLeads: number;
@@ -53,7 +56,19 @@ export interface PortalInvoice {
 
 export interface PortalCompliance {
   campaignName: string;
-  creatives: { id: string; name: string; type: string; uploadedAt: string }[];
+  creatives: {
+    id: string;
+    name: string;
+    type: string;
+    uploadedAt: string;
+    fileUrl: string;
+    approval: {
+      status: 'pending' | 'approved' | 'rejected';
+      decidedAt: string | null;
+      decidedByName: string | null;
+      feedback: string | null;
+    };
+  }[];
   landingPages: { id: string; url: string; screenshotUrl: string | null; lastChecked: string }[];
 }
 
@@ -159,6 +174,7 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
 
   return {
     companyName: client.companyName,
+    clientType: client.clientType ?? 'ppl',
     activeCampaigns: activeCampaigns ?? 0,
     totalLeadsThisMonth: totalThisMonth ?? 0,
     totalLeadsAllTime: totalAllTime ?? 0,
@@ -277,6 +293,7 @@ export async function getLeads(requester: AuthPayload, range?: GetLeadsRange): P
       leadCount: leadDeliveries.leadCount,
       validLeads: leadDeliveries.validLeadCount,
       invalidLeads: leadDeliveries.invalidLeadCount,
+      campaignId: campaigns.id,
       campaignName: campaigns.name,
     })
     .from(leadDeliveries)
@@ -292,6 +309,7 @@ export async function getLeads(requester: AuthPayload, range?: GetLeadsRange): P
 
   return rows.map((r) => ({
     date: r.date,
+    campaignId: r.campaignId,
     campaignName: r.campaignName,
     leadCount: r.leadCount,
     validLeads: r.validLeads ?? r.leadCount,
@@ -337,16 +355,29 @@ export async function getCompliance(requester: AuthPayload): Promise<PortalCompl
       .where(sql`${landingPages.campaignId} IN (${sql.join(campaignIds.map((id) => sql`${id}::uuid`), sql`, `)})`),
   ]);
 
+  // Fetch latest approval status for every visible creative in one query.
+  const approvalStates = await getApprovalStatesForCreatives(creativeRows.map((cr) => cr.id));
+
   return campaignRows.map((c) => ({
     campaignName: c.name,
     creatives: creativeRows
       .filter((cr) => cr.campaignId === c.id)
-      .map((cr) => ({
-        id: cr.id,
-        name: cr.name,
-        type: cr.type ?? 'unknown',
-        uploadedAt: (cr.createdAt ?? new Date()).toISOString(),
-      })),
+      .map((cr) => {
+        const state = approvalStates.get(cr.id);
+        return {
+          id: cr.id,
+          name: cr.name,
+          type: cr.type ?? 'unknown',
+          uploadedAt: (cr.createdAt ?? new Date()).toISOString(),
+          fileUrl: cr.fileUrl,
+          approval: {
+            status: state?.status ?? 'pending',
+            decidedAt: state?.decidedAt ?? null,
+            decidedByName: state?.decidedByName ?? null,
+            feedback: state?.feedback ?? null,
+          },
+        };
+      }),
     landingPages: landingRows
       .filter((lp) => lp.campaignId === c.id)
       .map((lp) => ({

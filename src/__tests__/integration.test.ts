@@ -88,6 +88,30 @@ describe('Integration API', () => {
     });
   });
 
+  // ─── Aggregate overview (visual dashboard) ───
+
+  describe('GET /api/v1/integrations/overview', () => {
+    it('returns all integration statuses + key metrics in one shot', async () => {
+      const res = await request(app).get('/api/v1/integrations/overview').set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      const d = res.body.data;
+      // Each card has its own configured flag.
+      expect(d.xero).toMatchObject({ configured: expect.any(Boolean) });
+      expect(d.leadbyte).toMatchObject({ configured: expect.any(Boolean), leadsThisMonth: expect.any(Number) });
+      expect(d.catchr).toMatchObject({ configured: expect.any(Boolean), adSpendLast30Days: expect.any(Number), currency: 'GBP' });
+      expect(d.signnow).toMatchObject({ configured: expect.any(Boolean), agreementCount: expect.any(Number) });
+      expect(d.r2).toMatchObject({ configured: expect.any(Boolean), fileCount: expect.any(Number) });
+      expect(d.resend).toMatchObject({ configured: expect.any(Boolean) });
+      expect(d.creditCheck).toMatchObject({ configured: expect.any(Boolean), checksRun: expect.any(Number) });
+      expect(['creditsafe', 'endole', 'mock']).toContain(d.creditCheck.provider);
+    });
+
+    it('client role gets 403', async () => {
+      const res = await request(app).get('/api/v1/integrations/overview').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(403);
+    });
+  });
+
   // ─── Credit check status ───
 
   describe('GET /api/v1/integrations/credit-check/status', () => {

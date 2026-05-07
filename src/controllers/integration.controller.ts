@@ -1,4 +1,11 @@
 import { Request, Response } from 'express';
+import { and, gte, sql } from 'drizzle-orm';
+import { db } from '../config/database.js';
+import { agreements } from '../db/schema/agreements.js';
+import { creditChecks } from '../db/schema/credit-checks.js';
+import { creatives } from '../db/schema/creatives.js';
+import { leadDeliveries } from '../db/schema/lead-deliveries.js';
+import { adSpend } from '../db/schema/ad-spend.js';
 import * as xeroClient from '../integrations/xero/xero-client.js';
 import * as vatService from '../services/vat.service.js';
 import { isLeadByteConfigured } from '../integrations/leadbyte/leadbyte-client.js';
@@ -204,4 +211,121 @@ export async function catchrStatus(_req: Request, res: Response) {
 function maskId(value: string): string {
   if (value.length <= 8) return '****';
   return `${value.slice(0, 4)}…${value.slice(-4)}`;
+}
+
+// ─── Aggregate overview ───
+//
+// Single round-trip for the visual /integrations dashboard. Each card needs
+// its connection status + a key live metric. We run all DB counts in parallel
+// and cache the whole payload for 60s — owner-only page, opened occasionally,
+// metrics don't need second-precision freshness.
+
+const OVERVIEW_TTL_SECONDS = 60;
+
+function startOfMonthIso(): string {
+  return new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+    .toISOString()
+    .split('T')[0];
+}
+
+function thirtyDaysAgoIso(): string {
+  return new Date(Date.now() - 30 * 86_400_000).toISOString().split('T')[0];
+}
+
+async function buildOverview() {
+  const monthStart = startOfMonthIso();
+  const thirtyDaysAgo = thirtyDaysAgoIso();
+
+  const [
+    agreementCountRow,
+    creditCheckCountRow,
+    creativeCountRow,
+    leadsThisMonthRow,
+    adSpend30dRow,
+  ] = await Promise.all([
+    db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(agreements),
+    db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(creditChecks),
+    db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(creatives),
+    db
+      .select({ count: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
+      .from(leadDeliveries)
+      .where(gte(leadDeliveries.deliveryDate, monthStart)),
+    db
+      .select({ total: sql<number>`coalesce(sum(${adSpend.spend}), 0)::float8` })
+      .from(adSpend)
+      .where(and(gte(adSpend.date, thirtyDaysAgo))),
+  ]);
+
+  const xeroConfigured = xeroClient.isXeroConfigured();
+  let xeroConnected = false;
+  let xeroTenantName: string | null = null;
+  if (xeroConfigured) {
+    try {
+      const status = await xeroClient.getStatus();
+      xeroConnected = status.connected ?? false;
+      xeroTenantName = status.tenantName ?? null;
+    } catch (err) {
+      logger.warn({ err }, 'Xero status fetch failed in overview');
+    }
+  }
+
+  const creditProvider = getActiveProvider();
+
+  return {
+    xero: {
+      configured: xeroConfigured,
+      connected: xeroConnected,
+      tenantName: xeroTenantName,
+    },
+    leadbyte: {
+      configured: isLeadByteConfigured(),
+      lastSyncAt: lastLeadByteSyncAt,
+      leadsThisMonth: leadsThisMonthRow[0]?.count ?? 0,
+    },
+    catchr: {
+      configured: isCatchrConfigured(),
+      lastSyncAt: getLastCatchrSyncAt(),
+      adSpendLast30Days: Math.round((adSpend30dRow[0]?.total ?? 0) * 100) / 100,
+      currency: 'GBP',
+    },
+    signnow: {
+      configured: isSignNowConfigured(),
+      sandbox: (process.env.SIGNNOW_BASE_URL || 'https://api-eval.signnow.com').includes('eval'),
+      agreementCount: agreementCountRow[0]?.count ?? 0,
+    },
+    r2: {
+      configured: isR2Configured(),
+      bucket: process.env.R2_BUCKET || null,
+      fileCount: creativeCountRow[0]?.count ?? 0,
+    },
+    resend: {
+      configured: isResendConfigured(),
+      fromEmail: process.env.RESEND_FROM_EMAIL || null,
+    },
+    creditCheck: {
+      configured: creditProvider !== 'mock',
+      provider: creditProvider,
+      checksRun: creditCheckCountRow[0]?.count ?? 0,
+    },
+  };
+}
+
+export async function overview(_req: Request, res: Response) {
+  try {
+    const data = await cached(
+      'integrations:overview',
+      OVERVIEW_TTL_SECONDS,
+      buildOverview,
+    );
+    res.json({ status: 'success', data });
+  } catch (err) {
+    logger.error({ err }, 'Integrations overview failed');
+    res.status(500).json({ status: 'error', message: 'Failed to load integrations overview' });
+  }
 }

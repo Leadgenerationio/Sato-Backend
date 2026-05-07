@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import * as creativeService from '../services/creative.service.js';
+import * as approvalService from '../services/creative-approval.service.js';
 import { uuidShape } from '../utils/zod-helpers.js';
 
 export async function listForCampaign(req: Request, res: Response) {
@@ -42,4 +43,14 @@ export async function remove(req: Request, res: Response) {
     return;
   }
   res.json({ status: 'success' });
+}
+
+/**
+ * Admin-side audit trail for a single creative — every approve/reject row
+ * with IP, UA, user, timestamp. This is the legal-evidence view used when
+ * a client later disputes whether they approved an ad.
+ */
+export async function approvalHistory(req: Request, res: Response) {
+  const events = await approvalService.getApprovalHistory(req.params.id as string);
+  res.json({ status: 'success', data: { events } });
 }

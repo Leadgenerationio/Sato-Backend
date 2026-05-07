@@ -8,6 +8,9 @@ export const integrationRoutes: RouterType = Router();
 integrationRoutes.use(authMiddleware);
 integrationRoutes.use(requireRole('owner'));
 
+// Aggregate overview — one round-trip for the visual /integrations dashboard.
+integrationRoutes.get('/overview', integrationController.overview);
+
 // Xero — Custom Connection (server-to-server). No OAuth consent flow needed.
 integrationRoutes.get('/xero/status', integrationController.xeroStatus);
 integrationRoutes.post('/xero/disconnect', integrationController.xeroDisconnect);
