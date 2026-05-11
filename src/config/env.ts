@@ -63,6 +63,9 @@ export const env = {
 
   // Resend
   RESEND_API_KEY: v('RESEND_API_KEY'),
+  // System sender for all outbound email (chases, signed-agreement notices,
+  // VAT alerts, etc.). Must point at a verified Resend domain in prod —
+  // .local is a placeholder so dev doesn't accidentally email anyone.
   RESEND_FROM_EMAIL: v('RESEND_FROM_EMAIL', 'notifications@stato.local'),
   RESEND_FROM_NAME: v('RESEND_FROM_NAME', 'Stato Notifications'),
 
