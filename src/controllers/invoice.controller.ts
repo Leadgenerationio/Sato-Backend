@@ -38,6 +38,22 @@ export async function getOverdue(req: Request, res: Response) {
   res.json({ status: 'success', data: { invoices } });
 }
 
+export async function getOutstanding(req: Request, res: Response) {
+  const raw = String(req.query.bucket ?? 'all').toLowerCase();
+  const bucket: invoiceService.OutstandingBucket =
+    raw === 'due' || raw === 'overdue' ? raw : 'all';
+  const result = await invoiceService.getOutstandingInvoices(req.user!, bucket);
+  res.json({
+    status: 'success',
+    data: {
+      bucket,
+      invoices: result.invoices,
+      count: result.count,
+      totalOutstanding: result.totalOutstanding,
+    },
+  });
+}
+
 export const createInvoiceSchema = z.object({
   body: z.object({
     clientId: uuidShape(),

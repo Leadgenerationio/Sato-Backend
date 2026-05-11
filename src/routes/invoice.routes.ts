@@ -21,6 +21,7 @@ invoiceRoutes.use(requireRole('owner', 'finance_admin'));
 
 invoiceRoutes.get('/', validate(listInvoicesQuerySchema), invoiceController.listInvoices);
 invoiceRoutes.get('/overdue', invoiceController.getOverdue);
+invoiceRoutes.get('/outstanding', invoiceController.getOutstanding);
 invoiceRoutes.get('/clients', invoiceController.getClients);
 invoiceRoutes.get('/:id', invoiceController.getInvoice);
 invoiceRoutes.post('/', validate(invoiceController.createInvoiceSchema), invoiceController.createInvoice);
