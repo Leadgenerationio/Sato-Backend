@@ -465,6 +465,13 @@ export interface PnlSummary {
   netProfit: string;
   margin: string; // 0..1 fraction (e.g. "0.42" = 42%)
   uncategorisedCount: number;
+  /**
+   * Catchr ad-spend rows in window whose Catchr-campaign-id hasn't been
+   * mapped to a Stato client yet. They're excluded from `adSpend` because
+   * we can't attribute them to a tenant — surfaced so the UI can prompt
+   * Sam to fill the mapping.
+   */
+  unattributedSpendRows: number;
 }
 
 /**
@@ -651,16 +658,40 @@ export async function getPnlSummary(
     .where(and(txWhere, isNull(bankTransactions.categoryId)));
   uncategorisedCount = uncatRow?.count ?? 0;
 
-  // Ad spend from Catchr (already a positive number; single-tenant in Phase 1)
-  const [adSpendRow] = await db
-    .select({ total: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text` })
+  // Ad spend from Catchr. The ad_spend table has no business_id column yet,
+  // so we tenant-scope via a join through clients (ad_spend.client_id →
+  // clients.business_id). Side effect: rows where Sam hasn't yet mapped a
+  // Catchr campaign to a Stato client (clientId IS NULL) are excluded — that
+  // was the source of the cross-tenant Poland-spend leak Sam reported (#74,
+  // #109). Until those rows get a client mapping, they don't attribute to
+  // anyone's P&L. unattributedSpendRows is surfaced so the UI can prompt
+  // for the mapping.
+  const adSpendRows = businessId
+    ? await db
+        .select({ total: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text` })
+        .from(adSpend)
+        .innerJoin(clients, eq(clients.id, adSpend.clientId))
+        .where(
+          and(
+            eq(clients.businessId, businessId),
+            gte(adSpend.date, fromIso),
+            lte(adSpend.date, toIso),
+          ),
+        )
+    : [];
+  const adSpendRow = adSpendRows[0];
+
+  const [unattributedRow] = await db
+    .select({ count: sql<number>`count(*)::int` })
     .from(adSpend)
     .where(
       and(
+        isNull(adSpend.clientId),
         gte(adSpend.date, fromIso),
         lte(adSpend.date, toIso),
       ),
     );
+  const unattributedSpendRows = unattributedRow?.count ?? 0;
 
   const revenue = parseFloat(revenueRow?.total ?? '0');
   const adSpendTotal = parseFloat(adSpendRow?.total ?? '0');
@@ -680,5 +711,6 @@ export async function getPnlSummary(
     netProfit: netProfit.toFixed(2),
     margin: margin.toFixed(4),
     uncategorisedCount,
+    unattributedSpendRows,
   };
 }

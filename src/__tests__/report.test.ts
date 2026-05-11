@@ -112,4 +112,22 @@ describe('Report API', () => {
       expect(totals.revenue).toBe(sumRevenue);
     });
   });
+
+  describe('GET /api/v1/reports/pnl-summary', () => {
+    it('owner gets pnl-summary with unattributedSpendRows exposed', async () => {
+      const res = await request(app).get('/api/v1/reports/pnl-summary?days=30').set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      // The fix for #74/#109 tenant-bleed: ad_spend rows without a clientId
+      // mapping are excluded from this tenant's spend total and surfaced as
+      // a separate count so Sam can prompt for the missing mapping.
+      expect(typeof res.body.data.unattributedSpendRows).toBe('number');
+      expect(res.body.data.unattributedSpendRows).toBeGreaterThanOrEqual(0);
+      expect(typeof res.body.data.adSpend).toBe('string');
+    });
+
+    it('client cannot access pnl-summary', async () => {
+      const res = await request(app).get('/api/v1/reports/pnl-summary').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(403);
+    });
+  });
 });
