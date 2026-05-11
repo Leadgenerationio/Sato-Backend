@@ -50,3 +50,61 @@ export async function listTrafficSources(req: Request, res: Response) {
   const sources = await trafficSourceService.listSourcesForCampaign(req.params.id as string, req.user!);
   res.json({ status: 'success', data: { sources } });
 }
+
+// Sam Loom #42-46: leadreports.io-style CRUD on per-campaign traffic
+// sources. Each row maps a supplier (Facebook/Google/...) → Catchr NCP →
+// ad-spend and surfaces revenue + net profit.
+
+export async function createTrafficSource(req: Request, res: Response) {
+  const source = await trafficSourceService.createSource(
+    req.params.id as string,
+    req.body,
+    req.user!,
+  );
+  if (!source) {
+    res.status(404).json({ status: 'error', message: 'Campaign not found' });
+    return;
+  }
+  res.status(201).json({ status: 'success', data: { source } });
+}
+
+export async function updateTrafficSource(req: Request, res: Response) {
+  const source = await trafficSourceService.updateSource(
+    req.params.id as string,
+    req.params.sourceId as string,
+    req.body,
+    req.user!,
+  );
+  if (!source) {
+    res.status(404).json({ status: 'error', message: 'Source not found' });
+    return;
+  }
+  res.json({ status: 'success', data: { source } });
+}
+
+export async function deleteTrafficSource(req: Request, res: Response) {
+  const ok = await trafficSourceService.deleteSource(
+    req.params.id as string,
+    req.params.sourceId as string,
+    req.user!,
+  );
+  if (!ok) {
+    res.status(404).json({ status: 'error', message: 'Source not found' });
+    return;
+  }
+  res.status(204).end();
+}
+
+/**
+ * PATCH /api/v1/campaigns/:id — Sam #41. Currently only cost_per_lead is
+ * editable; other campaign metadata syncs from LeadByte.
+ */
+export async function updateCampaign(req: Request, res: Response) {
+  const id = req.params.id as string;
+  const result = await campaignService.updateCampaign(id, req.body, req.user!);
+  if (!result) {
+    res.status(404).json({ status: 'error', message: 'Campaign not found' });
+    return;
+  }
+  res.json({ status: 'success', data: { campaign: result } });
+}

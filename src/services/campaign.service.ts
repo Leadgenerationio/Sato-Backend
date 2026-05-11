@@ -1,6 +1,8 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
+import { clientCampaigns } from '../db/schema/client-campaigns.js';
+import { clients } from '../db/schema/clients.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import { cached } from '../utils/cache.js';
 import { logger } from '../utils/logger.js';
@@ -48,6 +50,73 @@ function resolveCampaignType(id: string, map: Map<string, CampaignType>): Campai
   return map.get(id) ?? 'pay_per_lead';
 }
 
+/**
+ * Update editable Sato-side campaign fields. Sam's #41: cost_per_lead is
+ * surface-edited from the campaign detail page; this is the write path.
+ *
+ * Accepts either a Sato UUID or a LeadByte campaign id — vertical-only
+ * campaigns (no LeadByte counterpart) use the UUID, while legacy LeadByte-
+ * synced campaigns are addressed by their LeadByte id in the URL.
+ *
+ * Auto-creates a Sato row when the LeadByte campaign doesn't have one yet —
+ * keeps the user from having to "save" a campaign before they can set its
+ * cost, since the LeadByte sync is the primary source for everything else.
+ */
+export interface UpdateCampaignInput {
+  costPerLead?: number | null;
+}
+
+export async function updateCampaign(
+  id: string,
+  input: UpdateCampaignInput,
+  _requester: AuthPayload,
+): Promise<{ id: string; costPerLead: number | null } | null> {
+  // Try as Sato UUID first.
+  let [row] = await db
+    .select()
+    .from(campaignsTable)
+    .where(eq(campaignsTable.id, id));
+
+  // Not a UUID match — treat as LeadByte id.
+  if (!row) {
+    [row] = await db
+      .select()
+      .from(campaignsTable)
+      .where(eq(campaignsTable.leadbyteCampaignId, id));
+  }
+
+  // No Sato row yet — auto-create one keyed to the LeadByte id. We don't
+  // know the name/vertical until LeadByte sync runs, so leave them blank;
+  // the next sync fills them in.
+  if (!row) {
+    const inserted = await db
+      .insert(campaignsTable)
+      .values({
+        leadbyteCampaignId: id,
+        name: 'Pending sync',
+        costPerLead: input.costPerLead != null ? String(input.costPerLead) : null,
+      })
+      .returning();
+    row = inserted[0];
+  } else {
+    const patch: Partial<typeof row> = { updatedAt: new Date() };
+    if (input.costPerLead !== undefined) {
+      patch.costPerLead = input.costPerLead != null ? String(input.costPerLead) : null;
+    }
+    const updated = await db
+      .update(campaignsTable)
+      .set(patch)
+      .where(eq(campaignsTable.id, row.id))
+      .returning();
+    row = updated[0];
+  }
+
+  return {
+    id: row.id,
+    costPerLead: row.costPerLead ? Number(row.costPerLead) : null,
+  };
+}
+
 export async function setCampaignType(leadbyteCampaignId: string, type: CampaignType): Promise<void> {
   const [existing] = await db
     .select()
@@ -88,6 +157,23 @@ export interface CampaignWindowTotals {
 }
 
 export interface CampaignDetail extends CampaignSummary {
+  /** Sato DB UUID — distinct from `id` which is the LeadByte campaign id.
+   * Used by the frontend when PATCH-ing fields that live in Stato DB
+   * (cost_per_lead, etc.), since LeadByte is the source of truth for the
+   * read path but Stato owns the editable metadata. */
+  satoId: string | null;
+  /** Sam's #41 — manual supplier cost-per-lead target. Distinct from the
+   * computed `cpl` (which is totalCost/totalLeads from LeadByte aggregates). */
+  costPerLead: number | null;
+  /** Sam's Day 1 inversion — buyers linked to this campaign via
+   * `client_campaigns`. Empty array when none linked yet. */
+  linkedClients: Array<{
+    clientId: string;
+    clientName: string;
+    leadPrice: number | null;
+    currency: string;
+    status: string;
+  }>;
   leadDeliveries: {
     date: string;
     leadCount: number;
@@ -231,6 +317,48 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
   });
 }
 
+/**
+ * Load Sato-side campaign metadata (cost_per_lead + linked clients) for a
+ * LeadByte campaign id. Slice 2 introduces vertical-only campaigns that
+ * exist in Sato DB but not LeadByte — for those, the caller looks up by
+ * Sato UUID via a different path. This helper handles the common case.
+ */
+async function loadSatoCampaignMetadata(leadbyteId: string): Promise<{
+  satoId: string | null;
+  costPerLead: number | null;
+  linkedClients: CampaignDetail['linkedClients'];
+}> {
+  const [row] = await db
+    .select({ id: campaignsTable.id, costPerLead: campaignsTable.costPerLead })
+    .from(campaignsTable)
+    .where(eq(campaignsTable.leadbyteCampaignId, leadbyteId));
+  if (!row) return { satoId: null, costPerLead: null, linkedClients: [] };
+
+  const linksRows = await db
+    .select({
+      clientId: clientCampaigns.clientId,
+      clientName: clients.companyName,
+      leadPrice: clientCampaigns.leadPrice,
+      currency: clientCampaigns.currency,
+      status: clientCampaigns.status,
+    })
+    .from(clientCampaigns)
+    .innerJoin(clients, eq(clients.id, clientCampaigns.clientId))
+    .where(eq(clientCampaigns.campaignId, row.id));
+
+  return {
+    satoId: row.id,
+    costPerLead: row.costPerLead ? Number(row.costPerLead) : null,
+    linkedClients: linksRows.map((l) => ({
+      clientId: l.clientId,
+      clientName: l.clientName,
+      leadPrice: l.leadPrice ? Number(l.leadPrice) : null,
+      currency: l.currency ?? 'GBP',
+      status: l.status ?? 'active',
+    })),
+  };
+}
+
 export async function getCampaign(id: string, _requester: AuthPayload): Promise<CampaignDetail | null> {
   const [campaigns, typeMap] = await Promise.all([
     leadbyte.getCampaigns(),
@@ -250,12 +378,16 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
   //    and forced 2 of the 7 windows to cold-fetch every time.
   const PER_CAMPAIGN_TTL = 300; // 5 min
   const [
-    deliveries, suppliers,
+    deliveries, suppliers, satoMeta,
     todayReport, yesterdayReport, weekReport, lastWeekReport,
     monthReport, lastMonthReport, ytdReport,
   ] = await Promise.all([
     cached(`lb:deliveries:${id}:30d:v1`, PER_CAMPAIGN_TTL, () => leadbyte.getDeliveryReports(id, 30)),
     cached(`lb:suppliers:${id}:30d:v1`, PER_CAMPAIGN_TTL, () => leadbyte.getSuppliers(id)),
+    // Sato-side metadata is intentionally NOT cached — cost_per_lead is
+    // edited inline by users and stale reads break the UX immediately.
+    // Sub-millisecond DB lookup so caching would add nothing anyway.
+    loadSatoCampaignMetadata(id),
     cached('lb:report:today:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('today')),
     cached('lb:report:yesterday:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('yesterday')),
     cached('lb:report:this_week:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_week')),
@@ -308,6 +440,9 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
 
   return {
     id: campaign.id,
+    satoId: satoMeta.satoId,
+    costPerLead: satoMeta.costPerLead,
+    linkedClients: satoMeta.linkedClients,
     name: campaign.name,
     clientName: campaign.clientName,
     vertical: campaign.vertical,

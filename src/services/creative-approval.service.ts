@@ -1,8 +1,9 @@
-import { desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { creativeApprovals } from '../db/schema/creative-approvals.js';
 import { creatives } from '../db/schema/creatives.js';
 import { campaigns } from '../db/schema/campaigns.js';
+import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { users } from '../db/schema/users.js';
 
 export type CreativeApprovalStatus = 'pending' | 'approved' | 'rejected';
@@ -171,21 +172,47 @@ export async function getApprovalHistory(creativeId: string): Promise<CreativeAp
 /**
  * Verify the calling client owns the campaign that a creative belongs to.
  * Prevents one client from approving another client's creatives.
+ *
+ * Slice 2 Day 6 (Sam #44, #45 ambiguity): assets live on the CAMPAIGN
+ * (vertical-level), and many clients can be linked to a single campaign
+ * via `client_campaigns`. Access is granted when:
+ *   - the campaign has the legacy `client_id` matching (1:1 model), OR
+ *   - the requesting client is linked through `client_campaigns` (M:N
+ *     model — Solar Panels with 3 buyers underneath, any of them can
+ *     approve their own copy of the creative).
  */
 export async function assertCreativeBelongsToClient(
   creativeId: string,
   clientId: string,
 ): Promise<void> {
-  const [row] = await db
-    .select({ clientId: campaigns.clientId })
+  // First confirm the creative exists and grab the campaign linkage.
+  const [creativeRow] = await db
+    .select({
+      campaignId: creatives.campaignId,
+      legacyClientId: campaigns.clientId,
+    })
     .from(creatives)
     .innerJoin(campaigns, eq(campaigns.id, creatives.campaignId))
     .where(eq(creatives.id, creativeId));
 
-  if (!row) {
+  if (!creativeRow) {
     throw new CreativeApprovalError('NOT_FOUND', 'Creative not found');
   }
-  if (row.clientId !== clientId) {
+
+  // Fast path: legacy 1:1 link still matches → grant access.
+  if (creativeRow.legacyClientId === clientId) return;
+
+  // Slow path: check the many-to-many join. If the requesting client is
+  // a buyer on this vertical campaign, they have access to its creatives.
+  const [linkRow] = await db
+    .select({ id: clientCampaigns.id })
+    .from(clientCampaigns)
+    .where(and(
+      eq(clientCampaigns.campaignId, creativeRow.campaignId),
+      eq(clientCampaigns.clientId, clientId),
+    ));
+
+  if (!linkRow) {
     throw new CreativeApprovalError(
       'ACCESS_DENIED',
       "This creative belongs to another client's campaign",
