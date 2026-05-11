@@ -58,37 +58,53 @@ export async function xeroDisconnect(_req: Request, res: Response) {
 }
 
 /**
- * Net VAT liability since end of last completed UK quarter.
- * Falls back to { configured:false } when Xero env vars unset.
+ * Net VAT liability for BOTH the most-recently-completed quarter AND the
+ * currently-running quarter — Sam Loom #8-12. Previously this only returned
+ * one accruing period since the last quarter end; Sam wants to see the past
+ * quarter's headline number ("£38,484 for Feb-Apr") alongside the current
+ * one ("£1,261 so far this quarter").
+ *
+ * Returns { configured:false } when Xero env vars unset.
  */
 export async function xeroVatLiability(_req: Request, res: Response) {
   if (!xeroClient.isXeroConfigured()) {
     res.json({ status: 'success', data: { configured: false } });
     return;
   }
-  const fromDate = vatService.vatPeriodFromDate();
-  const toDate = vatService.todayIso();
-  try {
-    // Cache the live Xero TaxSummary fetch — VAT is quarterly so 15 min
-    // is fresh enough, and Xero's response time is one of our slowest
-    // upstream calls (~700ms). Cache key includes the date range so
-    // crossing a quarter boundary invalidates naturally.
-    const liability = await cached(
-      `xero:vat:${fromDate}:${toDate}`,
+  const current = vatService.currentQuarterRange();
+  const past = vatService.lastCompletedQuarterRange();
+
+  async function fetchLiability(range: { fromDate: string; toDate: string; label: string }) {
+    return cached(
+      `xero:vat:${range.fromDate}:${range.toDate}`,
       XERO_VAT_TTL_SECONDS,
-      () => xeroClient.getVatLiability(fromDate, toDate),
+      () => xeroClient.getVatLiability(range.fromDate, range.toDate),
     );
-    res.json({ status: 'success', data: { configured: true, ...liability, currency: 'GBP' } });
+  }
+
+  try {
+    const [currentLiability, pastLiability] = await Promise.all([
+      fetchLiability(current),
+      fetchLiability(past),
+    ]);
+    res.json({
+      status: 'success',
+      data: {
+        configured: true,
+        currency: 'GBP',
+        current: { ...currentLiability, label: current.label },
+        past: { ...pastLiability, label: past.label },
+      },
+    });
   } catch (err) {
     logger.warn({ err }, 'Xero VAT liability fetch failed');
     res.json({
       status: 'success',
       data: {
         configured: true,
-        fromDate,
-        toDate,
         currency: 'GBP',
-        error: err instanceof Error ? err.message : 'fetch failed',
+        current: { fromDate: current.fromDate, toDate: current.toDate, label: current.label, error: err instanceof Error ? err.message : 'fetch failed' },
+        past: { fromDate: past.fromDate, toDate: past.toDate, label: past.label, error: err instanceof Error ? err.message : 'fetch failed' },
       },
     });
   }
