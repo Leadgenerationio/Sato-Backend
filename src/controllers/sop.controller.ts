@@ -2,12 +2,13 @@ import { Request, Response } from 'express';
 import * as sopService from '../services/sop.service.js';
 
 export async function listSops(req: Request, res: Response) {
-  const { category, search, status } = req.query;
+  const { category, search, status, tag } = req.query;
 
   const filters: sopService.SopFilters = {};
   if (category) filters.category = category as string;
   if (search) filters.search = search as string;
   if (status) filters.status = status as string;
+  if (tag) filters.tag = tag as string;
 
   const sops = await sopService.listSops(req.user!, filters);
 
@@ -42,4 +43,29 @@ export async function updateSop(req: Request, res: Response) {
     return;
   }
   res.json({ status: 'success', data: { sop } });
+}
+
+export async function listTags(req: Request, res: Response) {
+  const tags = await sopService.listTags(req.user!);
+  res.json({ status: 'success', data: { tags } });
+}
+
+export async function generateFromLoom(req: Request, res: Response) {
+  const { loomUrl, transcript } = req.body as { loomUrl?: unknown; transcript?: unknown };
+  if (typeof loomUrl !== 'string' || !loomUrl.includes('loom.com')) {
+    res.status(400).json({ status: 'error', message: 'loomUrl must be a Loom share URL' });
+    return;
+  }
+  if (typeof transcript !== 'string' || transcript.trim().length < 30) {
+    res.status(400).json({ status: 'error', message: 'transcript is required (paste it from Loom\'s "Show transcript" panel)' });
+    return;
+  }
+  try {
+    const draft = await sopService.generateSopFromLoom({ loomUrl, transcript });
+    res.json({ status: 'success', data: { draft } });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'SOP generation failed';
+    const code = message.includes('not configured') ? 503 : 502;
+    res.status(code).json({ status: 'error', message });
+  }
 }
