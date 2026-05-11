@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import {
   lastQuarterEnd,
   currentQuarterRange,
@@ -7,11 +7,17 @@ import {
 
 // Clinical Marketing Solutions' VAT quarters end Apr 30 / Jul 31 / Oct 31 / Jan 31
 // (Sam's Loom confirmation: "Feb, March, April. So that is one quarter. And
-// then the next quarter is going to be from May, June, July."). These tests
-// pin the quarter-math against fixed reference dates so a future statutory
-// or business change can't regress silently.
+// then the next quarter is going to be from May, June, July."). CMS is on
+// HMRC stagger 2 — pin the env var here so this suite tests CMS specifically.
 
 describe('vat.service — CMS quarter math', () => {
+  const originalStagger = process.env.XERO_VAT_STAGGER;
+  beforeAll(() => { process.env.XERO_VAT_STAGGER = '2'; });
+  afterAll(() => {
+    if (originalStagger === undefined) delete process.env.XERO_VAT_STAGGER;
+    else process.env.XERO_VAT_STAGGER = originalStagger;
+  });
+
   it('lastQuarterEnd: 11 May 2026 → 30 Apr 2026', () => {
     expect(lastQuarterEnd(new Date('2026-05-11T12:00:00Z'))).toBe('2026-04-30');
   });
