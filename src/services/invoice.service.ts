@@ -1,8 +1,14 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { invoices } from '../db/schema/invoices.js';
 import { clients } from '../db/schema/clients.js';
-import { getValidToken } from '../integrations/xero/xero-client.js';
+import {
+  getValidToken,
+  getInvoicesForContact,
+  findContactByName,
+  isXeroConfigured,
+  type XeroInvoice,
+} from '../integrations/xero/xero-client.js';
 import { logger } from '../utils/logger.js';
 import type { AuthPayload } from '../types/index.js';
 
@@ -200,6 +206,149 @@ export async function getOverdueInvoices(requester: AuthPayload): Promise<Invoic
   // of overdue rows anyway, and we don't want this becoming a slow path.
   const result = await listInvoices(requester, { status: 'overdue', limit: 100 });
   return result.items;
+}
+
+// ─── Sync from Xero (Sam Loom #32) ─────────────────────────────────────────
+//
+// "Where's his invoice? How do I connect his invoices?" — invoices created
+// directly in Xero (before Stato existed for this client) weren't appearing
+// on the client's Invoices tab. This sync flow:
+//   1. Confirms the Stato client has a linked xero_contact_id; if missing,
+//      attempts to auto-link by exact company-name match in Xero.
+//   2. Pulls all ACCREC (customer) invoices for that contact.
+//   3. Inserts each into the local invoices table, skipping any whose
+//      xero_invoice_id already exists (idempotent — safe to re-sync).
+
+export interface SyncInvoicesResult {
+  synced: number;       // new invoices imported on this call
+  skipped: number;      // already-imported invoices (dedup by xeroInvoiceId)
+  totalRemote: number;  // total found in Xero for this contact
+  linkedContact: boolean; // did we just auto-link the xeroContactId?
+  message?: string;     // optional human-readable summary, e.g. "no Xero contact"
+}
+
+/**
+ * Map a Xero invoice status to our local enum. Xero values are uppercase;
+ * Stato stores lowercase. VOIDED maps to 'draft' so we keep the row visible
+ * but don't treat it as chaseable.
+ */
+function mapXeroStatus(s: string): string {
+  const up = s.toUpperCase();
+  switch (up) {
+    case 'AUTHORISED': return 'authorised';
+    case 'PAID': return 'paid';
+    case 'SUBMITTED': return 'sent';
+    case 'DRAFT': return 'draft';
+    case 'VOIDED':
+    case 'DELETED': return 'draft';
+    default: return 'draft';
+  }
+}
+
+function daysOverdue(dueDateIso: string | null, status: string): number {
+  if (!dueDateIso || status === 'paid') return 0;
+  const due = new Date(dueDateIso).getTime();
+  const now = Date.now();
+  const days = Math.floor((now - due) / (24 * 60 * 60 * 1000));
+  return days > 0 ? days : 0;
+}
+
+export async function syncInvoicesFromXero(
+  clientId: string,
+  requester: AuthPayload,
+): Promise<SyncInvoicesResult | null> {
+  const businessId = requester.businessId;
+  if (!businessId) return null;
+
+  const [client] = await db
+    .select()
+    .from(clients)
+    .where(and(eq(clients.id, clientId), eq(clients.businessId, businessId)));
+  if (!client) return null;
+
+  if (!isXeroConfigured()) {
+    return { synced: 0, skipped: 0, totalRemote: 0, linkedContact: false, message: 'Xero not configured' };
+  }
+
+  // Resolve Xero contact ID. If the client doesn't have one yet, try to find
+  // it by exact name — covers the common case where Sam already had this
+  // company in Xero before creating the Stato client.
+  let xeroContactId = client.xeroContactId;
+  let linkedContact = false;
+  if (!xeroContactId) {
+    try {
+      const found = await findContactByName(client.companyName);
+      if (found) {
+        xeroContactId = found.contactId;
+        await db
+          .update(clients)
+          .set({ xeroContactId, updatedAt: new Date() })
+          .where(eq(clients.id, clientId));
+        linkedContact = true;
+        logger.info({ clientId, xeroContactId, name: client.companyName }, 'Auto-linked Xero contact by name');
+      }
+    } catch (err) {
+      logger.warn({ err, clientId }, 'Xero contact name search failed — continuing without link');
+    }
+  }
+
+  if (!xeroContactId) {
+    return {
+      synced: 0,
+      skipped: 0,
+      totalRemote: 0,
+      linkedContact: false,
+      message: `Couldn't find "${client.companyName}" in Xero. Create the contact in Xero first, then retry.`,
+    };
+  }
+
+  let xeroInvoices: XeroInvoice[];
+  try {
+    xeroInvoices = await getInvoicesForContact(xeroContactId);
+  } catch (err) {
+    logger.error({ err, clientId, xeroContactId }, 'Xero invoice fetch failed');
+    throw new Error('Failed to fetch invoices from Xero');
+  }
+
+  if (xeroInvoices.length === 0) {
+    return { synced: 0, skipped: 0, totalRemote: 0, linkedContact, message: 'No invoices found in Xero for this contact' };
+  }
+
+  // Dedupe: find which Xero invoice IDs are already in our DB.
+  const remoteIds = xeroInvoices.map((i) => i.xeroInvoiceId);
+  const existingRows = await db
+    .select({ xeroInvoiceId: invoices.xeroInvoiceId })
+    .from(invoices)
+    .where(inArray(invoices.xeroInvoiceId, remoteIds));
+  const existing = new Set(existingRows.map((r) => r.xeroInvoiceId).filter((v): v is string => !!v));
+
+  const toInsert = xeroInvoices.filter((i) => !existing.has(i.xeroInvoiceId));
+  if (toInsert.length > 0) {
+    await db.insert(invoices).values(
+      toInsert.map((i) => ({
+        clientId,
+        xeroInvoiceId: i.xeroInvoiceId,
+        invoiceNumber: i.invoiceNumber,
+        status: mapXeroStatus(i.status),
+        currency: i.currency,
+        subtotal: i.subtotal,
+        vatAmount: i.totalTax,
+        total: i.total,
+        dueDate: i.dueDate ? new Date(i.dueDate) : null,
+        // Mark as paid right away if Xero says so — we don't have a
+        // separate "paid date" from Xero on the wire, use today as best-effort.
+        paidDate: mapXeroStatus(i.status) === 'paid' ? new Date() : null,
+        daysOverdue: daysOverdue(i.dueDate, mapXeroStatus(i.status)),
+      })),
+    );
+  }
+
+  return {
+    synced: toInsert.length,
+    skipped: xeroInvoices.length - toInsert.length,
+    totalRemote: xeroInvoices.length,
+    linkedContact,
+  };
 }
 
 export async function createInvoice(

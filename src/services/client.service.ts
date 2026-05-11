@@ -1,6 +1,7 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql, inArray } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { clients } from '../db/schema/clients.js';
+import { clientContacts } from '../db/schema/client-contacts.js';
 import { campaigns } from '../db/schema/campaigns.js';
 import { creditChecks } from '../db/schema/credit-checks.js';
 import { invoices } from '../db/schema/invoices.js';
@@ -23,13 +24,39 @@ export interface ClientSummary {
   createdAt: string;
 }
 
+export type ContactType = 'primary' | 'billing' | 'compliance' | 'other';
+
+export interface ClientContact {
+  id: string;
+  contactType: ContactType;
+  name: string;
+  email: string;
+  phone: string;
+  role: string;
+}
+
+export interface ClientContactInput {
+  contactType?: ContactType;
+  name: string;
+  email?: string;
+  phone?: string;
+  role?: string;
+}
+
 export interface ClientDetail extends ClientSummary {
   companyNumber: string;
   contactPhone: string;
   address: string;
+  addressLine: string;
+  addressTown: string;
+  addressCounty: string;
+  addressCountry: string;
+  addressPostcode: string;
   paymentTermsDays: number;
   vatRegistered: boolean;
   addVatToInvoices: boolean;
+  vatNumber: string;
+  vatRate: number;
   leadPrice: number;
   billingWorkflow: string;
   onboardingStatus: string;
@@ -40,6 +67,7 @@ export interface ClientDetail extends ClientSummary {
   endoleCompanyId?: string | null;
   xeroContactId?: string | null;
   notes: string;
+  contacts: ClientContact[];
 }
 
 export interface CreditCheckEntry {
@@ -53,6 +81,27 @@ export interface CreditCheckEntry {
 }
 
 type ClientRow = typeof clients.$inferSelect;
+type ClientContactRow = typeof clientContacts.$inferSelect;
+
+function toContact(row: ClientContactRow): ClientContact {
+  return {
+    id: row.id,
+    contactType: (row.contactType ?? 'other') as ContactType,
+    name: row.name,
+    email: row.email ?? '',
+    phone: row.phone ?? '',
+    role: row.role ?? '',
+  };
+}
+
+async function loadContactsForClient(clientId: string): Promise<ClientContact[]> {
+  const rows = await db
+    .select()
+    .from(clientContacts)
+    .where(eq(clientContacts.clientId, clientId))
+    .orderBy(clientContacts.contactType, clientContacts.createdAt);
+  return rows.map(toContact);
+}
 
 function toSummary(row: ClientRow, activeCampaigns: number, totalRevenue: number): ClientSummary {
   return {
@@ -69,15 +118,23 @@ function toSummary(row: ClientRow, activeCampaigns: number, totalRevenue: number
   };
 }
 
-function toDetail(row: ClientRow, activeCampaigns: number, totalRevenue: number): ClientDetail {
+function toDetail(row: ClientRow, activeCampaigns: number, totalRevenue: number, contacts: ClientContact[] = []): ClientDetail {
   return {
     ...toSummary(row, activeCampaigns, totalRevenue),
+    contacts,
     companyNumber: row.companyNumber ?? '',
     contactPhone: row.contactPhone ?? '',
     address: row.address ?? '',
+    addressLine: row.addressLine ?? '',
+    addressTown: row.addressTown ?? '',
+    addressCounty: row.addressCounty ?? '',
+    addressCountry: row.addressCountry ?? '',
+    addressPostcode: row.addressPostcode ?? '',
     paymentTermsDays: row.paymentTermsDays ?? 30,
     vatRegistered: row.vatRegistered ?? false,
     addVatToInvoices: row.addVatToInvoices ?? false,
+    vatNumber: row.vatNumber ?? '',
+    vatRate: Number(row.vatRate ?? 20),
     leadPrice: Number(row.leadPrice ?? 0),
     billingWorkflow: row.billingWorkflow ?? 'weekly_auto',
     onboardingStatus: row.onboardingStatus ?? 'pending',
@@ -107,7 +164,12 @@ async function loadActiveCampaignCounts(businessId: string): Promise<Map<string,
     .groupBy(campaigns.clientId);
 
   const map = new Map<string, number>();
-  for (const r of rows) map.set(r.clientId, r.count);
+  // campaigns.client_id is now nullable (Slice 2 schema). Only count rows
+  // that are tied to a specific client — vertical-only campaigns with null
+  // client_id are still surfaced via the join table, not here.
+  for (const r of rows) {
+    if (r.clientId) map.set(r.clientId, r.count);
+  }
   return map;
 }
 
@@ -225,18 +287,34 @@ export async function getClient(id: string, requester: AuthPayload): Promise<Cli
     .where(and(eq(clients.id, id), eq(clients.businessId, businessId)));
   if (!row) return null;
 
-  const [{ count }] = await db
-    .select({ count: sql<number>`count(*)::int` })
-    .from(campaigns)
-    .where(and(eq(campaigns.clientId, id), eq(campaigns.status, 'active')));
-
-  const revenue = await getRevenueForClient(id);
-  return toDetail(row, count ?? 0, revenue);
+  const [countResult, revenue, contacts] = await Promise.all([
+    db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(campaigns)
+      .where(and(eq(campaigns.clientId, id), eq(campaigns.status, 'active'))),
+    getRevenueForClient(id),
+    loadContactsForClient(id),
+  ]);
+  const count = countResult[0]?.count ?? 0;
+  return toDetail(row, count, revenue, contacts);
 }
 
-export async function createClient(data: Partial<ClientDetail>, requester: AuthPayload): Promise<ClientDetail> {
+export interface CreateClientInput extends Omit<Partial<ClientDetail>, 'contacts'> {
+  // Allow callers to pass contact rows without ids (creation shape).
+  contacts?: ClientContactInput[];
+}
+
+export async function createClient(data: CreateClientInput, requester: AuthPayload): Promise<ClientDetail> {
   const businessId = requester.businessId;
   if (!businessId) throw new Error('No business associated with requester');
+
+  // Mirror the primary contact into the legacy contact_name/email/phone
+  // columns when the caller only sent a `contacts` array. Keeps old code that
+  // reads client.contact_name working until those columns can be dropped.
+  const primaryFromArray = data.contacts?.find((c) => c.contactType === 'primary');
+  const effectiveContactName = data.contactName ?? primaryFromArray?.name;
+  const effectiveContactEmail = data.contactEmail ?? primaryFromArray?.email;
+  const effectiveContactPhone = data.contactPhone ?? primaryFromArray?.phone;
 
   const [row] = await db
     .insert(clients)
@@ -244,14 +322,21 @@ export async function createClient(data: Partial<ClientDetail>, requester: AuthP
       businessId,
       companyName: data.companyName || '',
       companyNumber: data.companyNumber,
-      contactName: data.contactName,
-      contactEmail: data.contactEmail,
-      contactPhone: data.contactPhone,
+      contactName: effectiveContactName,
+      contactEmail: effectiveContactEmail,
+      contactPhone: effectiveContactPhone,
       address: data.address,
+      addressLine: data.addressLine,
+      addressTown: data.addressTown,
+      addressCounty: data.addressCounty,
+      addressCountry: data.addressCountry,
+      addressPostcode: data.addressPostcode,
       currency: data.currency || 'GBP',
       paymentTermsDays: data.paymentTermsDays ?? 30,
       vatRegistered: data.vatRegistered ?? false,
       addVatToInvoices: data.addVatToInvoices ?? false,
+      vatNumber: data.vatNumber,
+      vatRate: data.vatRate != null ? String(data.vatRate) : '20.00',
       leadPrice: data.leadPrice != null ? String(data.leadPrice) : null,
       billingWorkflow: (data.billingWorkflow as ClientRow['billingWorkflow']) ?? 'weekly_auto',
       status: 'prospect',
@@ -262,6 +347,28 @@ export async function createClient(data: Partial<ClientDetail>, requester: AuthP
       xeroContactId: data.xeroContactId,
     })
     .returning();
+
+  // Persist contacts. If the caller provided an explicit `contacts` array,
+  // use that verbatim. Otherwise, generate a single primary contact from the
+  // legacy contactName/Email/Phone fields so the new contacts API is
+  // populated even when older frontends call this endpoint.
+  const contactsToInsert = data.contacts && data.contacts.length > 0
+    ? data.contacts
+    : data.contactName
+      ? [{ contactType: 'primary' as const, name: data.contactName, email: data.contactEmail ?? '', phone: data.contactPhone ?? '', role: '' }]
+      : [];
+  if (contactsToInsert.length > 0) {
+    await db.insert(clientContacts).values(
+      contactsToInsert.map((c) => ({
+        clientId: row.id,
+        contactType: (c.contactType ?? 'other') as ClientContactRow['contactType'],
+        name: c.name,
+        email: c.email || null,
+        phone: c.phone || null,
+        role: c.role || null,
+      })),
+    );
+  }
 
   // Fire-and-forget credit check. Sam wants this auto-triggered on buyer
   // creation so staff don't forget to run it manually. We don't await — the
@@ -294,10 +401,15 @@ export async function createClient(data: Partial<ClientDetail>, requester: AuthP
       });
   }
 
-  return toDetail(row, 0, 0);
+  const contacts = await loadContactsForClient(row.id);
+  return toDetail(row, 0, 0, contacts);
 }
 
-export async function updateClient(id: string, data: Partial<ClientDetail>, requester: AuthPayload): Promise<ClientDetail | null> {
+export interface UpdateClientInput extends Omit<Partial<ClientDetail>, 'contacts'> {
+  contacts?: ClientContactInput[];
+}
+
+export async function updateClient(id: string, data: UpdateClientInput, requester: AuthPayload): Promise<ClientDetail | null> {
   const businessId = requester.businessId;
   if (!businessId) return null;
 
@@ -308,10 +420,17 @@ export async function updateClient(id: string, data: Partial<ClientDetail>, requ
   if (data.contactEmail !== undefined) patch.contactEmail = data.contactEmail;
   if (data.contactPhone !== undefined) patch.contactPhone = data.contactPhone;
   if (data.address !== undefined) patch.address = data.address;
+  if (data.addressLine !== undefined) patch.addressLine = data.addressLine;
+  if (data.addressTown !== undefined) patch.addressTown = data.addressTown;
+  if (data.addressCounty !== undefined) patch.addressCounty = data.addressCounty;
+  if (data.addressCountry !== undefined) patch.addressCountry = data.addressCountry;
+  if (data.addressPostcode !== undefined) patch.addressPostcode = data.addressPostcode;
   if (data.currency !== undefined) patch.currency = data.currency;
   if (data.paymentTermsDays !== undefined) patch.paymentTermsDays = data.paymentTermsDays;
   if (data.vatRegistered !== undefined) patch.vatRegistered = data.vatRegistered;
   if (data.addVatToInvoices !== undefined) patch.addVatToInvoices = data.addVatToInvoices;
+  if (data.vatNumber !== undefined) patch.vatNumber = data.vatNumber;
+  if (data.vatRate !== undefined) patch.vatRate = data.vatRate != null ? String(data.vatRate) : null;
   if (data.leadPrice !== undefined) patch.leadPrice = String(data.leadPrice);
   if (data.billingWorkflow !== undefined) patch.billingWorkflow = data.billingWorkflow as ClientRow['billingWorkflow'];
   if (data.onboardingStatus !== undefined) patch.onboardingStatus = data.onboardingStatus as ClientRow['onboardingStatus'];
@@ -328,13 +447,35 @@ export async function updateClient(id: string, data: Partial<ClientDetail>, requ
     .returning();
   if (!row) return null;
 
+  // If caller sent a `contacts` array, replace the entire set. We delete then
+  // insert in a single round trip rather than diffing — simpler, and contact
+  // counts per client are small enough (typically <10) that the cost is fine.
+  if (data.contacts !== undefined) {
+    await db.delete(clientContacts).where(eq(clientContacts.clientId, id));
+    if (data.contacts.length > 0) {
+      await db.insert(clientContacts).values(
+        data.contacts.map((c) => ({
+          clientId: id,
+          contactType: (c.contactType ?? 'other') as ClientContactRow['contactType'],
+          name: c.name,
+          email: c.email || null,
+          phone: c.phone || null,
+          role: c.role || null,
+        })),
+      );
+    }
+  }
+
   const [{ count }] = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(campaigns)
     .where(and(eq(campaigns.clientId, id), eq(campaigns.status, 'active')));
 
-  const revenue = await getRevenueForClient(id);
-  return toDetail(row, count ?? 0, revenue);
+  const [revenue, contacts] = await Promise.all([
+    getRevenueForClient(id),
+    loadContactsForClient(id),
+  ]);
+  return toDetail(row, count ?? 0, revenue, contacts);
 }
 
 export async function getCreditHistory(clientId: string, _requester: AuthPayload): Promise<CreditCheckEntry[]> {

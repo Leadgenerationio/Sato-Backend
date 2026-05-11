@@ -269,6 +269,13 @@ interface XeroAccountsResponse {
     CurrencyCode?: string;
     Type: string;
     Status: string;
+    // Xero exposes the bank account's reported balance directly on /Accounts
+    // for BANK-type rows. This is the figure Sam expects to see (matches his
+    // Xero dashboard "Bank Balance" widget) — it reflects bank-feed / last
+    // reconciled state rather than the ledger view that BankSummary returns.
+    // See `getBankBalances` for the precedence: Account.Balance first, then
+    // BankSummary closing as a fallback for accounts without bank feeds.
+    Balance?: number;
   }>;
 }
 
@@ -289,9 +296,21 @@ interface XeroBankSummaryResponse {
 /**
  * Fetch live bank-account balances from Xero.
  *
+ * Sam Loom #1: previously this returned the Xero ledger closing balance
+ * (BankSummary's "Closing Balance" column), which includes approved-but-
+ * unreconciled transactions and so didn't match the £52,446 Sam sees on
+ * his Xero dashboard for Clinical Marketing Solutions (vs the £113,515
+ * we were showing). The fix is to prefer `Account.Balance` from the
+ * `/Accounts` endpoint — Xero populates this with the bank's reported
+ * balance for BANK-type accounts, matching Sam's expected number.
+ *
+ * Precedence per account:
+ *   1. `Account.Balance` (statement balance — what Sam wants)
+ *   2. BankSummary closing as a fallback for old accounts without it
+ *
  * Combines:
- *   1. /Accounts?where=Type=="BANK"  → list of bank accounts with currency + name
- *   2. /Reports/BankSummary           → each account's closing balance (today)
+ *   /Accounts?where=Type=="BANK"      → list of bank accounts + Balance
+ *   /Reports/BankSummary               → fallback closing balance
  *
  * Required Xero scopes: accounting.settings.read + accounting.reports.read.
  * If Sam's Custom Connection wasn't configured with those scopes, this throws
@@ -347,13 +366,22 @@ export async function getBankBalances(): Promise<XeroBankAccount[]> {
     logger.warn({ status: summaryRes.status, body }, 'Xero /Reports/BankSummary failed — returning zero balances');
   }
 
-  return bankAccounts.map((a) => ({
-    accountId: a.AccountID,
-    name: a.Name,
-    code: a.Code ?? null,
-    currency: a.CurrencyCode ?? 'GBP',
-    balance: balanceByAccountId.get(a.AccountID) ?? '0',
-  }));
+  return bankAccounts.map((a) => {
+    // Prefer Account.Balance (statement-style figure that matches the Xero
+    // dashboard widget). Fall back to BankSummary closing if Xero didn't
+    // populate Balance — happens occasionally for archived or zero-activity
+    // accounts.
+    const statementBalance = typeof a.Balance === 'number'
+      ? a.Balance.toFixed(2)
+      : balanceByAccountId.get(a.AccountID) ?? '0';
+    return {
+      accountId: a.AccountID,
+      name: a.Name,
+      code: a.Code ?? null,
+      currency: a.CurrencyCode ?? 'GBP',
+      balance: statementBalance,
+    };
+  });
 }
 
 export interface XeroVatLiability {
@@ -550,4 +578,134 @@ export async function getVatLiability(fromDate: string, toDate: string): Promise
     collectedOnSales: collectedOnSales.toFixed(2),
     paidOnPurchases: paidOnPurchases.toFixed(2),
   };
+}
+
+// ─── Invoice + Contact lookups (Sam's #32 "how do I connect his invoices?") ──
+
+export interface XeroInvoice {
+  xeroInvoiceId: string;
+  invoiceNumber: string | null;
+  status: string;           // DRAFT / SUBMITTED / AUTHORISED / PAID / VOIDED
+  type: 'ACCREC' | 'ACCPAY' | string; // ACCREC = invoice we sent to a customer
+  contactId: string;
+  contactName: string;
+  date: string | null;      // ISO YYYY-MM-DD
+  dueDate: string | null;   // ISO YYYY-MM-DD
+  currency: string;
+  subtotal: string;         // decimal-on-wire
+  totalTax: string;
+  total: string;
+  amountPaid: string;
+  amountDue: string;
+}
+
+interface XeroInvoicesResponse {
+  Invoices: Array<{
+    InvoiceID: string;
+    InvoiceNumber?: string;
+    Status?: string;
+    Type?: string;
+    Contact?: { ContactID: string; Name?: string };
+    Date?: string;          // /Date(...)/
+    DueDate?: string;
+    CurrencyCode?: string;
+    SubTotal?: number;
+    TotalTax?: number;
+    Total?: number;
+    AmountPaid?: number;
+    AmountDue?: number;
+  }>;
+}
+
+/**
+ * Fetch all invoices in Xero for a given Contact (i.e. a single client).
+ *
+ * `Type==ACCREC` filters to sales invoices — invoices we sent the customer.
+ * Default page size is 100; we follow the pagination header for completeness
+ * even though most Sato clients won't have >100 invoices.
+ *
+ * Required scope: accounting.transactions (already in SCOPES).
+ */
+export async function getInvoicesForContact(contactId: string): Promise<XeroInvoice[]> {
+  const { accessToken, tenantId } = await getValidToken();
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    'xero-tenant-id': tenantId,
+    Accept: 'application/json',
+  };
+
+  const where = encodeURIComponent(`Contact.ContactID==Guid("${contactId}") && Type=="ACCREC"`);
+  const out: XeroInvoice[] = [];
+
+  // Xero paginates Invoices via ?page=N and returns up to 100 per page.
+  for (let page = 1; page <= 10; page++) {
+    const url = `${API_HOST}/api.xro/2.0/Invoices?where=${where}&order=Date%20DESC&page=${page}`;
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) {
+      const body = await res.text();
+      logger.error({ status: res.status, body, contactId, page }, 'Xero /Invoices failed');
+      throw new Error(`Xero /Invoices failed: ${res.status}`);
+    }
+    const data = (await res.json()) as XeroInvoicesResponse;
+    const invs = data.Invoices ?? [];
+    if (invs.length === 0) break;
+
+    for (const i of invs) {
+      out.push({
+        xeroInvoiceId: i.InvoiceID,
+        invoiceNumber: i.InvoiceNumber ?? null,
+        status: i.Status ?? 'DRAFT',
+        type: (i.Type as 'ACCREC') ?? 'ACCREC',
+        contactId: i.Contact?.ContactID ?? contactId,
+        contactName: i.Contact?.Name ?? '',
+        date: i.Date ? parseXeroDate(i.Date) : null,
+        dueDate: i.DueDate ? parseXeroDate(i.DueDate) : null,
+        currency: i.CurrencyCode ?? 'GBP',
+        subtotal: (i.SubTotal ?? 0).toFixed(2),
+        totalTax: (i.TotalTax ?? 0).toFixed(2),
+        total: (i.Total ?? 0).toFixed(2),
+        amountPaid: (i.AmountPaid ?? 0).toFixed(2),
+        amountDue: (i.AmountDue ?? 0).toFixed(2),
+      });
+    }
+    if (invs.length < 100) break;
+  }
+  return out;
+}
+
+/**
+ * Find a Xero Contact by exact name. Used when a Stato client has no
+ * `xeroContactId` yet but Sam's seen the same company already exists in
+ * Xero — we try to auto-link before giving up.
+ *
+ * Returns null if no exact-name match is found.
+ *
+ * Required scope: accounting.contacts (already in SCOPES).
+ */
+export async function findContactByName(name: string): Promise<XeroContact | null> {
+  const { accessToken, tenantId } = await getValidToken();
+  // Xero filter expressions need the value double-quoted; escape any double
+  // quotes inside the name to keep the filter parseable.
+  const safeName = name.replace(/"/g, '\\"');
+  const where = encodeURIComponent(`Name=="${safeName}"`);
+  const res = await fetch(
+    `${API_HOST}/api.xro/2.0/Contacts?where=${where}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'xero-tenant-id': tenantId,
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(15_000),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.text();
+    logger.error({ status: res.status, body, name }, 'Xero /Contacts search failed');
+    throw new Error(`Xero contact search failed: ${res.status}`);
+  }
+  const data = (await res.json()) as XeroContactsResponse;
+  const first = data.Contacts?.[0];
+  if (!first) return null;
+  return { contactId: first.ContactID, name: first.Name };
 }
