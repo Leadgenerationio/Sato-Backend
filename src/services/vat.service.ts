@@ -1,113 +1,140 @@
 /**
- * VAT helpers — Sam Loom (#11) confirmed Clinical Marketing Solutions' VAT
- * quarters end on the last day of Apr / Jul / Oct / Jan (not the HMRC default
- * Mar/Jun/Sep/Dec). UK VAT quarters are determined at company-VAT-registration
- * time and stay fixed per business. For Phase 1 (leadgeneration.io only) we
- * hardcode CMS's quarters; if Stato grows to multiple tenants this becomes a
- * per-business setting.
+ * VAT helpers — UK HMRC quarter math with stagger support.
  *
- * CMS quarters:
- *   Q ending 30 Apr → covers Feb–Apr   (Sam's "Feb, March, April")
- *   Q ending 31 Jul → covers May–Jul   (Sam's "May, June, July")
- *   Q ending 31 Oct → covers Aug–Oct
- *   Q ending 31 Jan → covers Nov–Jan   (crosses calendar year)
+ * HMRC assigns every VAT-registered business one of three quarter staggers:
+ *   Stagger 1 — quarters end MAR / JUN / SEP / DEC
+ *   Stagger 2 — quarters end APR / JUL / OCT / JAN   (Sam's CMS quarters)
+ *   Stagger 3 — quarters end MAY / AUG / NOV / FEB
+ *
+ * Default is Stagger 1 (calendar quarters). Override per-org with the
+ * XERO_VAT_STAGGER env var (1 / 2 / 3). Stagger isn't reliably exposed on
+ * Xero's /Organisation endpoint, so config-driven is the simplest reliable
+ * source of truth.
+ *
+ * Per Sam Loom #11 confirming CMS' quarters (Feb–Apr, May–Jul, Aug–Oct,
+ * Nov–Jan), CMS is on Stagger 2 — set `XERO_VAT_STAGGER=2` in Railway.
  */
 
-const QUARTER_ENDS_MMDD: Array<[number, number]> = [
-  [4, 30],
-  [7, 31],
-  [10, 31],
-  [1, 31],
-];
+export type VatStagger = 1 | 2 | 3;
 
 /**
- * Returns the ISO date (YYYY-MM-DD) for the end of the last completed UK VAT
- * quarter, relative to `today`.
- *
- * Examples (UTC):
- *   today = 2026-04-28 → 2026-03-31
- *   today = 2026-05-15 → 2026-03-31
- *   today = 2026-07-01 → 2026-06-30
- *   today = 2026-01-05 → 2025-12-31
+ * Month numbers (1-12) on which each stagger's quarters END. Used to compute
+ * the most-recently-closed quarter and the current open quarter.
  */
-export function lastQuarterEnd(today: Date = new Date()): string {
-  const year = today.getUTCFullYear();
-  const candidates: Date[] = [];
-  for (let y = year - 1; y <= year; y++) {
-    for (const [m, d] of QUARTER_ENDS_MMDD) {
-      candidates.push(new Date(Date.UTC(y, m - 1, d)));
-    }
-  }
-  // Most recent candidate strictly before today
-  const past = candidates.filter((c) => c.getTime() < today.getTime()).sort((a, b) => b.getTime() - a.getTime());
-  const pick = past[0];
-  if (!pick) {
-    // Defensive — shouldn't happen unless today is before 2024-12-31 in our
-    // candidate window. Fall back to one year ago.
-    const fallback = new Date(today);
-    fallback.setUTCFullYear(today.getUTCFullYear() - 1);
-    return fallback.toISOString().slice(0, 10);
-  }
-  return pick.toISOString().slice(0, 10);
+const STAGGER_END_MONTHS: Record<VatStagger, number[]> = {
+  1: [3, 6, 9, 12],
+  2: [4, 7, 10, 1],
+  3: [5, 8, 11, 2],
+};
+
+export function configuredStagger(env: NodeJS.ProcessEnv = process.env): VatStagger {
+  const raw = env.XERO_VAT_STAGGER;
+  if (raw === '2') return 2;
+  if (raw === '3') return 3;
+  return 1;
+}
+
+export interface QuarterRange {
+  /** Inclusive YYYY-MM-DD */
+  fromDate: string;
+  /** Inclusive YYYY-MM-DD */
+  toDate: string;
+}
+
+function lastDayOfMonth(year: number, monthIdx0: number): number {
+  // Day 0 of next month = last day of this month
+  return new Date(Date.UTC(year, monthIdx0 + 1, 0)).getUTCDate();
+}
+
+function iso(date: Date): string {
+  return date.toISOString().slice(0, 10);
 }
 
 /**
- * The "since" date the VAT widget tracks from = day AFTER last quarter end.
- * (Xero's TaxSummary fromDate is inclusive.)
+ * Enumerate quarter END dates (year, month-1-12, day) for the given stagger
+ * across [today.year-1, today.year+1] so any nearby today resolves cleanly.
  */
-export function vatPeriodFromDate(today: Date = new Date()): string {
-  const end = new Date(`${lastQuarterEnd(today)}T00:00:00Z`);
-  end.setUTCDate(end.getUTCDate() + 1);
-  return end.toISOString().slice(0, 10);
+function enumerateQuarterEnds(today: Date, stagger: VatStagger): Date[] {
+  const endMonths = STAGGER_END_MONTHS[stagger];
+  const year = today.getUTCFullYear();
+  const ends: Date[] = [];
+  for (let y = year - 1; y <= year + 1; y++) {
+    for (const m of endMonths) {
+      const day = lastDayOfMonth(y, m - 1);
+      ends.push(new Date(Date.UTC(y, m - 1, day)));
+    }
+  }
+  return ends.sort((a, b) => a.getTime() - b.getTime());
+}
+
+/**
+ * The most-recently-closed VAT quarter on the given stagger. "Closed" means
+ * the quarter whose end date is strictly before today.
+ */
+export function previousQuarter(
+  today: Date = new Date(),
+  stagger: VatStagger = configuredStagger(),
+): QuarterRange {
+  const ends = enumerateQuarterEnds(today, stagger);
+  const pastEnds = ends.filter((d) => d.getTime() < today.getTime());
+  const end = pastEnds[pastEnds.length - 1] ?? ends[0];
+  const endIdx = ends.indexOf(end);
+  const prevEnd = ends[endIdx - 1];
+  // Quarter start = day after the previous end. If there's no prev end in
+  // window (edge case), use the canonical 3-months-back-plus-1-day.
+  const start = prevEnd
+    ? new Date(prevEnd.getTime() + 86_400_000)
+    : new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() - 2, 1));
+  return { fromDate: iso(start), toDate: iso(end) };
+}
+
+/**
+ * The current open VAT quarter — from the day after the previous quarter
+ * ended through `today` (today is the live accrual cut-off).
+ */
+export function currentQuarter(
+  today: Date = new Date(),
+  stagger: VatStagger = configuredStagger(),
+): QuarterRange {
+  const prev = previousQuarter(today, stagger);
+  const startMs = new Date(`${prev.toDate}T00:00:00Z`).getTime() + 86_400_000;
+  return { fromDate: iso(new Date(startMs)), toDate: iso(today) };
 }
 
 export function todayIso(today: Date = new Date()): string {
-  return today.toISOString().slice(0, 10);
+  return iso(today);
 }
 
-export interface VatQuarterRange {
-  fromDate: string;       // inclusive ISO YYYY-MM-DD
-  toDate: string;         // inclusive ISO YYYY-MM-DD
-  label: string;          // e.g. "Feb–Apr 2026"
+// ─── Labelled wrappers (kept for callers that want a human-readable label) ──
+
+export interface VatQuarterRange extends QuarterRange {
+  label: string; // e.g. "Feb–Apr 2026"
 }
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-function label(fromIso: string, toIso: string): string {
+function labelRange(fromIso: string, toIso: string): string {
   const f = new Date(`${fromIso}T00:00:00Z`);
   const t = new Date(`${toIso}T00:00:00Z`);
   return `${MONTH_NAMES[f.getUTCMonth()]}–${MONTH_NAMES[t.getUTCMonth()]} ${t.getUTCFullYear()}`;
 }
 
-/**
- * The currently-running VAT quarter. fromDate is the first day of the
- * quarter; toDate is today (cap of the quarter end).
- */
+/** Today's open quarter, with display label. */
 export function currentQuarterRange(today: Date = new Date()): VatQuarterRange {
-  const lastEnd = new Date(`${lastQuarterEnd(today)}T00:00:00Z`);
-  const fromDate = new Date(lastEnd);
-  fromDate.setUTCDate(fromDate.getUTCDate() + 1);
-  const fromIso = fromDate.toISOString().slice(0, 10);
-  const toIso = todayIso(today);
-  return { fromDate: fromIso, toDate: toIso, label: label(fromIso, toIso) };
+  const r = currentQuarter(today);
+  return { ...r, label: labelRange(r.fromDate, r.toDate) };
+}
+
+/** Most recently completed quarter, with display label. */
+export function lastCompletedQuarterRange(today: Date = new Date()): VatQuarterRange {
+  const r = previousQuarter(today);
+  return { ...r, label: labelRange(r.fromDate, r.toDate) };
 }
 
 /**
- * The most recently completed VAT quarter (Sam's "past quarter due" value).
- * Returns the full quarter date range — Feb 1 → Apr 30 for the CMS Feb-Apr
- * quarter, for example.
+ * Back-compat shim — returns just the end date of the last-completed quarter.
+ * Kept so older callers / tests that don't need the full range still compile.
  */
-export function lastCompletedQuarterRange(today: Date = new Date()): VatQuarterRange {
-  const end = new Date(`${lastQuarterEnd(today)}T00:00:00Z`);
-  const toIso = end.toISOString().slice(0, 10);
-  // Start of last quarter = end-of-quarter-before + 1 day. We can derive it
-  // by computing lastQuarterEnd as of "the day before last quarter ended"
-  // and adding 1, but it's clearer to walk the table directly.
-  // For each quarter end, the quarter started ~3 months earlier on the 1st.
-  const startMonth = (end.getUTCMonth() + 12 - 2) % 12;
-  const startYearOffset = end.getUTCMonth() < 2 ? -1 : 0;
-  const startYear = end.getUTCFullYear() + startYearOffset;
-  const fromDate = new Date(Date.UTC(startYear, startMonth, 1));
-  const fromIso = fromDate.toISOString().slice(0, 10);
-  return { fromDate: fromIso, toDate: toIso, label: label(fromIso, toIso) };
+export function lastQuarterEnd(today: Date = new Date()): string {
+  return previousQuarter(today).toDate;
 }
