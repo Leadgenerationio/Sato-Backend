@@ -17,7 +17,7 @@ import { logger } from '../../utils/logger.js';
 const IDENTITY_HOST = 'https://identity.xero.com';
 const API_HOST = 'https://api.xero.com';
 
-const SCOPES = 'accounting.transactions accounting.contacts accounting.reports.read accounting.settings.read';
+const SCOPES = 'accounting.transactions accounting.contacts accounting.reports.read accounting.settings.read finance.statements.read';
 
 interface XeroCache {
   accessToken: string;
@@ -258,7 +258,9 @@ export interface XeroBankAccount {
   name: string;
   code: string | null;
   currency: string;
-  balance: string; // decimal-on-the-wire
+  balance: string;                  // statement balance (what the bank says), signed decimal
+  balanceDate: string | null;       // 'as of' date Xero reports for the statement balance
+  unreconciledLines: number | null; // pending statement lines not yet reconciled in Xero
 }
 
 interface XeroAccountsResponse {
@@ -279,22 +281,21 @@ interface XeroAccountsResponse {
   }>;
 }
 
-interface XeroBankSummaryRow {
-  RowType: 'Header' | 'Section' | 'Row' | 'SummaryRow';
-  Title?: string;
-  Cells?: Array<{ Value: string; Attributes?: Array<{ Value: string; Id: string }> }>;
-  Rows?: XeroBankSummaryRow[];
-}
-
-interface XeroBankSummaryResponse {
-  Reports: Array<{
-    ReportName: string;
-    Rows: XeroBankSummaryRow[];
-  }>;
+interface XeroCashValidationItem {
+  accountId: string;
+  statementBalance?: { value: number; type: 'DEBIT' | 'CREDIT' };
+  statementBalanceDate?: string;
+  bankStatement?: {
+    statementLines?: {
+      unreconciledLines?: number;
+    };
+  };
 }
 
 /**
- * Fetch live bank-account balances from Xero.
+ * Fetch live bank-account *statement* balances from Xero — the figure the
+ * bank itself reports (and the one users compare against the bank's app),
+ * not Xero's GL closing balance which is inflated by unreconciled receipts.
  *
  * Sam Loom #1: previously this returned the Xero ledger closing balance
  * (BankSummary's "Closing Balance" column), which includes approved-but-
@@ -308,13 +309,17 @@ interface XeroBankSummaryResponse {
  *   1. `Account.Balance` (statement balance — what Sam wants)
  *   2. BankSummary closing as a fallback for old accounts without it
  *
- * Combines:
- *   /Accounts?where=Type=="BANK"      → list of bank accounts + Balance
- *   /Reports/BankSummary               → fallback closing balance
+ * Combines (in precedence order):
+ *   1. Finance API /CashValidation     → statementBalance + asOf date + unreconciledLines
+ *   2. Accounting API /Accounts.Balance → fallback for orgs without Finance API
+ *      (matches the figure shown on Xero's own "Bank Balance" dashboard widget)
+ *   3. '0' when neither is available
  *
- * Required Xero scopes: accounting.settings.read + accounting.reports.read.
- * If Sam's Custom Connection wasn't configured with those scopes, this throws
- * a 403 — caller should fall back gracefully.
+ * Required scopes: accounting.settings.read + finance.statements.read.
+ * Finance API enablement is the operational unlock for the most accurate
+ * figure (true statement balance + reconciliation gap). Without it we still
+ * get a usable number via Account.Balance — better than the legacy GL-closing
+ * figure that was driving Sam's £113,515 vs £52,446 discrepancy.
  */
 export async function getBankBalances(): Promise<XeroBankAccount[]> {
   const { accessToken, tenantId } = await getValidToken();
@@ -336,50 +341,54 @@ export async function getBankBalances(): Promise<XeroBankAccount[]> {
   const accountsData = (await accountsRes.json()) as XeroAccountsResponse;
   const bankAccounts = accountsData.Accounts ?? [];
 
-  // Bank summary as of today
-  const today = new Date().toISOString().slice(0, 10);
-  const summaryRes = await fetch(
-    `${API_HOST}/api.xro/2.0/Reports/BankSummary?date=${today}`,
+  const today = new Date();
+  const balanceDate = today.toISOString().slice(0, 10);
+  const beginDate = new Date(today.getTime() - 90 * 86_400_000).toISOString().slice(0, 10);
+
+  const statementByAccountId = new Map<
+    string,
+    { value: string; date: string | null; unreconciledLines: number | null }
+  >();
+
+  const cvRes = await fetch(
+    `${API_HOST}/finance.xro/1.0/CashValidation?balanceDate=${balanceDate}&beginDate=${beginDate}`,
     { headers, signal: AbortSignal.timeout(15_000) },
   );
-  const balanceByAccountId = new Map<string, string>();
-  if (summaryRes.ok) {
-    const summaryData = (await summaryRes.json()) as XeroBankSummaryResponse;
-    const rows = summaryData.Reports?.[0]?.Rows ?? [];
-    // BankSummary structure: a Section row whose nested Rows contain one Row per bank account.
-    // Each Row has Cells: [name, opening, money in, money out, closing].
-    // The first cell carries the AccountID via Attributes.
-    for (const section of rows) {
-      if (section.RowType === 'Section' && section.Rows) {
-        for (const row of section.Rows) {
-          if (row.RowType !== 'Row' || !row.Cells) continue;
-          const idAttr = row.Cells[0]?.Attributes?.find((a) => a.Id === 'accountID');
-          const closing = row.Cells[row.Cells.length - 1]?.Value ?? '0';
-          if (idAttr?.Value) balanceByAccountId.set(idAttr.Value, closing);
-        }
-      }
+  if (cvRes.ok) {
+    const items = (await cvRes.json()) as XeroCashValidationItem[];
+    for (const item of items) {
+      const raw = item.statementBalance?.value ?? 0;
+      // Bank assets carry DEBIT-normal balances; a CREDIT entryType means overdrawn.
+      const signed = item.statementBalance?.type === 'CREDIT' ? -raw : raw;
+      statementByAccountId.set(item.accountId, {
+        value: signed.toFixed(2),
+        date: item.statementBalanceDate ?? null,
+        unreconciledLines: item.bankStatement?.statementLines?.unreconciledLines ?? null,
+      });
     }
   } else {
-    // BankSummary failed (e.g. missing reports.read scope) — return accounts with 0 balance
-    // rather than blowing up. Caller can show "balance unavailable" UI.
-    const body = await summaryRes.text();
-    logger.warn({ status: summaryRes.status, body }, 'Xero /Reports/BankSummary failed — returning zero balances');
+    const body = await cvRes.text();
+    logger.warn(
+      { status: cvRes.status, body },
+      'Xero Finance /CashValidation failed — returning zero balances. Likely cause: Finance API not enabled on the Custom Connection (developer.xero.com → app → scopes).',
+    );
   }
 
   return bankAccounts.map((a) => {
-    // Prefer Account.Balance (statement-style figure that matches the Xero
-    // dashboard widget). Fall back to BankSummary closing if Xero didn't
-    // populate Balance — happens occasionally for archived or zero-activity
-    // accounts.
-    const statementBalance = typeof a.Balance === 'number'
-      ? a.Balance.toFixed(2)
-      : balanceByAccountId.get(a.AccountID) ?? '0';
+    const stmt = statementByAccountId.get(a.AccountID);
+    // Precedence: CashValidation > Account.Balance > '0'. CashValidation gives
+    // the true statement balance plus the as-of date and unreconciled-line
+    // count; Account.Balance is a usable fallback for orgs that haven't yet
+    // enabled the Finance API on their Custom Connection.
+    const fallbackBalance = typeof a.Balance === 'number' ? a.Balance.toFixed(2) : null;
     return {
       accountId: a.AccountID,
       name: a.Name,
       code: a.Code ?? null,
       currency: a.CurrencyCode ?? 'GBP',
-      balance: statementBalance,
+      balance: stmt?.value ?? fallbackBalance ?? '0',
+      balanceDate: stmt?.date ?? null,
+      unreconciledLines: stmt?.unreconciledLines ?? null,
     };
   });
 }
