@@ -58,56 +58,54 @@ export async function xeroDisconnect(_req: Request, res: Response) {
 }
 
 /**
- * Net VAT liability for BOTH the most-recently-completed quarter AND the
- * currently-running quarter — Sam Loom #8-12. Previously this only returned
- * one accruing period since the last quarter end; Sam wants to see the past
- * quarter's headline number ("£38,484 for Feb-Apr") alongside the current
- * one ("£1,261 so far this quarter").
+ * VAT liability for the most-recently-closed HMRC quarter (owed to HMRC)
+ * AND the current open quarter (live accrual) — Sam Loom #7-12.
  *
- * Returns { configured:false } when Xero env vars unset.
+ * Stagger is configured via XERO_VAT_STAGGER (1/2/3, default 1). Sam's CMS
+ * org is stagger 2 (Feb–Apr, May–Jul, Aug–Oct, Nov–Jan).
+ *
+ * Returns both blocks with a human-readable `label` and per-call error
+ * isolation so a transient TaxSummary failure for one window doesn't blank
+ * the other.
  */
 export async function xeroVatLiability(_req: Request, res: Response) {
   if (!xeroClient.isXeroConfigured()) {
     res.json({ status: 'success', data: { configured: false } });
     return;
   }
-  const current = vatService.currentQuarterRange();
-  const past = vatService.lastCompletedQuarterRange();
+  const stagger = vatService.configuredStagger();
+  const prev = vatService.lastCompletedQuarterRange();
+  const curr = vatService.currentQuarterRange();
 
-  async function fetchLiability(range: { fromDate: string; toDate: string; label: string }) {
-    return cached(
-      `xero:vat:${range.fromDate}:${range.toDate}`,
+  const [prevResult, currResult] = await Promise.all([
+    cached(
+      `xero:vat:${prev.fromDate}:${prev.toDate}`,
       XERO_VAT_TTL_SECONDS,
-      () => xeroClient.getVatLiability(range.fromDate, range.toDate),
-    );
-  }
+      () => xeroClient.getVatLiability(prev.fromDate, prev.toDate),
+    ).catch((err) => {
+      logger.warn({ err, range: prev }, 'Xero VAT previous-quarter fetch failed');
+      return { fromDate: prev.fromDate, toDate: prev.toDate, error: err instanceof Error ? err.message : 'fetch failed' };
+    }),
+    cached(
+      `xero:vat:${curr.fromDate}:${curr.toDate}`,
+      XERO_VAT_TTL_SECONDS,
+      () => xeroClient.getVatLiability(curr.fromDate, curr.toDate),
+    ).catch((err) => {
+      logger.warn({ err, range: curr }, 'Xero VAT current-quarter fetch failed');
+      return { fromDate: curr.fromDate, toDate: curr.toDate, error: err instanceof Error ? err.message : 'fetch failed' };
+    }),
+  ]);
 
-  try {
-    const [currentLiability, pastLiability] = await Promise.all([
-      fetchLiability(current),
-      fetchLiability(past),
-    ]);
-    res.json({
-      status: 'success',
-      data: {
-        configured: true,
-        currency: 'GBP',
-        current: { ...currentLiability, label: current.label },
-        past: { ...pastLiability, label: past.label },
-      },
-    });
-  } catch (err) {
-    logger.warn({ err }, 'Xero VAT liability fetch failed');
-    res.json({
-      status: 'success',
-      data: {
-        configured: true,
-        currency: 'GBP',
-        current: { fromDate: current.fromDate, toDate: current.toDate, label: current.label, error: err instanceof Error ? err.message : 'fetch failed' },
-        past: { fromDate: past.fromDate, toDate: past.toDate, label: past.label, error: err instanceof Error ? err.message : 'fetch failed' },
-      },
-    });
-  }
+  res.json({
+    status: 'success',
+    data: {
+      configured: true,
+      currency: 'GBP',
+      stagger,
+      previousQuarter: { ...prevResult, label: prev.label },
+      currentQuarter: { ...currResult, label: curr.label },
+    },
+  });
 }
 
 /**
@@ -161,11 +159,15 @@ export async function leadbyteSyncNow(_req: Request, res: Response) {
 
 export async function creditCheckStatus(_req: Request, res: Response) {
   const provider = getActiveProvider();
+  // Endole sandbox returns sample data, not real scores — surface this loudly
+  // so admins know why the integrations page shows a connected-but-fake state.
+  const endoleSandbox = String(process.env.ENDOLE_SANDBOX || '').toLowerCase() === 'true';
   res.json({
     status: 'success',
     data: {
       provider,
       configured: provider !== 'mock',
+      sandbox: provider === 'endole' ? endoleSandbox : false,
       checksRun: 0,
     },
   });

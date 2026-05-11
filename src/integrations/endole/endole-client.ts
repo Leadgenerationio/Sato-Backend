@@ -124,5 +124,24 @@ export async function runCreditCheck(companyNumber: string, companyName: string)
   }
 
   const data = (await res.json()) as EndoleApiResponse;
-  return normalise(data, companyNumber, companyName);
+  const report = normalise(data, companyNumber, companyName);
+  // Info-level audit log of every successful credit check. Critical for
+  // diagnosing "score looks wrong" reports — grep `endole-credit-check` in
+  // logs to see exactly which provider/mode/company/score combination ran.
+  // Sam's UK-Energy-Saving-Network mismatch (38 vs 54) is almost certainly
+  // either sandbox=true (sample data) or a wrong companyNumber on the client
+  // record; this log line surfaces both.
+  logger.info(
+    {
+      provider: 'endole',
+      sandbox: isSandbox(),
+      companyNumber,
+      companyName,
+      score: report.creditScore,
+      band: data.credit_scores?.current_year_band,
+      ccjCount: report.ccjCount,
+    },
+    'endole-credit-check',
+  );
+  return report;
 }
