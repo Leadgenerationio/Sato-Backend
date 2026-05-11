@@ -196,3 +196,119 @@ describe('Xero Custom Connection — disconnect', () => {
     expect(tokenCalls).toBe(2); // re-auth after disconnect
   });
 });
+
+describe('Xero — getBankBalances (statement balance via Finance API)', () => {
+  beforeEach(() => {
+    process.env.XERO_CLIENT_ID = 'id';
+    process.env.XERO_CLIENT_SECRET = 'secret';
+    xero.__testing.resetCache();
+  });
+  afterEach(() => {
+    global.fetch = ORIGINAL_FETCH;
+    xero.__testing.resetCache();
+  });
+
+  it('returns the statement balance from /CashValidation, not the GL closing balance', async () => {
+    const calls: string[] = [];
+    global.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      calls.push(u);
+      if (u.includes('/connect/token')) {
+        return mockOk({ access_token: 'tok', expires_in: 1800, token_type: 'Bearer' });
+      }
+      if (u.endsWith('/connections')) {
+        return mockOk([{ id: 'c-1', tenantId: 'tenant-abc', tenantName: 'CMS' }]);
+      }
+      if (u.includes('/api.xro/2.0/Accounts')) {
+        return mockOk({
+          Accounts: [
+            { AccountID: 'acc-main', Name: 'Main', Code: '090', CurrencyCode: 'GBP', Type: 'BANK', Status: 'ACTIVE' },
+            { AccountID: 'acc-savings', Name: 'Savings', Code: '091', CurrencyCode: 'GBP', Type: 'BANK', Status: 'ACTIVE' },
+          ],
+        });
+      }
+      if (u.includes('/finance.xro/1.0/CashValidation')) {
+        return mockOk([
+          {
+            accountId: 'acc-main',
+            statementBalance: { value: 52446.21, type: 'DEBIT' },
+            statementBalanceDate: '2026-05-07',
+            bankStatement: { statementLines: { unreconciledLines: 14 } },
+          },
+          {
+            accountId: 'acc-savings',
+            statementBalance: { value: 10000, type: 'DEBIT' },
+            statementBalanceDate: '2026-05-07',
+            bankStatement: { statementLines: { unreconciledLines: 0 } },
+          },
+        ]);
+      }
+      throw new Error(`unexpected fetch ${u}`);
+    }) as unknown as typeof fetch;
+
+    const accounts = await xero.getBankBalances();
+
+    expect(calls.some((u) => u.includes('/finance.xro/1.0/CashValidation'))).toBe(true);
+    expect(calls.some((u) => u.includes('/Reports/BankSummary'))).toBe(false);
+
+    const main = accounts.find((a) => a.accountId === 'acc-main')!;
+    expect(main.balance).toBe('52446.21');
+    expect(main.balanceDate).toBe('2026-05-07');
+    expect(main.unreconciledLines).toBe(14);
+    expect(main.currency).toBe('GBP');
+  });
+
+  it('negates the value when CashValidation reports an overdrawn (CREDIT) balance', async () => {
+    global.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('/connect/token')) return mockOk({ access_token: 'tok', expires_in: 1800 });
+      if (u.endsWith('/connections')) return mockOk([{ id: 'c-1', tenantId: 't', tenantName: 'x' }]);
+      if (u.includes('/api.xro/2.0/Accounts')) {
+        return mockOk({ Accounts: [{ AccountID: 'acc-od', Name: 'Overdraft', CurrencyCode: 'GBP', Type: 'BANK', Status: 'ACTIVE' }] });
+      }
+      if (u.includes('/CashValidation')) {
+        return mockOk([{ accountId: 'acc-od', statementBalance: { value: 350.5, type: 'CREDIT' }, statementBalanceDate: '2026-05-07' }]);
+      }
+      throw new Error(`unexpected fetch ${u}`);
+    }) as unknown as typeof fetch;
+
+    const [acc] = await xero.getBankBalances();
+    expect(acc.balance).toBe('-350.50');
+  });
+
+  it('falls back to zero balances (not a throw) when Finance API is not enabled (403)', async () => {
+    global.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('/connect/token')) return mockOk({ access_token: 'tok', expires_in: 1800 });
+      if (u.endsWith('/connections')) return mockOk([{ id: 'c-1', tenantId: 't', tenantName: 'x' }]);
+      if (u.includes('/api.xro/2.0/Accounts')) {
+        return mockOk({ Accounts: [{ AccountID: 'acc-1', Name: 'A', CurrencyCode: 'GBP', Type: 'BANK', Status: 'ACTIVE' }] });
+      }
+      if (u.includes('/CashValidation')) {
+        return mockErr(403, { Type: 'NoPermission', Detail: 'Finance API scope missing' });
+      }
+      throw new Error(`unexpected fetch ${u}`);
+    }) as unknown as typeof fetch;
+
+    const accounts = await xero.getBankBalances();
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0].balance).toBe('0');
+    expect(accounts[0].balanceDate).toBeNull();
+    expect(accounts[0].unreconciledLines).toBeNull();
+  });
+
+  it('requests the finance.statements.read scope on the access token', async () => {
+    let bodyOnTokenCall = '';
+    global.fetch = vi.fn(async (url: string, init: RequestInit) => {
+      const u = String(url);
+      if (u.includes('/connect/token')) {
+        bodyOnTokenCall = String(init.body ?? '');
+        return mockOk({ access_token: 'tok', expires_in: 1800 });
+      }
+      return mockOk([{ id: 'c-1', tenantId: 't', tenantName: 'x' }]);
+    }) as unknown as typeof fetch;
+
+    await xero.getValidToken();
+    expect(bodyOnTokenCall).toContain('finance.statements.read');
+  });
+});
