@@ -4,6 +4,7 @@ import { invoices } from '../db/schema/invoices.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { clients } from '../db/schema/clients.js';
 import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
+import { trafficSources } from '../db/schema/traffic-sources.js';
 import type { AuthPayload } from '../types/index.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
@@ -31,6 +32,47 @@ export interface ClientPnlRow {
   profit: number;
   margin: number;
   leadsDelivered: number;
+}
+
+// Slice 4 Day 1 (Sam Loom #72-85): the unified leadreports.io row.
+// One row per (campaign × supplier). Revenue and profit are computed by
+// allocating campaign-level revenue across suppliers using their share of
+// total leads — so the row math matches what Sam sees on leadreports.io:
+//
+//   row.revenue = campaign.totalRevenue × (supplierLeads / campaignLeads)
+//   row.profit  = row.revenue − row.spend
+//   row.cpl     = row.spend / row.leads
+//   row.margin  = (row.revenue − row.spend) / row.revenue × 100
+//
+// `catchrUrl` is enriched from our `traffic_sources` table when a Sato-side
+// mapping exists for that (campaign, supplier) pair — null otherwise.
+export interface UnifiedReportRow {
+  campaignId: string;
+  campaignName: string;
+  clientName: string;
+  vertical: string;
+  supplier: string;
+  supplierPlatform: string;
+  catchrUrl: string | null;
+  leads: number;
+  spend: number;
+  revenue: number;
+  profit: number;
+  cpl: number;
+  margin: number;
+}
+
+export interface UnifiedReportTotals {
+  leads: number;
+  spend: number;
+  revenue: number;
+  profit: number;
+  margin: number;
+}
+
+export interface UnifiedReport {
+  rows: UnifiedReportRow[];
+  totals: UnifiedReportTotals;
 }
 
 export interface SupplierReportRow {
@@ -423,6 +465,133 @@ export interface PnlSummary {
   netProfit: string;
   margin: string; // 0..1 fraction (e.g. "0.42" = 42%)
   uncategorisedCount: number;
+}
+
+/**
+ * Slice 4 Day 1 — the unified leadreports.io report. Sam Loom #72-85.
+ *
+ * One row per (campaign × supplier). LeadByte gives us:
+ *   - per-campaign revenue + total leads via /reports/campaign
+ *   - per-(campaign × supplier) spend + leads via /reports/supplier
+ *
+ * To get per-supplier revenue, we allocate campaign revenue across suppliers
+ * by their lead share: `supplierRevenue = campaignRevenue × supplierLeads /
+ * campaignLeads`. This matches what leadreports.io shows — a per-row
+ * revenue figure that, when you sum across suppliers, equals the campaign
+ * total.
+ *
+ * Filters keep the query simple: `supplier` (platform substring or name) and
+ * `campaign` (substring against campaign name). Date range comes from
+ * DeliveryWindow.
+ */
+export interface UnifiedReportFilters {
+  window?: DeliveryWindow;
+  supplier?: string;     // platform or supplier-name substring
+  campaign?: string;     // campaign-name substring
+}
+
+export async function getUnifiedReport(
+  _requester: AuthPayload,
+  filters: UnifiedReportFilters = {},
+): Promise<UnifiedReport> {
+  const window: DeliveryWindow = filters.window ?? 'this_month';
+
+  // Fetch in parallel: LeadByte gives us the LB-side numbers; the DB query
+  // resolves campaign meta (clientName + vertical) and Catchr NCP mapping.
+  const [campaignRows, supplierRows, campaignMeta, sourcesRows] = await Promise.all([
+    leadbyte.getCampaignReport(window),
+    leadbyte.getSupplierSpend(window),
+    loadCampaignMetaByName(),
+    // Pull Catchr NCP URLs keyed by (campaignId-or-name, platform). Both keys
+    // are stored on traffic_sources rows; we resolve them after the join.
+    db
+      .select({
+        campaignId: trafficSources.campaignId,
+        platform: trafficSources.platform,
+        catchrUrl: trafficSources.catchrUrl,
+      })
+      .from(trafficSources)
+      .where(eq(trafficSources.isActive, true)),
+  ]);
+
+  // Build revenue-per-lead by campaign name so we can allocate.
+  const revenuePerLeadByCampaign = new Map<string, number>();
+  for (const c of campaignRows) {
+    if (c.leads > 0) revenuePerLeadByCampaign.set(c.campaign, c.revenue / c.leads);
+    else revenuePerLeadByCampaign.set(c.campaign, 0);
+  }
+
+  // Catchr NCP lookup keyed by platform (lowercased) — Sato-side traffic
+  // sources are scoped per-campaign; we key them on platform alone since
+  // the supplier report doesn't carry our Sato campaign UUID. Good enough
+  // for Phase 1 where Sam has one Catchr account per platform anyway.
+  const catchrByPlatform = new Map<string, string>();
+  for (const s of sourcesRows) {
+    if (s.platform && s.catchrUrl) {
+      const key = s.platform.toLowerCase();
+      // First-write wins so we don't keep overwriting if the same platform
+      // is mapped on multiple campaigns. Per-campaign override is a Day 2+
+      // refinement.
+      if (!catchrByPlatform.has(key)) catchrByPlatform.set(key, s.catchrUrl);
+    }
+  }
+
+  // Apply filters BEFORE the row map so we don't allocate work we'll throw away.
+  const supplierFilter = filters.supplier?.toLowerCase() ?? '';
+  const campaignFilter = filters.campaign?.toLowerCase() ?? '';
+  const filteredSupplierRows = supplierRows.filter((r) => {
+    if (campaignFilter && !r.campaignName.toLowerCase().includes(campaignFilter)) return false;
+    if (supplierFilter) {
+      const matchesPlatform = r.platform.toLowerCase().includes(supplierFilter);
+      const matchesName = r.supplierName.toLowerCase().includes(supplierFilter);
+      if (!matchesPlatform && !matchesName) return false;
+    }
+    return true;
+  });
+
+  const rows: UnifiedReportRow[] = filteredSupplierRows.map((r) => {
+    const meta = campaignMeta.get(r.campaignName) ?? {
+      clientName: 'Pending client mapping',
+      vertical: deriveVerticalFromName(r.campaignName),
+    };
+    const revenuePerLead = revenuePerLeadByCampaign.get(r.campaignName) ?? 0;
+    const revenue = Math.round(revenuePerLead * r.leads * 100) / 100;
+    const profit = Math.round((revenue - r.spend) * 100) / 100;
+    const margin = revenue > 0 ? Math.round(((revenue - r.spend) / revenue) * 1000) / 10 : 0;
+    const catchrUrl = catchrByPlatform.get(r.platform.toLowerCase()) ?? null;
+
+    return {
+      campaignId: r.campaignId,
+      campaignName: r.campaignName,
+      clientName: meta.clientName,
+      vertical: meta.vertical,
+      supplier: r.supplierName,
+      supplierPlatform: r.platform,
+      catchrUrl,
+      leads: r.leads,
+      spend: Math.round(r.spend * 100) / 100,
+      revenue,
+      profit,
+      cpl: r.leads > 0 ? Math.round((r.spend / r.leads) * 100) / 100 : 0,
+      margin,
+    };
+  }).sort((a, b) => b.revenue - a.revenue);
+
+  // Totals across the filtered rows. Margin is recomputed (not averaged)
+  // from the totalled revenue + spend so it's mathematically consistent.
+  const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
+  const totalSpend = rows.reduce((s, r) => s + r.spend, 0);
+  const totals: UnifiedReportTotals = {
+    leads: rows.reduce((s, r) => s + r.leads, 0),
+    spend: Math.round(totalSpend * 100) / 100,
+    revenue: Math.round(totalRevenue * 100) / 100,
+    profit: Math.round((totalRevenue - totalSpend) * 100) / 100,
+    margin: totalRevenue > 0
+      ? Math.round(((totalRevenue - totalSpend) / totalRevenue) * 1000) / 10
+      : 0,
+  };
+
+  return { rows, totals };
 }
 
 export async function getPnlSummary(

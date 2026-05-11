@@ -35,3 +35,24 @@ export async function pnlSummary(req: Request, res: Response) {
   const data = await reportService.getPnlSummary(req.user!, days);
   res.json({ status: 'success', data });
 }
+
+/**
+ * Slice 4 Day 1 — unified leadreports.io report (Sam #72-85).
+ * Replaces the 5 separate report pages with one consolidated view that the
+ * frontend will fold into in Day 2-4 of the slice.
+ */
+export async function unifiedReport(req: Request, res: Response) {
+  const window = parseWindow(req.query.window);
+  const supplier = typeof req.query.supplier === 'string' ? req.query.supplier : undefined;
+  const campaign = typeof req.query.campaign === 'string' ? req.query.campaign : undefined;
+  const data = await reportService.getUnifiedReport(req.user!, { window, supplier, campaign });
+  res.json({
+    status: 'success',
+    data: {
+      window,
+      supplier: supplier ?? null,
+      campaign: campaign ?? null,
+      ...data,
+    },
+  });
+}

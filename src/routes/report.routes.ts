@@ -13,3 +13,7 @@ reportRoutes.get('/client-pnl', reportController.clientPnl);
 reportRoutes.get('/supplier-performance', reportController.supplierPerformance);
 reportRoutes.get('/financial-overview', reportController.financialOverview);
 reportRoutes.get('/pnl-summary', reportController.pnlSummary);
+
+// Slice 4 Day 1: the one report that folds the other five (Sam #72-85).
+// Existing endpoints stay until the frontend has fully migrated off them.
+reportRoutes.get('/unified', reportController.unifiedReport);
