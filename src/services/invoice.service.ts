@@ -351,6 +351,78 @@ export async function syncInvoicesFromXero(
   };
 }
 
+// ─── Outstanding (Sam Loom #4/#5/#6) ───────────────────────────────────────
+//
+// "Invoices Owed In" — every invoice still awaiting payment. Kept separate
+// from getOverdueInvoices() so the chase-overdue cron keeps its narrower
+// semantics — we never want to chase a sent-but-not-yet-late invoice.
+
+export type OutstandingBucket = 'all' | 'due' | 'overdue';
+
+export interface OutstandingInvoicesResult {
+  invoices: InvoiceSummary[];
+  count: number;
+  totalOutstanding: string; // decimal-on-the-wire
+}
+
+/**
+ *   bucket='all'     → status in (sent, overdue)   ← default for the dashboard tile
+ *   bucket='due'     → status='sent'               ← issued but not yet past due
+ *   bucket='overdue' → status='overdue'            ← past due date
+ *
+ * Excludes 'draft' and 'paid'.
+ */
+export async function getOutstandingInvoices(
+  requester: AuthPayload,
+  bucket: OutstandingBucket = 'all',
+): Promise<OutstandingInvoicesResult> {
+  const businessId = requester.businessId;
+  if (!businessId) return { invoices: [], count: 0, totalOutstanding: '0' };
+
+  const statuses =
+    bucket === 'due' ? ['sent'] :
+    bucket === 'overdue' ? ['overdue'] :
+    ['sent', 'overdue'];
+
+  const whereClause = and(
+    eq(clients.businessId, businessId),
+    inArray(invoices.status, statuses),
+  );
+
+  const [rows, summaryResult, clientMap] = await Promise.all([
+    db
+      .select({ inv: invoices, client: clients })
+      .from(invoices)
+      .innerJoin(clients, eq(clients.id, invoices.clientId))
+      .where(whereClause)
+      .orderBy(desc(invoices.dueDate))
+      .limit(100),
+    db
+      .select({
+        n: sql<number>`count(*)::int`,
+        total: sql<string>`coalesce(sum(${invoices.total}), 0)::text`,
+      })
+      .from(invoices)
+      .innerJoin(clients, eq(clients.id, invoices.clientId))
+      .where(whereClause),
+    loadClientMap(businessId),
+  ]);
+
+  const items = rows
+    .map((r) => {
+      const client = clientMap.get(r.inv.clientId) ?? r.client;
+      if (!client) return null;
+      return invoiceToSummary(r.inv, client);
+    })
+    .filter((x): x is InvoiceSummary => x !== null);
+
+  return {
+    invoices: items,
+    count: summaryResult[0]?.n ?? 0,
+    totalOutstanding: summaryResult[0]?.total ?? '0',
+  };
+}
+
 export async function createInvoice(
   data: { clientId: string; currency: string; lineItems: LineItem[]; addVat: boolean },
   requester: AuthPayload,

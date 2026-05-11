@@ -86,6 +86,43 @@ describe('Invoice API', () => {
     });
   });
 
+  describe('GET /api/v1/invoices/outstanding', () => {
+    it('default bucket returns sent + overdue with count and totalOutstanding', async () => {
+      const res = await request(app).get('/api/v1/invoices/outstanding').set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.bucket).toBe('all');
+      expect(typeof res.body.data.count).toBe('number');
+      expect(typeof res.body.data.totalOutstanding).toBe('string');
+      const statuses = new Set<string>(res.body.data.invoices.map((i: { status: string }) => i.status));
+      statuses.forEach((s) => expect(['sent', 'overdue']).toContain(s));
+    });
+
+    it('bucket=due returns sent invoices only', async () => {
+      const res = await request(app).get('/api/v1/invoices/outstanding?bucket=due').set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.bucket).toBe('due');
+      res.body.data.invoices.forEach((inv: { status: string }) => expect(inv.status).toBe('sent'));
+    });
+
+    it('bucket=overdue returns overdue invoices only', async () => {
+      const res = await request(app).get('/api/v1/invoices/outstanding?bucket=overdue').set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.bucket).toBe('overdue');
+      res.body.data.invoices.forEach((inv: { status: string }) => expect(inv.status).toBe('overdue'));
+    });
+
+    it('unknown bucket value falls back to all', async () => {
+      const res = await request(app).get('/api/v1/invoices/outstanding?bucket=bogus').set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.bucket).toBe('all');
+    });
+
+    it('client role cannot read outstanding invoices', async () => {
+      const res = await request(app).get('/api/v1/invoices/outstanding').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(403);
+    });
+  });
+
   describe('GET /api/v1/invoices/clients', () => {
     it('returns active clients for invoice creation', async () => {
       const res = await request(app).get('/api/v1/invoices/clients').set('Authorization', `Bearer ${ownerToken}`);
