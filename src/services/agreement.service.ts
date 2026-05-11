@@ -73,7 +73,7 @@ export interface SendAgreementInput {
    */
   r2SourceKey?: string;
   /** Folder the r2SourceKey lives under. Defaults to 'misc' (FileUpload default). */
-  r2SourceFolder?: 'invoices' | 'agreements' | 'creatives' | 'landing-pages' | 'misc';
+  r2SourceFolder?: 'invoices' | 'agreements' | 'creatives' | 'landing-pages' | 'sops' | 'misc';
   documentName?: string;
   /**
    * #47-50 PDF editor — drag-placed fields from the editor UI. When

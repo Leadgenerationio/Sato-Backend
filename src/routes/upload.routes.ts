@@ -9,7 +9,7 @@ export const uploadRoutes: RouterType = Router();
 
 uploadRoutes.use(authMiddleware);
 
-const folders: R2Folder[] = ['invoices', 'agreements', 'creatives', 'landing-pages', 'misc'];
+const folders: R2Folder[] = ['invoices', 'agreements', 'creatives', 'landing-pages', 'sops', 'misc'];
 
 const presignSchema = z.object({
   folder: z.enum(folders as [R2Folder, ...R2Folder[]]),

@@ -104,4 +104,89 @@ describe('SOP API', () => {
       expect(res.status).toBe(401);
     });
   });
+
+  describe('Week 3 polish — Loom URL, tags, screenshots, AI', () => {
+    it('round-trips loomUrl, tags, and screenshots on create+read', async () => {
+      const payload = {
+        title: `Loom-tagged SOP ${Date.now()}`,
+        content: 'Body with steps.',
+        category: 'Campaigns',
+        status: 'draft',
+        loomUrl: 'https://www.loom.com/share/abcdefabcdef1234567890ab',
+        tags: ['software', 'creative'],
+        screenshots: [
+          { key: 'sops/123-foo.png', name: 'foo.png', size: 100, contentType: 'image/png', uploadedAt: new Date().toISOString() },
+        ],
+      };
+      const created = await request(app).post('/api/v1/sops').set('Authorization', `Bearer ${ownerToken}`).send(payload);
+      expect(created.status).toBe(201);
+      const id = created.body.data.sop.id;
+
+      const fetched = await request(app).get(`/api/v1/sops/${id}`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(fetched.status).toBe(200);
+      expect(fetched.body.data.sop.loomUrl).toBe(payload.loomUrl);
+      expect(fetched.body.data.sop.tags).toEqual(payload.tags);
+      expect(fetched.body.data.sop.screenshots).toHaveLength(1);
+      expect(fetched.body.data.sop.screenshots[0].key).toBe('sops/123-foo.png');
+    });
+
+    it('filters by tag', async () => {
+      await request(app).post('/api/v1/sops').set('Authorization', `Bearer ${ownerToken}`).send({
+        title: `Solar SOP ${Date.now()}`,
+        content: 'Solar campaign steps.',
+        category: 'Campaigns',
+        status: 'published',
+        tags: ['solar', 'campaigns'],
+      });
+      const res = await request(app).get('/api/v1/sops?tag=solar').set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.sops.length).toBeGreaterThan(0);
+      res.body.data.sops.forEach((s: { tags: string[] }) => expect(s.tags).toContain('solar'));
+    });
+
+    it('GET /api/v1/sops/tags returns aggregated tag counts', async () => {
+      const res = await request(app).get('/api/v1/sops/tags').set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.data.tags)).toBe(true);
+      // After the previous tests we have at least 'software', 'creative', 'solar', 'campaigns'.
+      const tagNames = res.body.data.tags.map((t: { tag: string }) => t.tag);
+      expect(tagNames).toEqual(expect.arrayContaining(['solar']));
+    });
+
+    it('POST /api/v1/sops/generate-from-loom rejects missing loomUrl', async () => {
+      const res = await request(app)
+        .post('/api/v1/sops/generate-from-loom')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ transcript: 'a'.repeat(50) });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/loomUrl/i);
+    });
+
+    it('POST /api/v1/sops/generate-from-loom rejects short transcript', async () => {
+      const res = await request(app)
+        .post('/api/v1/sops/generate-from-loom')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ loomUrl: 'https://www.loom.com/share/abcdefabcdef1234567890ab', transcript: 'too short' });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/transcript/i);
+    });
+
+    it('POST /api/v1/sops/generate-from-loom returns 503 when ANTHROPIC_API_KEY missing', async () => {
+      const original = process.env.ANTHROPIC_API_KEY;
+      delete process.env.ANTHROPIC_API_KEY;
+      try {
+        const res = await request(app)
+          .post('/api/v1/sops/generate-from-loom')
+          .set('Authorization', `Bearer ${ownerToken}`)
+          .send({
+            loomUrl: 'https://www.loom.com/share/abcdefabcdef1234567890ab',
+            transcript: 'a transcript with enough characters to pass the length validation gate.',
+          });
+        expect(res.status).toBe(503);
+        expect(res.body.message).toMatch(/not configured/i);
+      } finally {
+        if (original !== undefined) process.env.ANTHROPIC_API_KEY = original;
+      }
+    });
+  });
 });

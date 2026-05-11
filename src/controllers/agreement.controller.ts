@@ -26,7 +26,7 @@ const sendSchema = z
     documentBase64: z.string().min(1).optional(),
     r2SourceKey: z.string().min(1).optional(),
     r2SourceFolder: z
-      .enum(['invoices', 'agreements', 'creatives', 'landing-pages', 'misc'])
+      .enum(['invoices', 'agreements', 'creatives', 'landing-pages', 'sops', 'misc'])
       .optional(),
     documentName: z.string().optional(),
     // #47-50 — optional drag-placed fields from the editor. Capped at 50

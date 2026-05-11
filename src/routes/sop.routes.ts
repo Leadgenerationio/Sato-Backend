@@ -29,6 +29,8 @@ sopRoutes.use(authMiddleware);
 const internalRoles = requireRole('owner', 'ops_manager', 'finance_admin');
 
 sopRoutes.get('/', internalRoles, sopController.listSops);
+sopRoutes.get('/tags', internalRoles, sopController.listTags);
+sopRoutes.post('/generate-from-loom', internalRoles, sopController.generateFromLoom);
 sopRoutes.get('/:id', internalRoles, sopController.getSop);
 sopRoutes.post('/', internalRoles, validate(createSopSchema), sopController.createSop);
 sopRoutes.put('/:id', internalRoles, validate(updateSopSchema), sopController.updateSop);

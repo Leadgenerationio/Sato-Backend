@@ -1,4 +1,4 @@
-export type R2Folder = 'invoices' | 'agreements' | 'creatives' | 'landing-pages' | 'misc';
+export type R2Folder = 'invoices' | 'agreements' | 'creatives' | 'landing-pages' | 'sops' | 'misc';
 
 export interface R2UploadOptions {
   folder: R2Folder;
