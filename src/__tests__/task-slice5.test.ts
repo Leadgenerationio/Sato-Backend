@@ -60,6 +60,60 @@ describe('Task Slice 5 — subtasks / attachments / activity', () => {
       expect(res.body.data.task.timeBlockMinutes).toBe(120);
     });
 
+    // ─── Slice 5 Day 7 — recurrence picker + auto-compute next_run ───
+    it('PUT recurrenceCron auto-computes recurrenceNextRun when omitted', async () => {
+      const res = await request(app)
+        .put(`/api/v1/tasks/${taskId}`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ recurrenceCron: '0 9 * * *' });   // daily 09:00
+      expect(res.status).toBe(200);
+      expect(res.body.data.task.recurrenceCron).toBe('0 9 * * *');
+      // Worker can never fire without a next-run timestamp; this is the
+      // load-bearing assertion.
+      const next = res.body.data.task.recurrenceNextRun;
+      expect(next).toBeTruthy();
+      expect(new Date(next).getTime()).toBeGreaterThan(Date.now());
+    });
+
+    it('PUT recurrenceCron=null clears recurrenceNextRun too', async () => {
+      // Ensure there's a cron + next_run first.
+      await request(app)
+        .put(`/api/v1/tasks/${taskId}`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ recurrenceCron: '0 9 * * *' });
+
+      const res = await request(app)
+        .put(`/api/v1/tasks/${taskId}`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ recurrenceCron: null });
+      expect(res.status).toBe(200);
+      expect(res.body.data.task.recurrenceCron).toBeNull();
+      expect(res.body.data.task.recurrenceNextRun).toBeNull();
+    });
+
+    it('rejects invalid cron via zod', async () => {
+      const res = await request(app)
+        .put(`/api/v1/tasks/${taskId}`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ recurrenceCron: 'every monday at 9am' });
+      expect(res.status).toBe(400);
+    });
+
+    it('createTask with cron auto-computes next_run', async () => {
+      const res = await request(app)
+        .post('/api/v1/tasks')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({
+          title: `Recurring create ${Date.now()}`,
+          assignee: 'Sam Owner',
+          priority: 'low',
+          recurrenceCron: '0 9 * * 1-5',  // weekdays 09:00
+        });
+      expect(res.status).toBe(201);
+      expect(res.body.data.task.recurrenceCron).toBe('0 9 * * 1-5');
+      expect(res.body.data.task.recurrenceNextRun).toBeTruthy();
+    });
+
     // ─── Slice 5 Day 5 — parentTaskId, linkedSopId, children endpoint ───
     it('rejects negative timeBlockMinutes via zod', async () => {
       const res = await request(app)

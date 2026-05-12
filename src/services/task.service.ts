@@ -4,6 +4,7 @@ import { tasks, taskComments, taskTemplates } from '../db/schema/tasks.js';
 import { logActivity, listActivityForTask, type TaskActivityEvent } from './task-activity.service.js';
 import { loadSubtasksForTask, type TaskSubtask } from './task-subtasks.service.js';
 import { loadAttachmentsForTask, type TaskAttachment } from './task-attachments.service.js';
+import { cronNextFire, isValidCron } from '../utils/cron-next.js';
 import type { AuthPayload } from '../types/index.js';
 
 export interface TaskComment {
@@ -177,6 +178,17 @@ export async function getTask(id: string): Promise<Task | null> {
 
 export async function createTask(data: Partial<Task>, requester: AuthPayload): Promise<Task> {
   const now = new Date();
+  // Slice 5 Day 7 — auto-compute recurrenceNextRun when the caller sets a
+  // valid cron but doesn't tell us when the next fire is. Without this,
+  // the recurring-tasks worker can never pick up newly-created rows.
+  // Invalid crons short-circuit to null (the FE picker validates first,
+  // but the API stays lenient — bad crons just don't recur).
+  const cron = data.recurrenceCron ?? null;
+  let nextRun: Date | null = data.recurrenceNextRun ? new Date(data.recurrenceNextRun) : null;
+  if (cron && !nextRun && isValidCron(cron)) {
+    nextRun = cronNextFire(cron, now);
+  }
+
   const [row] = await db
     .insert(tasks)
     .values({
@@ -193,8 +205,8 @@ export async function createTask(data: Partial<Task>, requester: AuthPayload): P
       timeBlockMinutes: data.timeBlockMinutes ?? null,
       linkedSopId: data.linkedSopId ?? null,
       parentTaskId: data.parentTaskId ?? null,
-      recurrenceCron: data.recurrenceCron ?? null,
-      recurrenceNextRun: data.recurrenceNextRun ? new Date(data.recurrenceNextRun) : null,
+      recurrenceCron: cron,
+      recurrenceNextRun: nextRun,
       auditLog: [{ action: 'Task created', user: requester.email, timestamp: now.toISOString() }],
     })
     .returning();
@@ -219,7 +231,27 @@ export async function updateTask(id: string, data: Partial<Task>, requester?: Au
   if (data.timeBlockMinutes !== undefined) { patch.timeBlockMinutes = data.timeBlockMinutes; changed.timeBlockMinutes = data.timeBlockMinutes; }
   if (data.linkedSopId !== undefined) { patch.linkedSopId = data.linkedSopId; changed.linkedSopId = data.linkedSopId; }
   if (data.parentTaskId !== undefined) { patch.parentTaskId = data.parentTaskId; changed.parentTaskId = data.parentTaskId; }
-  if (data.recurrenceCron !== undefined) { patch.recurrenceCron = data.recurrenceCron; changed.recurrenceCron = data.recurrenceCron; }
+  // Slice 5 Day 7 — recurrence:
+  //   - cron set to null → also clear next_run so the worker stops watching
+  //   - cron set to a valid expression with no explicit next_run → compute it
+  //   - cron explicitly paired with next_run → respect both (caller decided)
+  //   - cron unchanged but next_run sent → respect it (e.g. snooze)
+  if (data.recurrenceCron !== undefined) {
+    patch.recurrenceCron = data.recurrenceCron;
+    changed.recurrenceCron = data.recurrenceCron;
+    if (data.recurrenceCron === null) {
+      // Clearing cron clears next_run unless caller explicitly sent one
+      // (which would be weird — but we don't fight them).
+      if (data.recurrenceNextRun === undefined) {
+        patch.recurrenceNextRun = null;
+        changed.recurrenceNextRun = null;
+      }
+    } else if (data.recurrenceNextRun === undefined && isValidCron(data.recurrenceCron)) {
+      const next = cronNextFire(data.recurrenceCron, new Date());
+      patch.recurrenceNextRun = next;
+      changed.recurrenceNextRun = next.toISOString();
+    }
+  }
   if (data.recurrenceNextRun !== undefined) {
     patch.recurrenceNextRun = data.recurrenceNextRun ? new Date(data.recurrenceNextRun) : null;
     changed.recurrenceNextRun = data.recurrenceNextRun;

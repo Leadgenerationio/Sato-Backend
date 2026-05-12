@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { authMiddleware } from '../middleware/auth.middleware.js';
 import { requireRole } from '../middleware/rbac.middleware.js';
 import { validate } from '../middleware/validate.middleware.js';
+import { isValidCron } from '../utils/cron-next.js';
 import * as taskController from '../controllers/task.controller.js';
 
 export const taskRoutes: RouterType = Router();
@@ -15,7 +16,10 @@ const slice5OptionalFields = {
   timeBlockMinutes: z.number().int().positive().max(60 * 24 * 7).nullable().optional(),
   linkedSopId: z.string().uuid().nullable().optional(),
   parentTaskId: z.string().uuid().nullable().optional(),
-  recurrenceCron: z.string().max(100).nullable().optional(),
+  recurrenceCron: z.string().max(100).nullable().optional().refine(
+    (v) => v === null || v === undefined || isValidCron(v),
+    { message: 'recurrenceCron must be a valid 5-field cron expression' },
+  ),
   recurrenceNextRun: z.string().datetime().nullable().optional(),
 };
 
