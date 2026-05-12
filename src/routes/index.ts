@@ -20,6 +20,7 @@ import { uploadRoutes } from './upload.routes.js';
 import { creativeRoutes } from './creative.routes.js';
 import { bankFeedRoutes } from './bank-feed.routes.js';
 import { dashboardRoutes } from './dashboard.routes.js';
+import { sosHelpRoutes } from './sos-help.routes.js';
 import { healthRoutes } from './health.routes.js';
 export const router: RouterType = Router();
 
@@ -44,6 +45,11 @@ router.use('/', agreementRoutes);
 router.use('/leadbyte', leadbyteRoutes);
 router.use('/ad-spend', adSpendRoutes);
 router.use('/uploads', uploadRoutes);
+// SOS is open to clients too — mount BEFORE creativeRoutes (which has a
+// router-level requireRole('owner','ops_manager') that would otherwise
+// 403 any client-token request matching its '/' prefix before /sos
+// could pick it up).
+router.use('/sos', sosHelpRoutes);
 router.use('/', creativeRoutes);
 router.use('/finance/bank-feed', bankFeedRoutes);
 router.use('/dashboard', dashboardRoutes);

@@ -80,6 +80,12 @@ export const env = {
   CATCHR_MCP_URL: v('CATCHR_MCP_URL', 'https://api.catchr.io/mcp'),
   CATCHR_ACCESS_TOKEN: v('CATCHR_ACCESS_TOKEN'),
   CATCHR_SYNC_BACKFILL_DAYS: parseInt(v('CATCHR_SYNC_BACKFILL_DAYS', '30'), 10),
+
+  // Slice 5 Day 6 — SOS help button target. Phone number that the SOS
+  // WhatsApp deep-link opens. Plain digits with country code, no `+` or
+  // spaces (wa.me format). Optional: when blank, the endpoint records
+  // the request but the FE shows "not configured yet".
+  SOS_WHATSAPP_NUMBER: v('SOS_WHATSAPP_NUMBER'),
 };
 
 export function isProduction(): boolean {
