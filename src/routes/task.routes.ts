@@ -5,6 +5,7 @@ import { requireRole } from '../middleware/rbac.middleware.js';
 import { validate } from '../middleware/validate.middleware.js';
 import { isValidCron } from '../utils/cron-next.js';
 import * as taskController from '../controllers/task.controller.js';
+import * as aiTaskController from '../controllers/ai-task.controller.js';
 
 export const taskRoutes: RouterType = Router();
 
@@ -47,6 +48,12 @@ const updateTaskStatusSchema = z.object({
 
 const addCommentSchema = z.object({
   body: z.object({ text: z.string().min(1).max(5000) }),
+});
+
+// #91 AI new-task. Prompt is bounded to keep token usage predictable; we
+// only need a sentence — anything longer is probably misuse.
+const aiGenerateSchema = z.object({
+  body: z.object({ prompt: z.string().min(1).max(500) }),
 });
 
 // Slice 5 Day 2 — subtasks / attachments
@@ -114,6 +121,10 @@ taskRoutes.post('/:id/attachments', internalRoles, validate(addAttachmentSchema)
 taskRoutes.delete('/:id/attachments/:attachmentId', internalRoles, taskController.removeAttachment);
 
 taskRoutes.get('/:id/activity', internalRoles, taskController.listActivity);
+
+// #91 AI new-task button — generate a structured task draft from a prompt.
+// Internal-only (clients don't author tasks).
+taskRoutes.post('/ai-generate', internalRoles, validate(aiGenerateSchema), aiTaskController.generateTask);
 
 // Slice 5 Day 5 — children of a parent task (project-tree view)
 taskRoutes.get('/:id/children', internalRoles, taskController.listChildTasks);

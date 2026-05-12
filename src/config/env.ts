@@ -86,6 +86,12 @@ export const env = {
   // spaces (wa.me format). Optional: when blank, the endpoint records
   // the request but the FE shows "not configured yet".
   SOS_WHATSAPP_NUMBER: v('SOS_WHATSAPP_NUMBER'),
+
+  // #91 AI new-task button. Anthropic Messages API. Optional: when blank,
+  // the /ai-generate endpoint returns 503 so the FE can show "AI not
+  // configured" gracefully.
+  ANTHROPIC_API_KEY: v('ANTHROPIC_API_KEY'),
+  ANTHROPIC_MODEL: v('ANTHROPIC_MODEL', 'claude-haiku-4-5-20251001'),
 };
 
 export function isProduction(): boolean {
