@@ -42,6 +42,15 @@ export async function registerSchedules() {
     data: {},
   });
 
+  // Slice 5 Day 4 — process recurring tasks every 5 min. The job picks up
+  // any tasks where recurrence_next_run has passed and clones them.
+  await syncQueue.upsertJobScheduler('recurring-tasks', {
+    pattern: '*/5 * * * *',
+  }, {
+    name: 'recurring-tasks-tick',
+    data: {},
+  });
+
   // Pre-warm the LeadByte Redis cache every 90 seconds. Refreshes:
   //   - lb:campaigns                  (the campaign list)
   //   - lb:report:{today,week,month,ytd}:v5  (the 4 windows /campaigns reads)

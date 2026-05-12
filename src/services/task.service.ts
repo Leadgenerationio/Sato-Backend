@@ -1,6 +1,9 @@
 import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { tasks, taskComments, taskTemplates } from '../db/schema/tasks.js';
+import { logActivity, listActivityForTask, type TaskActivityEvent } from './task-activity.service.js';
+import { loadSubtasksForTask, type TaskSubtask } from './task-subtasks.service.js';
+import { loadAttachmentsForTask, type TaskAttachment } from './task-attachments.service.js';
 import type { AuthPayload } from '../types/index.js';
 
 export interface TaskComment {
@@ -30,6 +33,17 @@ export interface Task {
   createdAt: string;
   comments: TaskComment[];
   auditLog: AuditEntry[];
+  // Slice 5 — optional fields populated by getTask; listTasks omits the
+  // expensive ones (subtasks/attachments/activity) to keep the list page
+  // cheap.
+  timeBlockMinutes?: number | null;
+  linkedSopId?: string | null;
+  parentTaskId?: string | null;
+  recurrenceCron?: string | null;
+  recurrenceNextRun?: string | null;
+  subtasks?: TaskSubtask[];
+  attachments?: TaskAttachment[];
+  activity?: TaskActivityEvent[];
 }
 
 export interface TaskStats {
@@ -70,7 +84,11 @@ function commentToDto(row: CommentRow): TaskComment {
   };
 }
 
-function taskToDto(row: TaskRow, comments: TaskComment[]): Task {
+function taskToDto(
+  row: TaskRow,
+  comments: TaskComment[],
+  extras?: { subtasks?: TaskSubtask[]; attachments?: TaskAttachment[]; activity?: TaskActivityEvent[] },
+): Task {
   return {
     id: row.id,
     title: row.title,
@@ -84,6 +102,14 @@ function taskToDto(row: TaskRow, comments: TaskComment[]): Task {
     createdAt: (row.createdAt ?? new Date()).toISOString(),
     comments,
     auditLog: ((row.auditLog as AuditEntry[] | null) ?? []),
+    timeBlockMinutes: row.timeBlockMinutes ?? null,
+    linkedSopId: row.linkedSopId ?? null,
+    parentTaskId: row.parentTaskId ?? null,
+    recurrenceCron: row.recurrenceCron ?? null,
+    recurrenceNextRun: row.recurrenceNextRun ? row.recurrenceNextRun.toISOString() : null,
+    subtasks: extras?.subtasks,
+    attachments: extras?.attachments,
+    activity: extras?.activity,
   };
 }
 
@@ -138,8 +164,15 @@ export async function listTasks(requester: AuthPayload, filters?: TaskFilters): 
 export async function getTask(id: string): Promise<Task | null> {
   const [row] = await db.select().from(tasks).where(eq(tasks.id, id));
   if (!row) return null;
-  const commentsMap = await loadCommentsForTasks([id]);
-  return taskToDto(row, commentsMap.get(id) ?? []);
+  // Slice 5: pull comments + subtasks + attachments + activity feed in
+  // parallel so the detail endpoint stays one round-trip.
+  const [commentsMap, subtasks, attachments, activity] = await Promise.all([
+    loadCommentsForTasks([id]),
+    loadSubtasksForTask(id),
+    loadAttachmentsForTask(id),
+    listActivityForTask(id),
+  ]);
+  return taskToDto(row, commentsMap.get(id) ?? [], { subtasks, attachments, activity });
 }
 
 export async function createTask(data: Partial<Task>, requester: AuthPayload): Promise<Task> {
@@ -156,29 +189,59 @@ export async function createTask(data: Partial<Task>, requester: AuthPayload): P
       dueDate: data.dueDate ? new Date(data.dueDate) : new Date(Date.now() + 7 * 86400000),
       category: data.category || 'general',
       createdBy: requester.email,
+      // Slice 5 fields — all optional on create.
+      timeBlockMinutes: data.timeBlockMinutes ?? null,
+      linkedSopId: data.linkedSopId ?? null,
+      parentTaskId: data.parentTaskId ?? null,
+      recurrenceCron: data.recurrenceCron ?? null,
+      recurrenceNextRun: data.recurrenceNextRun ? new Date(data.recurrenceNextRun) : null,
       auditLog: [{ action: 'Task created', user: requester.email, timestamp: now.toISOString() }],
     })
     .returning();
+  await logActivity(row.id, requester.userId, 'task_created', { title: row.title });
+  if (row.recurrenceCron) {
+    await logActivity(row.id, requester.userId, 'recurrence_set', { cron: row.recurrenceCron });
+  }
   return taskToDto(row, []);
 }
 
-export async function updateTask(id: string, data: Partial<Task>): Promise<Task | null> {
+export async function updateTask(id: string, data: Partial<Task>, requester?: AuthPayload): Promise<Task | null> {
   const patch: Partial<TaskRow> = { updatedAt: new Date() };
-  if (data.title !== undefined) patch.title = data.title;
-  if (data.description !== undefined) patch.description = data.description;
-  if (data.assignee !== undefined) patch.assignee = data.assignee;
-  if (data.priority !== undefined) patch.priority = data.priority;
-  if (data.status !== undefined) patch.status = data.status;
-  if (data.dueDate !== undefined) patch.dueDate = new Date(data.dueDate);
-  if (data.category !== undefined) patch.category = data.category;
+  const changed: Record<string, unknown> = {};
+  if (data.title !== undefined) { patch.title = data.title; changed.title = data.title; }
+  if (data.description !== undefined) { patch.description = data.description; changed.description = data.description; }
+  if (data.assignee !== undefined) { patch.assignee = data.assignee; changed.assignee = data.assignee; }
+  if (data.priority !== undefined) { patch.priority = data.priority; changed.priority = data.priority; }
+  if (data.status !== undefined) { patch.status = data.status; changed.status = data.status; }
+  if (data.dueDate !== undefined) { patch.dueDate = new Date(data.dueDate); changed.dueDate = data.dueDate; }
+  if (data.category !== undefined) { patch.category = data.category; changed.category = data.category; }
+  // Slice 5 fields
+  if (data.timeBlockMinutes !== undefined) { patch.timeBlockMinutes = data.timeBlockMinutes; changed.timeBlockMinutes = data.timeBlockMinutes; }
+  if (data.linkedSopId !== undefined) { patch.linkedSopId = data.linkedSopId; changed.linkedSopId = data.linkedSopId; }
+  if (data.parentTaskId !== undefined) { patch.parentTaskId = data.parentTaskId; changed.parentTaskId = data.parentTaskId; }
+  if (data.recurrenceCron !== undefined) { patch.recurrenceCron = data.recurrenceCron; changed.recurrenceCron = data.recurrenceCron; }
+  if (data.recurrenceNextRun !== undefined) {
+    patch.recurrenceNextRun = data.recurrenceNextRun ? new Date(data.recurrenceNextRun) : null;
+    changed.recurrenceNextRun = data.recurrenceNextRun;
+  }
 
   const [row] = await db.update(tasks).set(patch).where(eq(tasks.id, id)).returning();
   if (!row) return null;
+  // One activity event per `updateTask` call rather than one per field —
+  // the feed stays readable; the payload carries the diff for anyone who
+  // wants to drill in.
+  if (Object.keys(changed).length > 0) {
+    await logActivity(id, requester?.userId ?? null, 'task_updated', changed);
+  }
   const commentsMap = await loadCommentsForTasks([id]);
   return taskToDto(row, commentsMap.get(id) ?? []);
 }
 
-export async function updateTaskStatus(id: string, status: Task['status']): Promise<Task | null> {
+export async function updateTaskStatus(
+  id: string,
+  status: Task['status'],
+  requester?: AuthPayload,
+): Promise<Task | null> {
   const [existing] = await db.select().from(tasks).where(eq(tasks.id, id));
   if (!existing) return null;
   const statusLabels: Record<string, string> = {
@@ -196,11 +259,19 @@ export async function updateTaskStatus(id: string, status: Task['status']): Prom
     .where(eq(tasks.id, id))
     .returning();
   if (!row) return null;
+  await logActivity(id, requester?.userId ?? null, 'status_changed', {
+    from: existing.status,
+    to: status,
+  });
   const commentsMap = await loadCommentsForTasks([id]);
   return taskToDto(row, commentsMap.get(id) ?? []);
 }
 
-export async function addComment(taskId: string, comment: { author: string; text: string }): Promise<TaskComment | null> {
+export async function addComment(
+  taskId: string,
+  comment: { author: string; text: string },
+  requester?: AuthPayload,
+): Promise<TaskComment | null> {
   const [existing] = await db.select().from(tasks).where(eq(tasks.id, taskId));
   if (!existing) return null;
 
@@ -215,6 +286,10 @@ export async function addComment(taskId: string, comment: { author: string; text
     timestamp: (row.createdAt ?? new Date()).toISOString(),
   });
   await db.update(tasks).set({ auditLog, updatedAt: new Date() }).where(eq(tasks.id, taskId));
+  await logActivity(taskId, requester?.userId ?? null, 'comment_added', {
+    commentId: row.id,
+    preview: comment.text.slice(0, 200),
+  });
 
   return commentToDto(row);
 }
@@ -238,6 +313,20 @@ export async function getTaskStats(requester: AuthPayload): Promise<TaskStats> {
       urgent: rows.filter((t) => t.priority === 'urgent').length,
     },
   };
+}
+
+// Slice 5 Day 5 — return tasks whose `parentTaskId` matches the given id.
+// Used by the detail page to render the "Children" / project-tree section.
+// Ordered by createdAt so the tree reads top-to-bottom in insertion order.
+export async function listChildTasks(parentTaskId: string): Promise<Task[]> {
+  const rows = await db
+    .select()
+    .from(tasks)
+    .where(eq(tasks.parentTaskId, parentTaskId))
+    .orderBy(tasks.createdAt);
+  if (rows.length === 0) return [];
+  const commentsMap = await loadCommentsForTasks(rows.map((r) => r.id));
+  return rows.map((r) => taskToDto(r, commentsMap.get(r.id) ?? []));
 }
 
 export async function listTemplates(): Promise<TaskTemplate[]> {

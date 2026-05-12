@@ -11,6 +11,7 @@ import { syncAll as catchrSyncAll } from '../services/ad-spend.service.js';
 import { recordCatchrSync } from '../controllers/ad-spend.controller.js';
 import { syncAllBusinessesFromXero, recordBankFeedSync } from '../services/bank-feed.service.js';
 import { prewarmLeadByteCache } from '../services/cache-prewarm.service.js';
+import { processRecurringTasks } from './recurring-tasks.js';
 import { sendEmail } from '../integrations/resend/resend-client.js';
 import type { ResendSendRequest } from '../integrations/resend/resend-types.js';
 import { emailQueue } from './queue.js';
@@ -264,6 +265,10 @@ new Worker('sync', async (job) => {
       // users never see a cold-miss 1.5-2s wait. See cache-prewarm.service.ts
       // for the full strategy explanation.
       return prewarmLeadByteCache();
+    }
+    case 'recurring-tasks-tick': {
+      // Slice 5 Day 4 — clone any tasks whose recurrence has come due.
+      return processRecurringTasks();
     }
     default:
       logger.warn({ jobId: job.id, name: job.name }, 'Unknown sync job — ignoring');

@@ -22,3 +22,4 @@ export * from './tasks.js';
 export * from './staff.js';
 export * from './bank-feed.js';
 export * from './creative-approvals.js';
+export * from './sos-help.js';
