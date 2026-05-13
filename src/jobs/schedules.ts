@@ -15,6 +15,17 @@ export async function registerSchedules() {
     data: {},
   });
 
+  // Auto-invoice (Sam Loom #14) — Mondays 09:00 UTC. For each business,
+  // bills clients for the previous Mon-Sun's lead deliveries. Replaces the
+  // external Make.com automation. Idempotent: re-running the same week is
+  // a no-op (status='skipped'), guarded by auto_invoice_runs.
+  await invoiceQueue.upsertJobScheduler('auto-invoice-weekly', {
+    pattern: '0 9 * * 1', // Mondays at 09:00 UTC
+  }, {
+    name: 'auto-invoice-weekly',
+    data: {},
+  });
+
   // Sync LeadByte data every 2 minutes for near-live reporting.
   // (1 min is aggressive against LeadByte rate limits; 2 min is Sam's
   // "every minute or so" with headroom.)
