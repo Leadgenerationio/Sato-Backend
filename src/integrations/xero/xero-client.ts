@@ -297,29 +297,20 @@ interface XeroCashValidationItem {
  * bank itself reports (and the one users compare against the bank's app),
  * not Xero's GL closing balance which is inflated by unreconciled receipts.
  *
- * Sam Loom #1: previously this returned the Xero ledger closing balance
- * (BankSummary's "Closing Balance" column), which includes approved-but-
- * unreconciled transactions and so didn't match the £52,446 Sam sees on
- * his Xero dashboard for Clinical Marketing Solutions (vs the £113,515
- * we were showing). The fix is to prefer `Account.Balance` from the
- * `/Accounts` endpoint — Xero populates this with the bank's reported
- * balance for BANK-type accounts, matching Sam's expected number.
+ * Sam Loom #1: dashboard was showing £113,515 (the GL ledger figure that
+ * BankSummary returned) instead of the £52,446 statement balance Sam sees
+ * on his Xero dashboard for Clinical Marketing Solutions.
  *
  * Precedence per account:
- *   1. `Account.Balance` (statement balance — what Sam wants)
- *   2. BankSummary closing as a fallback for old accounts without it
- *
- * Combines (in precedence order):
- *   1. Finance API /CashValidation     → statementBalance + asOf date + unreconciledLines
- *   2. Accounting API /Accounts.Balance → fallback for orgs without Finance API
- *      (matches the figure shown on Xero's own "Bank Balance" dashboard widget)
+ *   1. Finance API /CashValidation        → statementBalance + asOf date + unreconciledLines
+ *   2. Accounting API /Accounts.Balance   → fallback when Finance API isn't enabled
+ *                                           (matches Xero's own "Bank Balance" widget)
  *   3. '0' when neither is available
  *
  * Required scopes: accounting.settings.read + finance.statements.read.
- * Finance API enablement is the operational unlock for the most accurate
- * figure (true statement balance + reconciliation gap). Without it we still
- * get a usable number via Account.Balance — better than the legacy GL-closing
- * figure that was driving Sam's £113,515 vs £52,446 discrepancy.
+ * Finance API enablement (developer.xero.com → app → scopes) is the
+ * operational unlock for the most accurate figure plus the reconciliation
+ * gap count. Without it we still get a usable number via Account.Balance.
  */
 export async function getBankBalances(): Promise<XeroBankAccount[]> {
   const { accessToken, tenantId } = await getValidToken();

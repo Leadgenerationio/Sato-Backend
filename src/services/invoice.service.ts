@@ -366,11 +366,13 @@ export interface OutstandingInvoicesResult {
 }
 
 /**
- *   bucket='all'     → status in (sent, overdue)   ← default for the dashboard tile
- *   bucket='due'     → status='sent'               ← issued but not yet past due
- *   bucket='overdue' → status='overdue'            ← past due date
+ *   bucket='all'     → status in (sent, authorised, overdue)  ← dashboard default
+ *   bucket='due'     → status in (sent, authorised)           ← awaiting payment, not yet late
+ *   bucket='overdue' → status='overdue'                       ← past due date
  *
- * Excludes 'draft' and 'paid'.
+ * Excludes 'draft' and 'paid'. 'authorised' covers Xero-synced invoices that
+ * are approved + awaiting payment but haven't crossed their due date yet —
+ * same semantics as 'sent' from Sam's perspective.
  */
 export async function getOutstandingInvoices(
   requester: AuthPayload,
@@ -380,9 +382,9 @@ export async function getOutstandingInvoices(
   if (!businessId) return { invoices: [], count: 0, totalOutstanding: '0' };
 
   const statuses =
-    bucket === 'due' ? ['sent'] :
+    bucket === 'due' ? ['sent', 'authorised'] :
     bucket === 'overdue' ? ['overdue'] :
-    ['sent', 'overdue'];
+    ['sent', 'authorised', 'overdue'];
 
   const whereClause = and(
     eq(clients.businessId, businessId),
