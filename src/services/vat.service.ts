@@ -138,3 +138,36 @@ export function lastCompletedQuarterRange(today: Date = new Date()): VatQuarterR
 export function lastQuarterEnd(today: Date = new Date()): string {
   return previousQuarter(today).toDate;
 }
+
+/**
+ * Sam Loom #12 — VAT submissions history. Returns the previous N closed
+ * quarters in newest-first order (excluding the most-recent one, which the
+ * existing widget already shows as "Due to HMRC").
+ *
+ * Used by the VAT widget "Past quarters" expandable section so Sam can see
+ * how much VAT he's filed in prior quarters without leaving Stato.
+ */
+export function historicalQuarters(
+  count: number,
+  today: Date = new Date(),
+  stagger: VatStagger = configuredStagger(),
+): VatQuarterRange[] {
+  if (count <= 0) return [];
+  const ends = enumerateQuarterEnds(today, stagger);
+  const past = ends.filter((d) => d.getTime() < today.getTime()).sort((a, b) => b.getTime() - a.getTime());
+
+  // index 0 of `past` is the most recent closed quarter — that's already the
+  // "Due to HMRC" block, so skip it and start from index 1.
+  const ranges: VatQuarterRange[] = [];
+  for (let i = 1; i <= count && i < past.length; i++) {
+    const end = past[i];
+    const prevEnd = past[i + 1];
+    const start = prevEnd
+      ? new Date(prevEnd.getTime() + 86_400_000)
+      : new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() - 2, 1));
+    const fromDate = iso(start);
+    const toDate = iso(end);
+    ranges.push({ fromDate, toDate, label: labelRange(fromDate, toDate) });
+  }
+  return ranges;
+}

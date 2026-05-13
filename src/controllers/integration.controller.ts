@@ -68,7 +68,7 @@ export async function xeroDisconnect(_req: Request, res: Response) {
  * isolation so a transient TaxSummary failure for one window doesn't blank
  * the other.
  */
-export async function xeroVatLiability(_req: Request, res: Response) {
+export async function xeroVatLiability(req: Request, res: Response) {
   if (!xeroClient.isXeroConfigured()) {
     res.json({ status: 'success', data: { configured: false } });
     return;
@@ -77,23 +77,33 @@ export async function xeroVatLiability(_req: Request, res: Response) {
   const prev = vatService.lastCompletedQuarterRange();
   const curr = vatService.currentQuarterRange();
 
-  const [prevResult, currResult] = await Promise.all([
-    cached(
-      `xero:vat:${prev.fromDate}:${prev.toDate}`,
+  // Sam Loom #12 — clients can request up to 8 historical quarters via
+  // ?history=N. Default 0 keeps the response cheap for the default
+  // dashboard widget mount; the widget asks for ?history=4 only when the
+  // user expands the "Past quarters" section.
+  const requestedHistory = Math.max(
+    0,
+    Math.min(8, Number.parseInt((req.query.history as string) || '0', 10) || 0),
+  );
+  const historyRanges = requestedHistory > 0
+    ? vatService.historicalQuarters(requestedHistory)
+    : [];
+
+  async function fetchRange(r: { fromDate: string; toDate: string; label?: string }) {
+    return cached(
+      `xero:vat:${r.fromDate}:${r.toDate}`,
       XERO_VAT_TTL_SECONDS,
-      () => xeroClient.getVatLiability(prev.fromDate, prev.toDate),
+      () => xeroClient.getVatLiability(r.fromDate, r.toDate),
     ).catch((err) => {
-      logger.warn({ err, range: prev }, 'Xero VAT previous-quarter fetch failed');
-      return { fromDate: prev.fromDate, toDate: prev.toDate, error: err instanceof Error ? err.message : 'fetch failed' };
-    }),
-    cached(
-      `xero:vat:${curr.fromDate}:${curr.toDate}`,
-      XERO_VAT_TTL_SECONDS,
-      () => xeroClient.getVatLiability(curr.fromDate, curr.toDate),
-    ).catch((err) => {
-      logger.warn({ err, range: curr }, 'Xero VAT current-quarter fetch failed');
-      return { fromDate: curr.fromDate, toDate: curr.toDate, error: err instanceof Error ? err.message : 'fetch failed' };
-    }),
+      logger.warn({ err, range: r }, 'Xero VAT fetch failed');
+      return { fromDate: r.fromDate, toDate: r.toDate, error: err instanceof Error ? err.message : 'fetch failed' };
+    });
+  }
+
+  const [prevResult, currResult, ...historyResults] = await Promise.all([
+    fetchRange(prev),
+    fetchRange(curr),
+    ...historyRanges.map((r) => fetchRange(r)),
   ]);
 
   res.json({
@@ -104,6 +114,7 @@ export async function xeroVatLiability(_req: Request, res: Response) {
       stagger,
       previousQuarter: { ...prevResult, label: prev.label },
       currentQuarter: { ...currResult, label: curr.label },
+      history: historyResults.map((r, i) => ({ ...r, label: historyRanges[i].label })),
     },
   });
 }

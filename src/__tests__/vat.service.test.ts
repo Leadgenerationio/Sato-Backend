@@ -79,3 +79,38 @@ describe('vat.service — Stagger 3 (MAY/AUG/NOV/FEB quarters)', () => {
     expect(vat.currentQuarter(today, 3)).toEqual({ fromDate: '2026-06-01', toDate: '2026-07-01' });
   });
 });
+
+describe('vat.service — historicalQuarters (Sam Loom #12)', () => {
+  it('returns the requested count of past quarters skipping the most-recent one', () => {
+    // Today = 11 May 2026 stagger 2 (CMS):
+    //   previousQuarter = Feb-Apr 2026 (most-recent closed — skipped)
+    //   history[0]      = Nov 2025-Jan 2026
+    //   history[1]      = Aug-Oct 2025
+    //   history[2]      = May-Jul 2025
+    const today = d('2026-05-11');
+    const hist = vat.historicalQuarters(3, today, 2);
+    expect(hist).toHaveLength(3);
+    expect(hist[0]).toMatchObject({ fromDate: '2025-11-01', toDate: '2026-01-31' });
+    expect(hist[1]).toMatchObject({ fromDate: '2025-08-01', toDate: '2025-10-31' });
+    expect(hist[2]).toMatchObject({ fromDate: '2025-05-01', toDate: '2025-07-31' });
+    hist.forEach((r) => expect(r.label).toMatch(/\d{4}/));
+  });
+
+  it('count=0 returns empty', () => {
+    expect(vat.historicalQuarters(0, d('2026-05-11'), 2)).toEqual([]);
+  });
+
+  it('caps at the available enumeration window (no negative-year crash)', () => {
+    // Request more quarters than the [year-1, year+1] window can supply.
+    const hist = vat.historicalQuarters(20, d('2026-05-11'), 2);
+    expect(hist.length).toBeGreaterThan(0);
+    expect(hist.length).toBeLessThan(20);
+  });
+
+  it('stagger 1 calendar quarters: today 2026-05-11 → history = Oct-Dec 2025, Jul-Sep 2025…', () => {
+    const today = d('2026-05-11');
+    const hist = vat.historicalQuarters(2, today, 1);
+    expect(hist[0]).toMatchObject({ fromDate: '2025-10-01', toDate: '2025-12-31' });
+    expect(hist[1]).toMatchObject({ fromDate: '2025-07-01', toDate: '2025-09-30' });
+  });
+});
