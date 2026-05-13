@@ -3,6 +3,9 @@ import { db } from '../config/database.js';
 import { clientDocuments } from '../db/schema/client-documents.js';
 import { clients } from '../db/schema/clients.js';
 import { logClientActivity } from './client-activity.service.js';
+import { deleteFile, isR2Configured } from '../integrations/r2/r2-client.js';
+import type { R2Folder } from '../integrations/r2/r2-types.js';
+import { logger } from '../utils/logger.js';
 import type { AuthPayload } from '../types/index.js';
 
 export interface ClientDocument {
@@ -98,15 +101,42 @@ export async function removeDocument(
   requester: AuthPayload,
 ): Promise<boolean> {
   if (!(await clientInScope(clientId, requester))) return false;
-  const deleted = await db
+
+  // Read the row first so we have the R2 key/folder to delete the underlying
+  // object too. Sam audit #11: the previous behaviour only deleted the DB
+  // row, leaving the file in R2 — confusing because the UI toast then said
+  // "File still exists in storage", which read as "the delete didn't work".
+  const [existing] = await db
+    .select({
+      id: clientDocuments.id,
+      name: clientDocuments.name,
+      r2Key: clientDocuments.r2Key,
+      folder: clientDocuments.folder,
+    })
+    .from(clientDocuments)
+    .where(and(eq(clientDocuments.id, docId), eq(clientDocuments.clientId, clientId)));
+  if (!existing) return false;
+
+  await db
     .delete(clientDocuments)
-    .where(and(eq(clientDocuments.id, docId), eq(clientDocuments.clientId, clientId)))
-    .returning({ id: clientDocuments.id, name: clientDocuments.name });
-  if (deleted.length > 0) {
-    await logClientActivity(clientId, requester.userId ?? null, 'document_removed', {
-      documentId: deleted[0].id,
-      name: deleted[0].name,
-    });
+    .where(and(eq(clientDocuments.id, docId), eq(clientDocuments.clientId, clientId)));
+
+  if (isR2Configured() && existing.r2Key) {
+    try {
+      await deleteFile((existing.folder ?? 'misc') as R2Folder, existing.r2Key);
+    } catch (err) {
+      // Don't block the DB deletion on a failed R2 cleanup — log it so we
+      // can sweep orphans later if needed.
+      logger.warn(
+        { err, clientId, docId, r2Key: existing.r2Key },
+        'R2 delete failed during client-document removal — DB row already deleted',
+      );
+    }
   }
-  return deleted.length > 0;
+
+  await logClientActivity(clientId, requester.userId ?? null, 'document_removed', {
+    documentId: existing.id,
+    name: existing.name,
+  });
+  return true;
 }
