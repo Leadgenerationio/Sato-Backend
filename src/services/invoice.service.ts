@@ -60,20 +60,45 @@ export interface InvoiceDetail extends InvoiceSummary {
 type InvoiceRow = typeof invoices.$inferSelect;
 type ClientRow = typeof clients.$inferSelect;
 
+/**
+ * Sam Loom #6: an invoice that's past its due date but still stored with
+ * Xero's `authorised` (or `sent`) status should display as "overdue". Stored
+ * `status` only flips to 'overdue' when an external sync runs, but the
+ * dashboard / list views need the live derived value so the badge matches
+ * reality. Re-compute `daysOverdue` from `dueDate` for the same reason —
+ * the stored column can go stale between cron runs.
+ */
+export function computeDaysOverdue(dueDate: Date | null, paidDate: Date | null, status: string | null): number {
+  if (paidDate || status === 'paid') return 0;
+  if (!dueDate) return 0;
+  const diffMs = Date.now() - dueDate.getTime();
+  const days = Math.floor(diffMs / 86_400_000);
+  return days > 0 ? days : 0;
+}
+
+export function deriveDisplayStatus(storedStatus: string | null, daysOverdue: number): string {
+  const s = storedStatus ?? 'draft';
+  if (s === 'paid' || s === 'overdue' || s === 'draft') return s;
+  // 'sent' or 'authorised' but past due → present as 'overdue' to the UI.
+  if ((s === 'sent' || s === 'authorised') && daysOverdue > 0) return 'overdue';
+  return s;
+}
+
 function invoiceToSummary(row: InvoiceRow, client: ClientRow): InvoiceSummary {
+  const liveDaysOverdue = computeDaysOverdue(row.dueDate ?? null, row.paidDate ?? null, row.status);
   return {
     id: row.id,
     invoiceNumber: row.invoiceNumber ?? '',
     clientId: row.clientId,
     clientName: client.companyName,
-    status: row.status ?? 'draft',
+    status: deriveDisplayStatus(row.status, liveDaysOverdue),
     currency: row.currency ?? 'GBP',
     subtotal: String(row.subtotal ?? '0'),
     vatAmount: String(row.vatAmount ?? '0'),
     total: String(row.total ?? '0'),
     dueDate: (row.dueDate ?? new Date()).toISOString(),
     paidDate: row.paidDate ? row.paidDate.toISOString() : null,
-    daysOverdue: row.daysOverdue ?? 0,
+    daysOverdue: liveDaysOverdue,
     createdAt: (row.createdAt ?? new Date()).toISOString(),
     xeroInvoiceId: row.xeroInvoiceId,
   };
@@ -98,13 +123,27 @@ async function loadClientMap(businessId: string): Promise<Map<string, ClientRow>
   return map;
 }
 
+export type InvoiceSortBy = 'createdAt' | 'dueDate' | 'total' | 'status' | 'invoiceNumber';
+export type SortDir = 'asc' | 'desc';
+
 export interface ListInvoicesParams {
   status?: string;
   clientId?: string;
   search?: string;
   page?: number;
   limit?: number;
+  /** Sam Loom #7 — column-header sorting on /finance/invoices. */
+  sortBy?: InvoiceSortBy;
+  sortDir?: SortDir;
 }
+
+const SORT_COLUMNS = {
+  createdAt: invoices.createdAt,
+  dueDate: invoices.dueDate,
+  total: invoices.total,
+  status: invoices.status,
+  invoiceNumber: invoices.invoiceNumber,
+} as const;
 
 export interface ListInvoicesResult {
   items: InvoiceSummary[];
@@ -132,7 +171,28 @@ export async function listInvoices(
 
   const filters = [eq(clients.businessId, businessId)];
   if (params.status && params.status !== 'all') {
-    filters.push(eq(invoices.status, params.status));
+    // #6: the stored `status` doesn't auto-flip when an invoice crosses
+    // its due date, so the SQL filter expands to match what the UI labels
+    // the row as. Late sent/authorised count as overdue; non-late
+    // sent/authorised count as their stored bucket.
+    if (params.status === 'overdue') {
+      filters.push(sql`(
+        ${invoices.status} = 'overdue'
+        OR (
+          ${invoices.status} IN ('sent', 'authorised')
+          AND ${invoices.paidDate} IS NULL
+          AND ${invoices.dueDate} IS NOT NULL
+          AND ${invoices.dueDate} < now()
+        )
+      )`);
+    } else if (params.status === 'sent' || params.status === 'authorised') {
+      filters.push(sql`(
+        ${invoices.status} = ${params.status}
+        AND (${invoices.dueDate} IS NULL OR ${invoices.dueDate} >= now() OR ${invoices.paidDate} IS NOT NULL)
+      )`);
+    } else {
+      filters.push(eq(invoices.status, params.status));
+    }
   }
   if (params.clientId) {
     filters.push(eq(invoices.clientId, params.clientId));
@@ -146,6 +206,12 @@ export async function listInvoices(
   }
   const whereClause = and(...filters);
 
+  // Whitelist sortBy to a known column so a hostile query param can't be
+  // used to ORDER BY arbitrary expressions. Default: createdAt DESC (matches
+  // historical behaviour).
+  const sortColumn = params.sortBy && SORT_COLUMNS[params.sortBy] ? SORT_COLUMNS[params.sortBy] : invoices.createdAt;
+  const sortOrder = params.sortDir === 'asc' ? sortColumn : desc(sortColumn);
+
   // Page rows, total count, and the client-row map (for invoiceToSummary)
   // run in parallel. The client map is scoped per-business and stays small;
   // bundling the join into the page query is possible but Drizzle's row
@@ -157,7 +223,7 @@ export async function listInvoices(
       .from(invoices)
       .innerJoin(clients, eq(clients.id, invoices.clientId))
       .where(whereClause)
-      .orderBy(desc(invoices.createdAt))
+      .orderBy(sortOrder)
       .limit(pageSize)
       .offset(offset),
     db
@@ -366,13 +432,14 @@ export interface OutstandingInvoicesResult {
 }
 
 /**
- *   bucket='all'     → status in (sent, authorised, overdue)  ← dashboard default
- *   bucket='due'     → status in (sent, authorised)           ← awaiting payment, not yet late
- *   bucket='overdue' → status='overdue'                       ← past due date
+ *   bucket='all'     → every outstanding invoice (sent, authorised, overdue) ← dashboard default
+ *   bucket='due'     → sent/authorised AND not past due date                 ← awaiting payment
+ *   bucket='overdue' → status='overdue' OR (sent/authorised AND past due)    ← treat late as overdue
  *
- * Excludes 'draft' and 'paid'. 'authorised' covers Xero-synced invoices that
- * are approved + awaiting payment but haven't crossed their due date yet —
- * same semantics as 'sent' from Sam's perspective.
+ * Excludes 'draft' and 'paid'. The bucket logic mirrors `invoiceToSummary`'s
+ * display-status derivation (#6): the stored `status` doesn't auto-flip when
+ * an invoice crosses its due date, so we expand the SQL filter to match what
+ * the UI labels each row as.
  */
 export async function getOutstandingInvoices(
   requester: AuthPayload,
@@ -381,14 +448,27 @@ export async function getOutstandingInvoices(
   const businessId = requester.businessId;
   if (!businessId) return { invoices: [], count: 0, totalOutstanding: '0' };
 
-  const statuses =
-    bucket === 'due' ? ['sent', 'authorised'] :
-    bucket === 'overdue' ? ['overdue'] :
-    ['sent', 'authorised', 'overdue'];
+  const bucketFilter =
+    bucket === 'overdue'
+      ? sql`(
+          ${invoices.status} = 'overdue'
+          OR (
+            ${invoices.status} IN ('sent', 'authorised')
+            AND ${invoices.paidDate} IS NULL
+            AND ${invoices.dueDate} IS NOT NULL
+            AND ${invoices.dueDate} < now()
+          )
+        )`
+      : bucket === 'due'
+      ? sql`(
+          ${invoices.status} IN ('sent', 'authorised')
+          AND (${invoices.dueDate} IS NULL OR ${invoices.dueDate} >= now() OR ${invoices.paidDate} IS NOT NULL)
+        )`
+      : inArray(invoices.status, ['sent', 'authorised', 'overdue']);
 
   const whereClause = and(
     eq(clients.businessId, businessId),
-    inArray(invoices.status, statuses),
+    bucketFilter,
   );
 
   const [rows, summaryResult, clientMap] = await Promise.all([
