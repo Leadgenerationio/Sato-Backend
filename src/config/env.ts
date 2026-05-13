@@ -101,6 +101,18 @@ export const env = {
   // 503 so the FE shows "Attio not configured".
   ATTIO_API_KEY: v('ATTIO_API_KEY'),
   ATTIO_BASE_URL: v('ATTIO_BASE_URL', 'https://api.attio.com/v2'),
+
+  // Twilio Programmable SMS — outbound ops alerts to Sam. When ANY of
+  // SID/TOKEN/FROM are missing, twilio-client returns a mock id and the
+  // alert-sms worker hard no-ops (preserves backlog until creds land).
+  TWILIO_ACCOUNT_SID: v('TWILIO_ACCOUNT_SID'),
+  TWILIO_AUTH_TOKEN: v('TWILIO_AUTH_TOKEN'),
+  TWILIO_FROM_NUMBER: v('TWILIO_FROM_NUMBER'),
+
+  // Destination phone for system_error SMS alerts. E.164 format
+  // (e.g. "+447776531268"). When blank, alert-sms worker logs one
+  // startup warning and stays idle.
+  OPS_ALERT_PHONE: v('OPS_ALERT_PHONE'),
 };
 
 export function isProduction(): boolean {

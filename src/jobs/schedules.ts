@@ -64,5 +64,14 @@ export async function registerSchedules() {
     data: {},
   });
 
+  // SMS alerts to Sam — poll the notifications table every 30s for unsent
+  // system_error rows. Hard no-op in mock mode (see alert-sms.service.ts).
+  await syncQueue.upsertJobScheduler('sms-alert-poll', {
+    every: 30_000,
+  }, {
+    name: 'sms-alert-poll',
+    data: {},
+  });
+
   logger.info('Scheduled jobs registered');
 }

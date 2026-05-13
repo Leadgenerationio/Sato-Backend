@@ -12,6 +12,7 @@ import { recordCatchrSync } from '../controllers/ad-spend.controller.js';
 import { syncAllBusinessesFromXero, recordBankFeedSync } from '../services/bank-feed.service.js';
 import { prewarmLeadByteCache } from '../services/cache-prewarm.service.js';
 import { processRecurringTasks } from './recurring-tasks.js';
+import { pollOnce as pollAlertSms } from '../services/alert-sms.service.js';
 import { sendEmail } from '../integrations/resend/resend-client.js';
 import type { ResendSendRequest } from '../integrations/resend/resend-types.js';
 import { emailQueue } from './queue.js';
@@ -265,6 +266,12 @@ new Worker('sync', async (job) => {
       // users never see a cold-miss 1.5-2s wait. See cache-prewarm.service.ts
       // for the full strategy explanation.
       return prewarmLeadByteCache();
+    }
+    case 'sms-alert-poll': {
+      // Every 30s — paged out to Sam's mobile via Twilio. Hard no-ops in
+      // mock mode (see alert-sms.service.ts) so the backlog is preserved
+      // until real Twilio creds land on Railway.
+      return pollAlertSms();
     }
     case 'recurring-tasks-tick': {
       // Slice 5 Day 4 — clone any tasks whose recurrence has come due.
