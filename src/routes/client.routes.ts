@@ -26,7 +26,12 @@ const listClientsQuerySchema = z.object({
 // `['weekly_auto', 'monthly_validated', 'custom']`. That mismatch was the
 // "Validation failed, billing workflow invalid" Sam hit in his Loom (#21):
 // the frontend was sending the correct DB values which zod then rejected.
-const clientStatusEnum = z.enum(['prospect', 'onboarding', 'active', 'paused', 'churned']);
+// Sam Loom #31 (13 May response) — only 3 statuses supported going forward.
+// The DB enum still has 'prospect' + 'paused' for back-compat, but the
+// API refuses to accept them (existing rows migrated via 0022). UI labels
+// live on the FE: 'onboarding' → "Onboarding", 'active' → "Active Client",
+// 'churned' → "Client Churned".
+const clientStatusEnum = z.enum(['onboarding', 'active', 'churned']);
 const onboardingEnum = z.enum(['pending', 'documents_received', 'agreement_signed', 'active']);
 const billingWorkflowEnum = z.enum(['weekly_auto', 'monthly_validated', 'custom']);
 const contactTypeEnum = z.enum(['primary', 'billing', 'compliance', 'other']);

@@ -110,7 +110,11 @@ function toSummary(row: ClientRow, activeCampaigns: number, totalRevenue: number
     companyName: row.companyName,
     contactName: row.contactName ?? '',
     contactEmail: row.contactEmail ?? '',
-    status: row.status ?? 'prospect',
+    // Sam Loom #31 — legacy rows in 'prospect' / 'paused' have been migrated
+    // by 0022, but the column is technically nullable. Fall back to 'onboarding'
+    // (the new "first state") instead of 'prospect' so the FE label map never
+    // sees the deprecated value.
+    status: row.status ?? 'onboarding',
     currency: row.currency ?? 'GBP',
     creditScore: row.creditScore,
     activeCampaigns,
@@ -340,7 +344,11 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
       vatRate: data.vatRate != null ? String(data.vatRate) : '20.00',
       leadPrice: data.leadPrice != null ? String(data.leadPrice) : null,
       billingWorkflow: (data.billingWorkflow as ClientRow['billingWorkflow']) ?? 'weekly_auto',
-      status: 'prospect',
+      // Sam Loom #31 — new clients default to 'onboarding' (was 'prospect').
+      // Caller can override via data.status (e.g. test fixtures setting up
+      // active or churned clients directly). zod constrains it to one of
+      // the 3 allowed values at the route layer.
+      status: (data.status as ClientRow['status']) ?? 'onboarding',
       onboardingStatus: 'pending',
       notes: data.notes,
       leadbyteClientId: data.leadbyteClientId,

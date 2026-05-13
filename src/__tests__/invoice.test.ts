@@ -34,8 +34,8 @@ describe('Invoice API', () => {
       });
     realClientId = createClient.body.data.client.id;
 
-    // Client starts as 'prospect' — invoice dropdown only shows 'active'.
-    // Activate it for the dropdown test to find it.
+    // Client starts as 'onboarding' (Sam Loom #31, was 'prospect') — invoice
+    // dropdown only shows 'active'. Activate it for the dropdown test.
     await request(app)
       .put(`/api/v1/clients/${realClientId}`)
       .set('Authorization', `Bearer ${ownerToken}`)

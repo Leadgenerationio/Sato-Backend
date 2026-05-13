@@ -84,7 +84,51 @@ describe('Client API', () => {
       });
       expect(res.status).toBe(201);
       expect(res.body.data.client.companyName).toBe('Test Corp');
-      expect(res.body.data.client.status).toBe('prospect');
+      // Sam Loom #31 (13 May) — new clients default to 'onboarding' (was 'prospect').
+      expect(res.body.data.client.status).toBe('onboarding');
+    });
+
+    // ─── Sam Loom #31 — only 3 status values accepted ────────────────────
+    it('rejects status=prospect (dropped from enum on 13 May)', async () => {
+      const res = await request(app)
+        .post('/api/v1/clients')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({
+          companyName: `Reject Prospect ${Date.now()}`,
+          contactName: 'X',
+          contactEmail: 'x@y.com',
+          status: 'prospect',
+        });
+      expect(res.status).toBe(400);
+    });
+
+    it('rejects status=paused (dropped from enum on 13 May)', async () => {
+      const res = await request(app)
+        .post('/api/v1/clients')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({
+          companyName: `Reject Paused ${Date.now()}`,
+          contactName: 'X',
+          contactEmail: 'x@y.com',
+          status: 'paused',
+        });
+      expect(res.status).toBe(400);
+    });
+
+    it('accepts all three new status values: onboarding, active, churned', async () => {
+      for (const status of ['onboarding', 'active', 'churned'] as const) {
+        const res = await request(app)
+          .post('/api/v1/clients')
+          .set('Authorization', `Bearer ${ownerToken}`)
+          .send({
+            companyName: `Status ${status} ${Date.now()}`,
+            contactName: 'X',
+            contactEmail: 'x@y.com',
+            status,
+          });
+        expect(res.status).toBe(201);
+        expect(res.body.data.client.status).toBe(status);
+      }
     });
 
     // Sam asked for credit checks to auto-trigger on buyer creation so staff
