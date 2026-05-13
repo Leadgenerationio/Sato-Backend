@@ -460,6 +460,11 @@ export interface PnlSummary {
   revenue: string;
   fixedCosts: string;
   oneOffCosts: string;
+  /** Bank-fed advertising rows (Sam Loom #13) — Facebook/Google card bills
+   *  the user categorises as the 'advertising' bucket. Separate from
+   *  Catchr's `adSpend` so the two views (bank-side vs API-side) stay
+   *  independent. */
+  advertisingCosts: string;
   adSpend: string;
   totalCosts: string;
   netProfit: string;
@@ -643,11 +648,13 @@ export async function getPnlSummary(
 
   let fixed = 0;
   let oneOff = 0;
+  let advertising = 0;
   let uncategorisedCount = 0;
   for (const row of costByBucket) {
     const amount = parseFloat(row.total) || 0;
     if (row.bucket === 'fixed') fixed += amount;
     else if (row.bucket === 'one_off') oneOff += amount;
+    else if (row.bucket === 'advertising') advertising += amount;
     else uncategorisedCount = Math.round(amount); // null bucket = uncategorised; we'll re-count below
   }
 
@@ -695,7 +702,7 @@ export async function getPnlSummary(
 
   const revenue = parseFloat(revenueRow?.total ?? '0');
   const adSpendTotal = parseFloat(adSpendRow?.total ?? '0');
-  const totalCosts = fixed + oneOff + adSpendTotal;
+  const totalCosts = fixed + oneOff + advertising + adSpendTotal;
   const netProfit = revenue - totalCosts;
   const margin = revenue > 0 ? netProfit / revenue : 0;
 
@@ -706,6 +713,7 @@ export async function getPnlSummary(
     revenue: revenue.toFixed(2),
     fixedCosts: fixed.toFixed(2),
     oneOffCosts: oneOff.toFixed(2),
+    advertisingCosts: advertising.toFixed(2),
     adSpend: adSpendTotal.toFixed(2),
     totalCosts: totalCosts.toFixed(2),
     netProfit: netProfit.toFixed(2),
