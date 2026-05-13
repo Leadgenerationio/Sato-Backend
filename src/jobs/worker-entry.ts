@@ -13,6 +13,7 @@ import { syncAllBusinessesFromXero, recordBankFeedSync } from '../services/bank-
 import { prewarmLeadByteCache } from '../services/cache-prewarm.service.js';
 import { processRecurringTasks } from './recurring-tasks.js';
 import { pollOnce as pollAlertSms } from '../services/alert-sms.service.js';
+import { syncAllClientsAcrossBusinesses } from '../services/global-invoice-sync.service.js';
 import { sendEmail } from '../integrations/resend/resend-client.js';
 import type { ResendSendRequest } from '../integrations/resend/resend-types.js';
 import { emailQueue } from './queue.js';
@@ -276,6 +277,12 @@ new Worker('sync', async (job) => {
     case 'recurring-tasks-tick': {
       // Slice 5 Day 4 — clone any tasks whose recurrence has come due.
       return processRecurringTasks();
+    }
+    case 'global-invoice-sync': {
+      // Hourly — pull invoices from Xero for ALL clients across ALL businesses
+      // so the Overdue/Owed dashboard widget stays current without per-client
+      // manual triggers. Runs at :15 (bank-feed at :10, Catchr at :05).
+      return syncAllClientsAcrossBusinesses();
     }
     default:
       logger.warn({ jobId: job.id, name: job.name }, 'Unknown sync job — ignoring');

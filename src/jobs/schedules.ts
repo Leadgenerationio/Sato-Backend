@@ -73,5 +73,16 @@ export async function registerSchedules() {
     data: {},
   });
 
+  // Global Xero invoice sync — iterate ALL clients across ALL businesses once
+  // per hour so the Overdue/Owed dashboard widget never needs a manual
+  // per-client trigger. Offset 15 min from bank-feed-hourly-sync (:10) to
+  // avoid hammering Xero simultaneously.
+  await syncQueue.upsertJobScheduler('global-invoice-sync', {
+    pattern: '15 * * * *',
+  }, {
+    name: 'global-invoice-sync',
+    data: {},
+  });
+
   logger.info('Scheduled jobs registered');
 }
