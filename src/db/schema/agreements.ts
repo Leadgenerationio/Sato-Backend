@@ -1,5 +1,6 @@
 import { pgTable, uuid, varchar, boolean, timestamp, jsonb, index } from 'drizzle-orm/pg-core';
 import { clients } from './clients.js';
+import { agreementTemplates } from './agreement-templates.js';
 
 // #47-50 PDF editor. A placed field on an outbound agreement PDF —
 // the signer's screen shows a labelled box at this position and the
@@ -55,6 +56,11 @@ export const agreements = pgTable('agreements', {
   // Non-null = role-based invite with pre-placed fields. Both flows are
   // supported on the same endpoint for backward compat.
   fields: jsonb('fields').$type<AgreementField[]>(),
+
+  // PDF template auto-populate (P12)
+  templateId: uuid('template_id').references(() => agreementTemplates.id),
+  populatedPdfR2Key: varchar('populated_pdf_r2_key', { length: 500 }),
+  overrides: jsonb('overrides').notNull().default({}),
 
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),

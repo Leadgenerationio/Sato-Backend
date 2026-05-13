@@ -23,6 +23,7 @@ import { dashboardRoutes } from './dashboard.routes.js';
 import { sosHelpRoutes } from './sos-help.routes.js';
 import { autoInvoiceRoutes } from './auto-invoice.routes.js';
 import { healthRoutes } from './health.routes.js';
+import { agreementTemplateRoutes } from './agreement-template.routes.js';
 export const router: RouterType = Router();
 
 // Public — must be before any auth middleware on individual routers.
@@ -55,3 +56,4 @@ router.use('/', creativeRoutes);
 router.use('/finance/bank-feed', bankFeedRoutes);
 router.use('/finance/auto-invoice', autoInvoiceRoutes);
 router.use('/dashboard', dashboardRoutes);
+router.use('/agreement-templates', agreementTemplateRoutes);

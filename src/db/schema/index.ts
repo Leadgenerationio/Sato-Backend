@@ -26,3 +26,4 @@ export * from './sos-help.js';
 export * from './client-activity.js';
 export * from './client-emails.js';
 export * from './auto-invoice-runs.js';
+export * from './agreement-templates.js';
