@@ -186,6 +186,45 @@ describe('Endole client — live API', () => {
 
     await expect(endole.runCreditCheck('12345678', 'Blocked Ltd')).rejects.toThrow(/403/);
   });
+
+  // Sam Loom 13 May 500 — the manual /credit-check endpoint returned a generic
+  // 500 because endole-client threw a plain Error. The real upstream response
+  // was {"error_code":"102","error_type":"insufficient-credit"} (Endole balance
+  // empty). We now translate that into a typed AppError so the FE can render
+  // a meaningful message ("Endole balance exhausted") instead of "Internal
+  // server error", and so the upstream details are preserved on the error.
+  it('throws CreditProviderError with code "credit_provider_balance_exhausted" on Endole error_code 102', async () => {
+    global.fetch = vi.fn(async () =>
+      mockEndoleErr(403, {
+        error: 'You do not have enough credit in your balance.',
+        error_code: '102',
+        error_type: 'insufficient-credit',
+      }),
+    ) as unknown as typeof fetch;
+
+    const err = await endole.runCreditCheck('12201105', 'Real Co').catch((e: unknown) => e);
+    const e = err as Error & { statusCode?: number; code?: string; upstreamStatus?: number; upstreamCode?: string };
+    expect(e).toBeInstanceOf(Error);
+    expect(e.statusCode).toBe(502);
+    expect(e.code).toBe('credit_provider_balance_exhausted');
+    expect(e.upstreamStatus).toBe(403);
+    expect(e.upstreamCode).toBe('102');
+    // Existing test contract: status code is still present in the message.
+    expect(e.message).toMatch(/403/);
+  });
+
+  it('throws CreditProviderError with code "credit_provider_failed" on other upstream HTTP errors', async () => {
+    global.fetch = vi.fn(async () =>
+      mockEndoleErr(429, { error: { code: '204', message: 'throttling-too-many' } }),
+    ) as unknown as typeof fetch;
+
+    const err = await endole.runCreditCheck('12345678', 'Busy Ltd').catch((e: unknown) => e);
+    const e = err as Error & { statusCode?: number; code?: string; upstreamStatus?: number; upstreamCode?: string };
+    expect(e.statusCode).toBe(502);
+    expect(e.code).toBe('credit_provider_failed');
+    expect(e.upstreamStatus).toBe(429);
+    expect(e.upstreamCode).toBe('204');
+  });
 });
 
 describe('Endole client — unconfigured fallback', () => {

@@ -1,6 +1,7 @@
 import { logger } from '../../utils/logger.js';
 import type { EndoleCreditReport } from './endole-types.js';
 import { scoreToRiskRating } from '../credit-check/types.js';
+import { CreditProviderError } from '../credit-check/errors.js';
 
 /**
  * Endole API v1.1 — UK company credit checks.
@@ -120,7 +121,36 @@ export async function runCreditCheck(companyNumber: string, companyName: string)
   if (!res.ok) {
     const body = await res.text();
     logger.error({ status: res.status, companyNumber, body }, 'Endole credit_checks failed');
-    throw new Error(`Endole credit_checks failed: ${res.status}`);
+    // Endole returns two shapes:
+    //   1. { error: { code, message } }                          (most errors)
+    //   2. { error: "...", error_code, error_type }              (billing/auth)
+    // Parse both so we can identify the balance-exhausted case (error_code
+    // "102") — that one needs a distinct FE message because the fix is for Sam
+    // to top up endole.co.uk, not for a developer to investigate.
+    let parsed: unknown = null;
+    try { parsed = JSON.parse(body); } catch { /* non-JSON body, leave null */ }
+    const p = (parsed ?? {}) as { error?: unknown; error_code?: unknown };
+    const nestedCode = typeof p.error === 'object' && p.error !== null
+      ? (p.error as { code?: unknown }).code
+      : undefined;
+    const upstreamCode = String(p.error_code ?? nestedCode ?? '') || undefined;
+    const upstreamMsg = typeof p.error === 'string'
+      ? p.error
+      : typeof p.error === 'object' && p.error !== null
+        ? (p.error as { message?: unknown }).message as string | undefined
+        : undefined;
+
+    if (upstreamCode === '102') {
+      throw new CreditProviderError(
+        `Endole credit_checks failed: ${res.status} — provider balance exhausted (top up at endole.co.uk)`,
+        { code: 'credit_provider_balance_exhausted', upstreamStatus: res.status, upstreamCode },
+      );
+    }
+    const suffix = upstreamMsg ? ` — ${upstreamMsg}` : '';
+    throw new CreditProviderError(
+      `Endole credit_checks failed: ${res.status}${suffix}`,
+      { code: 'credit_provider_failed', upstreamStatus: res.status, upstreamCode },
+    );
   }
 
   const data = (await res.json()) as EndoleApiResponse;
