@@ -417,6 +417,128 @@ export async function syncInvoicesFromXero(
   };
 }
 
+// ─── Global Xero invoice sync (Sam audit #2 — "Overdue widget = 0") ───────
+//
+// Until this existed, syncInvoicesFromXero was per-client manual. The
+// dashboard "Invoices Owed In" widget reads the local `invoices` table —
+// any client never manually synced contributed 0 to the total, so the
+// widget legitimately read empty even when Xero had a pile of unpaid
+// invoices. This sweep runs hourly per business and calls the existing
+// per-client sync for each linked client.
+//
+// Errors per-client are caught + logged on a summary object so one bad
+// client (missing Xero contact, 403, etc.) doesn't abort the sweep for
+// the rest of the tenant.
+
+export interface SyncInvoicesAllResult {
+  businessId: string;
+  clientsScanned: number;
+  clientsSucceeded: number;
+  clientsSkipped: number;
+  clientsFailed: number;
+  invoicesSynced: number;
+  finishedAt: string;
+  errors: Array<{ clientId: string; companyName: string; error: string }>;
+}
+
+export async function syncInvoicesForBusiness(
+  businessId: string,
+): Promise<SyncInvoicesAllResult> {
+  const systemAuth: AuthPayload = {
+    userId: 'system',
+    role: 'owner',
+    email: 'system@stato.local',
+    businessId,
+  };
+
+  if (!isXeroConfigured()) {
+    return {
+      businessId,
+      clientsScanned: 0,
+      clientsSucceeded: 0,
+      clientsSkipped: 0,
+      clientsFailed: 0,
+      invoicesSynced: 0,
+      finishedAt: new Date().toISOString(),
+      errors: [],
+    };
+  }
+
+  const clientRows = await db
+    .select({ id: clients.id, companyName: clients.companyName })
+    .from(clients)
+    .where(eq(clients.businessId, businessId));
+
+  let succeeded = 0;
+  let skipped = 0;
+  let failed = 0;
+  let invoicesSynced = 0;
+  const errors: Array<{ clientId: string; companyName: string; error: string }> = [];
+
+  for (const c of clientRows) {
+    try {
+      const result = await syncInvoicesFromXero(c.id, systemAuth);
+      if (!result) {
+        skipped += 1;
+        continue;
+      }
+      // Couldn't find a matching Xero contact — not an error, just nothing to do.
+      if (result.message?.startsWith("Couldn't find")) {
+        skipped += 1;
+        continue;
+      }
+      succeeded += 1;
+      invoicesSynced += result.synced;
+    } catch (err) {
+      failed += 1;
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push({ clientId: c.id, companyName: c.companyName, error: message });
+      logger.warn({ err, clientId: c.id }, 'Per-client invoice sync failed during global sweep');
+    }
+  }
+
+  return {
+    businessId,
+    clientsScanned: clientRows.length,
+    clientsSucceeded: succeeded,
+    clientsSkipped: skipped,
+    clientsFailed: failed,
+    invoicesSynced,
+    finishedAt: new Date().toISOString(),
+    errors,
+  };
+}
+
+/**
+ * Cron-job entry — runs `syncInvoicesForBusiness` for every business.
+ * Per-business errors are caught so one tenant's outage doesn't blank the
+ * sweep for everyone else.
+ */
+export async function syncInvoicesAllBusinesses(): Promise<{
+  total: number;
+  results: SyncInvoicesAllResult[];
+}> {
+  const { businesses } = await import('../db/schema/businesses.js');
+  const all = await db.select({ id: businesses.id }).from(businesses);
+  const results: SyncInvoicesAllResult[] = [];
+  for (const b of all) {
+    try {
+      results.push(await syncInvoicesForBusiness(b.id));
+    } catch (err) {
+      logger.error({ err, businessId: b.id }, 'syncInvoicesForBusiness threw — continuing');
+    }
+  }
+  return { total: all.length, results };
+}
+
+let lastInvoiceSyncAt: string | null = null;
+export function recordInvoiceSync(ts: string): void {
+  lastInvoiceSyncAt = ts;
+}
+export function getLastInvoiceSyncAt(): string | null {
+  return lastInvoiceSyncAt;
+}
+
 // ─── Outstanding (Sam Loom #4/#5/#6) ───────────────────────────────────────
 //
 // "Invoices Owed In" — every invoice still awaiting payment. Kept separate

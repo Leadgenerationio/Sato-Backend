@@ -10,6 +10,7 @@ import { recordLeadByteSync } from '../controllers/integration.controller.js';
 import { syncAll as catchrSyncAll } from '../services/ad-spend.service.js';
 import { recordCatchrSync } from '../controllers/ad-spend.controller.js';
 import { syncAllBusinessesFromXero, recordBankFeedSync } from '../services/bank-feed.service.js';
+import { syncInvoicesAllBusinesses, recordInvoiceSync } from '../services/invoice.service.js';
 import { prewarmLeadByteCache } from '../services/cache-prewarm.service.js';
 import { processRecurringTasks } from './recurring-tasks.js';
 import { sendEmail } from '../integrations/resend/resend-client.js';
@@ -268,6 +269,16 @@ new Worker('sync', async (job) => {
       const ts = new Date().toISOString();
       recordBankFeedSync(ts);
       return { ...result, finishedAt: ts };
+    }
+    case 'invoice-hourly-sync': {
+      // Sam audit #2 — pull every business's Xero invoices on a cron so the
+      // dashboard widget reads non-empty data without per-client manual sync.
+      const result = await syncInvoicesAllBusinesses();
+      const ts = new Date().toISOString();
+      recordInvoiceSync(ts);
+      const totalSynced = result.results.reduce((sum, r) => sum + r.invoicesSynced, 0);
+      logger.info({ businesses: result.total, totalSynced, finishedAt: ts }, 'invoice-hourly-sync complete');
+      return { ...result, finishedAt: ts, totalSynced };
     }
     case 'leadbyte-cache-prewarm': {
       // Runs every 45s — keeps the LeadByte Redis cache always-fresh so

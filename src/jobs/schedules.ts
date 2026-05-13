@@ -53,6 +53,17 @@ export async function registerSchedules() {
     data: {},
   });
 
+  // Sync Xero invoices hourly (15 min offset). Fixes Sam audit #2 — the
+  // "Invoices Owed In" dashboard widget reads the local invoices table, so
+  // before this cron existed each client had to be manually synced before
+  // their invoices showed up.
+  await syncQueue.upsertJobScheduler('invoice-sync', {
+    pattern: '15 * * * *',
+  }, {
+    name: 'invoice-hourly-sync',
+    data: {},
+  });
+
   // Slice 5 Day 4 — process recurring tasks every 5 min. The job picks up
   // any tasks where recurrence_next_run has passed and clones them.
   await syncQueue.upsertJobScheduler('recurring-tasks', {
