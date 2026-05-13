@@ -134,18 +134,26 @@ describe('Agreement Templates API', () => {
   });
 
   describe('POST /agreement-templates/:id/preview', () => {
-    it('returns 501 (Day 1 placeholder)', async () => {
-      const created = await request(app)
-        .post('/api/v1/agreement-templates')
-        .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ name: 'Preview Test', pdfR2Key: 'agreements/x.pdf' });
-      createdIds.push(created.body.data.template.id);
-
+    it('returns 404 when template not found', async () => {
       const res = await request(app)
-        .post(`/api/v1/agreement-templates/${created.body.data.template.id}/preview`)
+        .post('/api/v1/agreement-templates/00000000-0000-0000-0000-000000000000/preview')
         .set('Authorization', `Bearer ${ownerToken}`)
         .send({ clientId: '00000000-0000-0000-0000-000000000000' });
-      expect(res.status).toBe(501);
+      expect(res.status).toBe(404);
+    });
+
+    it('returns 404 when client not found (template exists)', async () => {
+      const t = await request(app)
+        .post('/api/v1/agreement-templates')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ name: 'Preview no-client', pdfR2Key: 'agreements/x.pdf' });
+      createdIds.push(t.body.data.template.id);
+
+      const res = await request(app)
+        .post(`/api/v1/agreement-templates/${t.body.data.template.id}/preview`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ clientId: '00000000-0000-0000-0000-000000000000' });
+      expect(res.status).toBe(404);
     });
   });
 });

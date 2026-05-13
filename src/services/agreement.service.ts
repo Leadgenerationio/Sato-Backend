@@ -12,6 +12,7 @@ import { logger } from '../utils/logger.js';
 import { ForbiddenError } from '../utils/errors.js';
 import type { EnvelopeStatus, SignNowWebhookEvent } from '../integrations/signnow/signnow-types.js';
 import type { AuthPayload } from '../types/index.js';
+import { previewTemplate, getTemplate } from './agreement-template.service.js';
 
 /**
  * When an agreement is signed, ensure the client has a Xero contact so they're
@@ -92,6 +93,12 @@ export interface SendAgreementInput {
    * legacy free-form invite is used.
    */
   fields?: SendAgreementField[];
+  /** P12 — optional template to auto-populate before sending. */
+  templateId?: string;
+  /** P12 — per-field overrides (variable key → value) that win over resolved values. */
+  overrides?: Record<string, string>;
+  /** P12 — agreement effective date (ISO string) for the `agreement.effectiveDate` variable. */
+  effectiveDate?: string;
 }
 
 /**
@@ -101,10 +108,63 @@ export interface SendAgreementInput {
  *   1. documentBase64  — for small PDFs (<10 MB), inline in the request.
  *   2. r2SourceKey     — for any size, frontend pre-uploads via signed URL.
  */
-export async function sendAgreement(input: SendAgreementInput) {
+export async function sendAgreement(input: SendAgreementInput, requester?: AuthPayload) {
+  // P12 — if a templateId is provided, populate the template PDF with resolved
+  // variable values and upload the result to R2. The resulting key replaces the
+  // caller-supplied r2SourceKey for the SignNow envelope. Signature/date_signed
+  // fields are taken from the template's field_layout rather than from the caller.
+  let finalR2SourceKey = input.r2SourceKey;
+  let finalR2SourceFolder = input.r2SourceFolder;
+  let finalFields = input.fields;
+  let populatedPdfR2KeyForRow: string | undefined;
+
+  if (input.templateId && requester) {
+    const populatedBytes = await previewTemplate(
+      input.templateId,
+      {
+        clientId: input.clientId,
+        overrides: input.overrides ?? {},
+        effectiveDate: input.effectiveDate ?? null,
+      },
+      requester,
+    );
+    if (!populatedBytes) {
+      throw new ForbiddenError('Template or client not found for this business');
+    }
+
+    // Upload populated PDF to R2 (key relative to 'agreements' folder)
+    const relKey = `populated/${Date.now()}-${input.clientId}.pdf`;
+    await uploadFile({
+      folder: 'agreements',
+      key: relKey,
+      body: Buffer.from(populatedBytes),
+      contentType: 'application/pdf',
+      cacheControl: 'private, max-age=86400',
+    });
+    // downloadFile prepends folder, so store the full key for the DB row
+    populatedPdfR2KeyForRow = `agreements/${relKey}`;
+    finalR2SourceKey = relKey;
+    finalR2SourceFolder = 'agreements';
+
+    // Pull signature + date_signed fields from the template field_layout
+    const template = await getTemplate(input.templateId, requester);
+    if (template) {
+      finalFields = template.fieldLayout
+        .filter((f) => f.type === 'signature' || f.type === 'date_signed')
+        .map((f) => ({
+          page: f.page,
+          type: f.type as 'signature' | 'date_signed',
+          xPct: f.xPct,
+          yPct: f.yPct,
+          widthPct: f.widthPct,
+          heightPct: f.heightPct,
+        }));
+    }
+  }
+
   let documentBase64: string;
-  if (input.r2SourceKey) {
-    const buf = await downloadFile(input.r2SourceFolder ?? 'misc', input.r2SourceKey);
+  if (finalR2SourceKey) {
+    const buf = await downloadFile(finalR2SourceFolder ?? 'misc', finalR2SourceKey);
     documentBase64 = buf.toString('base64');
   } else if (input.documentBase64) {
     documentBase64 = input.documentBase64;
@@ -117,7 +177,7 @@ export async function sendAgreement(input: SendAgreementInput) {
     signerName: input.signerName,
     documentName: input.documentName || 'Service Agreement.pdf',
     documentBase64,
-    fields: input.fields && input.fields.length > 0 ? input.fields : undefined,
+    fields: finalFields && finalFields.length > 0 ? finalFields : undefined,
   });
 
   const [row] = await db
@@ -134,7 +194,11 @@ export async function sendAgreement(input: SendAgreementInput) {
       sentAt: new Date(),
       // #47-50 — persist the placed fields so we can show them on the
       // detail page later ("you sent 4 fields: 1 signature + 2 text + 1 date").
-      fields: input.fields && input.fields.length > 0 ? input.fields : null,
+      fields: finalFields && finalFields.length > 0 ? finalFields : null,
+      // P12 — template linkage
+      templateId: input.templateId ?? null,
+      populatedPdfR2Key: populatedPdfR2KeyForRow ?? null,
+      overrides: input.overrides ?? {},
     })
     .returning();
 

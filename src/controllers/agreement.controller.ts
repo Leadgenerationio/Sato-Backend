@@ -37,10 +37,17 @@ const sendSchema = z
     // #47-50 — optional drag-placed fields from the editor. Capped at 50
     // boxes — a typical agreement has 1-6.
     fields: z.array(fieldSchema).max(50).optional(),
+    // P12 — PDF template auto-populate
+    templateId: z.string().uuid().optional(),
+    overrides: z.record(z.string(), z.string()).optional(),
+    effectiveDate: z.string().optional(),
   })
   .refine(
-    (v) => Boolean(v.documentBase64) !== Boolean(v.r2SourceKey),
-    { message: 'Provide exactly one of documentBase64 or r2SourceKey' },
+    // P12: when templateId is set, the PDF comes from the template — no explicit
+    // document source needed. Otherwise, exactly one of documentBase64 / r2SourceKey
+    // must be provided (XOR).
+    (v) => Boolean(v.templateId) || Boolean(v.documentBase64) !== Boolean(v.r2SourceKey),
+    { message: 'Provide exactly one of documentBase64 or r2SourceKey (or use templateId)' },
   );
 
 export async function send(req: Request, res: Response) {
@@ -56,7 +63,7 @@ export async function send(req: Request, res: Response) {
     return;
   }
 
-  const agreement = await agreementService.sendAgreement(parsed.data);
+  const agreement = await agreementService.sendAgreement(parsed.data, req.user);
   res.status(201).json({ status: 'success', data: { agreement } });
 }
 

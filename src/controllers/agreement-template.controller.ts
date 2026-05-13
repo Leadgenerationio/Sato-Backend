@@ -47,7 +47,17 @@ export async function duplicate(req: Request, res: Response) {
   res.status(201).json({ status: 'success', data: { template } });
 }
 
-export async function preview(_req: Request, res: Response) {
-  // Wired in Day 2 — return 501 for Day 1
-  res.status(501).json({ status: 'error', message: 'Preview endpoint not yet implemented' });
+export async function preview(req: Request, res: Response) {
+  const bytes = await service.previewTemplate(
+    req.params.id as string,
+    req.body,
+    req.user!,
+  );
+  if (!bytes) {
+    res.status(404).json({ status: 'error', message: 'Template or client not found' });
+    return;
+  }
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', 'inline; filename="preview.pdf"');
+  res.status(200).send(Buffer.from(bytes));
 }
