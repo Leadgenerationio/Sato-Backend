@@ -23,14 +23,16 @@ export interface BankTransaction {
   vendorName: string | null;
   categoryId: string | null;
   categoryName: string | null;
-  categoryBucket: 'fixed' | 'one_off' | null;
+  categoryBucket: 'fixed' | 'one_off' | 'advertising' | null;
   isAutoCategorized: boolean;
 }
+
+export type CostBucket = 'fixed' | 'one_off' | 'advertising';
 
 export interface CostCategory {
   id: string;
   name: string;
-  bucket: 'fixed' | 'one_off';
+  bucket: CostBucket;
   color: string | null;
 }
 
@@ -66,7 +68,7 @@ export async function listCategories(requester: AuthPayload): Promise<CostCatego
 
 export async function createCategory(
   requester: AuthPayload,
-  data: { name: string; bucket: 'fixed' | 'one_off'; color?: string },
+  data: { name: string; bucket: CostBucket; color?: string },
 ): Promise<CostCategory> {
   const businessId = requireBusinessId(requester);
   const [row] = await db
@@ -121,7 +123,7 @@ export async function deleteRule(requester: AuthPayload, id: string): Promise<vo
 export interface ListTransactionsFilters {
   uncategorizedOnly?: boolean;
   categoryId?: string;
-  bucket?: 'fixed' | 'one_off';
+  bucket?: CostBucket;
   search?: string;
   page?: number;
   limit?: number;
@@ -192,7 +194,7 @@ export async function listTransactions(
       vendorName: r.vendorName,
       categoryId: r.categoryId,
       categoryName: r.categoryName,
-      categoryBucket: (r.categoryBucket as 'fixed' | 'one_off' | null) ?? null,
+      categoryBucket: (r.categoryBucket as CostBucket | null) ?? null,
       isAutoCategorized: r.isAutoCategorized,
     })),
     total: count ?? 0,
