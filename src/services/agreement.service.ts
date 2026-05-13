@@ -48,6 +48,18 @@ async function ensureXeroContact(clientId: string): Promise<void> {
   }
 }
 
+// #47-50 PDF editor — drag-placed field shape carried from the editor UI
+// into createEnvelope. Identical wire shape as the persisted column.
+export interface SendAgreementField {
+  page: number;
+  type: 'signature' | 'date_signed' | 'text';
+  xPct: number;
+  yPct: number;
+  widthPct: number;
+  heightPct: number;
+  prefillValue?: string;
+}
+
 export interface SendAgreementInput {
   clientId: string;
   signerEmail: string;
@@ -63,6 +75,13 @@ export interface SendAgreementInput {
   /** Folder the r2SourceKey lives under. Defaults to 'misc' (FileUpload default). */
   r2SourceFolder?: 'invoices' | 'agreements' | 'creatives' | 'landing-pages' | 'misc';
   documentName?: string;
+  /**
+   * #47-50 PDF editor — drag-placed fields from the editor UI. When
+   * provided (non-empty), the SignNow invite goes out role-based with
+   * pre-placed signature/date/text boxes. When omitted or empty, the
+   * legacy free-form invite is used.
+   */
+  fields?: SendAgreementField[];
 }
 
 /**
@@ -88,6 +107,7 @@ export async function sendAgreement(input: SendAgreementInput) {
     signerName: input.signerName,
     documentName: input.documentName || 'Service Agreement.pdf',
     documentBase64,
+    fields: input.fields && input.fields.length > 0 ? input.fields : undefined,
   });
 
   const [row] = await db
@@ -99,6 +119,9 @@ export async function sendAgreement(input: SendAgreementInput) {
       signerName: input.signerName,
       status: 'sent',
       sentAt: new Date(),
+      // #47-50 — persist the placed fields so we can show them on the
+      // detail page later ("you sent 4 fields: 1 signature + 2 text + 1 date").
+      fields: input.fields && input.fields.length > 0 ? input.fields : null,
     })
     .returning();
 
@@ -107,9 +130,13 @@ export async function sendAgreement(input: SendAgreementInput) {
     agreementId: row.id,
     signerEmail: input.signerEmail,
     signerName: input.signerName,
+    fieldCount: input.fields?.length ?? 0,
   });
 
-  logger.info({ agreementId: row.id, envelopeId: envelope.envelopeId }, 'Agreement sent');
+  logger.info(
+    { agreementId: row.id, envelopeId: envelope.envelopeId, fieldCount: input.fields?.length ?? 0 },
+    'Agreement sent',
+  );
   return row;
 }
 

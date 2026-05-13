@@ -5,6 +5,7 @@ import type {
   EnvelopeResult,
   EnvelopeStatus,
   SignNowToken,
+  PreplacedField,
 } from './signnow-types.js';
 
 /**
@@ -138,18 +139,37 @@ export async function createEnvelope(input: CreateEnvelopeInput): Promise<Envelo
 
   const { id: documentId } = (await uploadRes.json()) as { id: string };
 
-  // Step 2: send a free-form invite. Free-form lets the signer place their
-  // signature anywhere on the document (no pre-defined fields required).
-  // Reference: docs.signnow.com → Invite to sign → Free-form invite.
+  // #47-50 PDF editor — if the caller supplied pre-placed fields, attach
+  // them to the document BEFORE sending the invite. This switches us from
+  // a free-form invite (signer places signature wherever) to role-based
+  // (signer fills only the boxes Sam dropped onto the page).
+  const hasFields = Array.isArray(input.fields) && input.fields.length > 0;
+  if (hasFields) {
+    await addFieldsToDocument(documentId, input.fields!);
+  }
+
+  // Step 2: send the invite.
+  //   - Free-form (no fields): POST /document/:id/invite with `to: <email>`.
+  //   - Role-based (with fields): POST /document/:id/invite with a `to`
+  //     ARRAY containing { email, role_id, role, order }. SignNow auto-
+  //     creates a "Signer 1" role when fields are added without explicit
+  //     role assignment, so we reference that role here.
   //
   // Note: `subject` + `message` personalization is gated behind a paid plan
   // (SignNow error 65582 on free/trial accounts). Only include them when an
-  // explicit `emailSubject` / `emailBody` is passed by the caller. On trial
-  // plans, SignNow's default subject/message will be used.
+  // explicit `emailSubject` / `emailBody` is passed by the caller.
   const inviteBody: Record<string, unknown> = {
     from: process.env.SIGNNOW_USERNAME,
-    to: input.signerEmail,
   };
+  if (hasFields) {
+    inviteBody.to = [{
+      email: input.signerEmail,
+      role: 'Signer 1',
+      order: 1,
+    }];
+  } else {
+    inviteBody.to = input.signerEmail;
+  }
   if (input.emailSubject) inviteBody.subject = input.emailSubject;
   if (input.emailBody) inviteBody.message = input.emailBody;
 
@@ -159,12 +179,74 @@ export async function createEnvelope(input: CreateEnvelopeInput): Promise<Envelo
     body: JSON.stringify(inviteBody),
   });
 
-  logger.info({ documentId, signerEmail: input.signerEmail }, 'SignNow envelope sent');
+  logger.info(
+    { documentId, signerEmail: input.signerEmail, fieldCount: input.fields?.length ?? 0 },
+    'SignNow envelope sent',
+  );
   return {
     envelopeId: documentId,
     status: 'sent',
     uri: `${baseUrl()}/document/${documentId}`,
   };
+}
+
+// SignNow uses pixel coordinates at 72 DPI with the ORIGIN AT THE TOP-LEFT
+// of each page (same convention React-PDF/PDFKit use). Standard US-Letter
+// page is 612×792 pt, A4 is 595×842 pt. We assume A4 because that's the
+// CMS template — if Sam ever uses Letter the off-by-3% is forgiving enough
+// for signature boxes; a future improvement would read page dimensions
+// from the uploaded PDF.
+const PAGE_WIDTH_PT = 595;
+const PAGE_HEIGHT_PT = 842;
+
+function fieldsToSignNow(fields: PreplacedField[]): Array<Record<string, unknown>> {
+  return fields.map((f, i) => {
+    const x = Math.round(f.xPct * PAGE_WIDTH_PT);
+    const y = Math.round(f.yPct * PAGE_HEIGHT_PT);
+    const width = Math.round(f.widthPct * PAGE_WIDTH_PT);
+    const height = Math.round(f.heightPct * PAGE_HEIGHT_PT);
+    // SignNow field type vocabulary differs slightly from ours.
+    const snType =
+      f.type === 'signature' ? 'signature'
+      : f.type === 'date_signed' ? 'text'   // SignNow uses 'text' with prefilled_text="{{date_signed}}"
+      : 'text';
+    const field: Record<string, unknown> = {
+      type: snType,
+      page_number: f.page - 1,  // SignNow is 0-indexed
+      role: 'Signer 1',
+      required: true,
+      name: `${f.type}_${i}`,
+      label: f.type === 'date_signed' ? 'Date signed' : f.type === 'signature' ? 'Signature' : 'Text',
+      x, y, width, height,
+    };
+    if (f.type === 'text' && f.prefillValue) {
+      field.prefilled_text = f.prefillValue;
+    }
+    return field;
+  });
+}
+
+/**
+ * Attach pre-placed fields to a SignNow document so the signer sees them
+ * on the rendered page. Must be called BEFORE the invite is sent.
+ */
+export async function addFieldsToDocument(
+  documentId: string,
+  fields: PreplacedField[],
+): Promise<void> {
+  if (!isSignNowConfigured() || documentId.startsWith('mock-')) {
+    logger.info({ documentId, fieldCount: fields.length }, 'SignNow MOCK — addFields skipped');
+    return;
+  }
+  if (fields.length === 0) return;
+
+  const body = { fields: fieldsToSignNow(fields) };
+  await authedJson<{ id: string }>(`/document/${documentId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  logger.info({ documentId, fieldCount: fields.length }, 'SignNow fields added');
 }
 
 export async function getEnvelopeStatus(envelopeId: string): Promise<EnvelopeStatus> {

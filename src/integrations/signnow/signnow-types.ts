@@ -11,6 +11,19 @@ export type EnvelopeStatus =
   | 'declined'
   | 'voided';
 
+// #47-50 PDF editor — a placed field to send to the signer. Coordinates
+// arrive from the FE as fractions of the page (0..1); the signnow client
+// converts to pixels at 72 DPI before posting.
+export interface PreplacedField {
+  page: number;             // 1-indexed
+  type: 'signature' | 'date_signed' | 'text';
+  xPct: number;
+  yPct: number;
+  widthPct: number;
+  heightPct: number;
+  prefillValue?: string;    // type='text' only
+}
+
 export interface CreateEnvelopeInput {
   signerEmail: string;
   signerName: string;
@@ -19,6 +32,13 @@ export interface CreateEnvelopeInput {
   documentBase64: string;
   emailSubject?: string;
   emailBody?: string;
+  /**
+   * #47-50 PDF editor — drag-placed fields. When supplied (non-empty),
+   * the envelope is sent as a role-based invite with fields pre-positioned
+   * at the given fractional coordinates. When omitted/empty, the free-
+   * form invite path is used (signer places signature wherever).
+   */
+  fields?: PreplacedField[];
 }
 
 export interface EnvelopeResult {

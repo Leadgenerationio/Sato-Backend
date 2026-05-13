@@ -1,5 +1,25 @@
-import { pgTable, uuid, varchar, boolean, timestamp, index } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, varchar, boolean, timestamp, jsonb, index } from 'drizzle-orm/pg-core';
 import { clients } from './clients.js';
+
+// #47-50 PDF editor. A placed field on an outbound agreement PDF —
+// the signer's screen shows a labelled box at this position and the
+// configured type (signature, date_signed, text) dictates how SignNow
+// renders the input.
+//
+// Coordinates are stored as fractions of the page (0.0–1.0) so re-renders
+// at different DPIs / zoom levels translate cleanly. SignNow's API takes
+// pixels at 72 DPI; the service layer converts on send.
+export interface AgreementField {
+  page: number;            // 1-indexed page number
+  type: 'signature' | 'date_signed' | 'text';
+  xPct: number;            // 0..1 left offset relative to page width
+  yPct: number;            // 0..1 top offset relative to page height
+  widthPct: number;
+  heightPct: number;
+  // For type='text' only — pre-filled value that signer can't edit.
+  // For signature/date_signed this is ignored.
+  prefillValue?: string;
+}
 
 export const agreements = pgTable('agreements', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -23,6 +43,12 @@ export const agreements = pgTable('agreements', {
 
   // Storage — signed PDF in R2
   pdfR2Key: varchar('pdf_r2_key', { length: 500 }),
+
+  // #47-50 PDF editor — drag-placed fields (signature, date, text) from the
+  // editor UI. NULL = free-form invite (signer places wherever, legacy flow).
+  // Non-null = role-based invite with pre-placed fields. Both flows are
+  // supported on the same endpoint for backward compat.
+  fields: jsonb('fields').$type<AgreementField[]>(),
 
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),

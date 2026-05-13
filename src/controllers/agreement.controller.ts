@@ -5,6 +5,18 @@ import { verifyWebhookSignature } from '../integrations/signnow/signnow-client.j
 import { logger } from '../utils/logger.js';
 import { uuidShape } from '../utils/zod-helpers.js';
 
+// #47-50 PDF editor — drag-placed field schema. Coordinates are 0..1
+// fractions of the page; the SignNow integration converts to pixels.
+const fieldSchema = z.object({
+  page: z.number().int().min(1).max(500),
+  type: z.enum(['signature', 'date_signed', 'text']),
+  xPct: z.number().min(0).max(1),
+  yPct: z.number().min(0).max(1),
+  widthPct: z.number().min(0.005).max(1),
+  heightPct: z.number().min(0.005).max(1),
+  prefillValue: z.string().max(500).optional(),
+});
+
 const sendSchema = z
   .object({
     clientId: uuidShape(),
@@ -17,6 +29,9 @@ const sendSchema = z
       .enum(['invoices', 'agreements', 'creatives', 'landing-pages', 'misc'])
       .optional(),
     documentName: z.string().optional(),
+    // #47-50 — optional drag-placed fields from the editor. Capped at 50
+    // boxes — a typical agreement has 1-6.
+    fields: z.array(fieldSchema).max(50).optional(),
   })
   .refine(
     (v) => Boolean(v.documentBase64) !== Boolean(v.r2SourceKey),

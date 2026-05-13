@@ -60,4 +60,73 @@ describe('POST /api/v1/agreements — validation error surfacing', () => {
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/documentBase64|r2SourceKey/);
   });
+
+  // ─── #47-50 PDF editor — field schema validation ────────────────────
+  it('rejects a field with xPct > 1', async () => {
+    const res = await request(app)
+      .post('/api/v1/agreements')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        clientId: '00000000-0000-0000-0000-000000000001',
+        signerEmail: 'john@apex.co',
+        signerName: 'John',
+        r2SourceKey: 'misc/test.pdf',
+        fields: [{ page: 1, type: 'signature', xPct: 1.5, yPct: 0.5, widthPct: 0.2, heightPct: 0.05 }],
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/xPct/);
+  });
+
+  it('rejects a field with unknown type', async () => {
+    const res = await request(app)
+      .post('/api/v1/agreements')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        clientId: '00000000-0000-0000-0000-000000000001',
+        signerEmail: 'john@apex.co',
+        signerName: 'John',
+        r2SourceKey: 'misc/test.pdf',
+        fields: [{ page: 1, type: 'BANANA', xPct: 0.5, yPct: 0.5, widthPct: 0.2, heightPct: 0.05 }],
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/type/);
+  });
+
+  it('rejects fields array longer than 50', async () => {
+    const fields = Array.from({ length: 51 }, () => ({
+      page: 1, type: 'signature', xPct: 0.5, yPct: 0.5, widthPct: 0.2, heightPct: 0.05,
+    }));
+    const res = await request(app)
+      .post('/api/v1/agreements')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        clientId: '00000000-0000-0000-0000-000000000001',
+        signerEmail: 'john@apex.co',
+        signerName: 'John',
+        r2SourceKey: 'misc/test.pdf',
+        fields,
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/fields/);
+  });
+
+  it('accepts a valid fields array (passes schema; downstream send may still fail without real R2 file)', async () => {
+    const res = await request(app)
+      .post('/api/v1/agreements')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        clientId: '00000000-0000-0000-0000-000000000001',
+        signerEmail: 'john@apex.co',
+        signerName: 'John',
+        r2SourceKey: 'misc/nonexistent.pdf',
+        fields: [
+          { page: 1, type: 'signature',   xPct: 0.5, yPct: 0.9, widthPct: 0.25, heightPct: 0.05 },
+          { page: 1, type: 'date_signed', xPct: 0.5, yPct: 0.95, widthPct: 0.14, heightPct: 0.04 },
+        ],
+      });
+    // Schema validation passes — the response is now in the service-layer
+    // domain (file fetch will fail because the R2 key doesn't exist) so we
+    // expect anything BUT a 400 schema rejection.
+    expect(res.status).not.toBe(400);
+  });
 });

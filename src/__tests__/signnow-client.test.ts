@@ -235,6 +235,94 @@ describe('SignNow client — createEnvelope (live)', () => {
     // `from` is the service account email.
     expect(inviteBody.from).toBeTruthy();
   });
+
+  // ─── #47-50 PDF editor — pre-placed fields ────────────────────────────
+  it('places fields via PUT /document/:id and switches invite to role-based', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchSpy = vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      const u = String(url);
+      if (u.includes('/oauth2/token')) {
+        return mockOk({ access_token: 'tok', expires_in: 3600 });
+      }
+      if (u.endsWith('/document') && init.method === 'POST') {
+        return mockOk({ id: 'doc-fields' });
+      }
+      // PUT /document/doc-fields — the addFields call
+      if (u.endsWith('/document/doc-fields') && init.method === 'PUT') {
+        return mockOk({ id: 'doc-fields' });
+      }
+      if (u.includes('/document/doc-fields/invite')) {
+        return mockOk({ status: 'success' });
+      }
+      return mockErr(404);
+    });
+    global.fetch = fetchSpy as unknown as typeof fetch;
+
+    await signnow.createEnvelope({
+      signerEmail: 'jane@example.com',
+      signerName: 'Jane Doe',
+      documentName: 'Agreement.pdf',
+      documentBase64: Buffer.from('%PDF').toString('base64'),
+      fields: [
+        { page: 1, type: 'signature',   xPct: 0.5,  yPct: 0.9,  widthPct: 0.25, heightPct: 0.05 },
+        { page: 1, type: 'date_signed', xPct: 0.5,  yPct: 0.95, widthPct: 0.14, heightPct: 0.04 },
+        { page: 2, type: 'text',        xPct: 0.1,  yPct: 0.2,  widthPct: 0.20, heightPct: 0.03, prefillValue: 'Manchester' },
+      ],
+    });
+
+    // PUT /document/:id with the fields payload happened BEFORE the invite.
+    const putCall = calls.find((c) => c.url.endsWith('/document/doc-fields') && c.init.method === 'PUT');
+    expect(putCall).toBeDefined();
+    const putBody = JSON.parse(String(putCall?.init.body));
+    expect(putBody.fields).toHaveLength(3);
+    // Pixel-coord translation: 0.5 xPct on a 595pt-wide A4 page → 298px.
+    expect(putBody.fields[0].x).toBe(298);
+    // page_number is 0-indexed on SignNow's side.
+    expect(putBody.fields[0].page_number).toBe(0);
+    expect(putBody.fields[2].page_number).toBe(1);
+    // The text field with a prefillValue passes through.
+    expect(putBody.fields[2].prefilled_text).toBe('Manchester');
+    // All fields are assigned to "Signer 1" role.
+    putBody.fields.forEach((f: { role: string }) => expect(f.role).toBe('Signer 1'));
+
+    // Role-based invite: `to` is an array with role + order, not a bare email.
+    const inviteCall = calls.find((c) => c.url.includes('/document/doc-fields/invite'));
+    const inviteBody = JSON.parse(String(inviteCall?.init.body));
+    expect(Array.isArray(inviteBody.to)).toBe(true);
+    expect(inviteBody.to[0]).toEqual({
+      email: 'jane@example.com',
+      role: 'Signer 1',
+      order: 1,
+    });
+  });
+
+  it('skips addFields call when fields array is empty (back to free-form)', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchSpy = vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      const u = String(url);
+      if (u.includes('/oauth2/token')) return mockOk({ access_token: 'tok', expires_in: 3600 });
+      if (u.endsWith('/document') && init.method === 'POST') return mockOk({ id: 'doc-empty' });
+      if (u.includes('/document/doc-empty/invite')) return mockOk({ status: 'success' });
+      return mockErr(404);
+    });
+    global.fetch = fetchSpy as unknown as typeof fetch;
+
+    await signnow.createEnvelope({
+      signerEmail: 'jane@example.com',
+      signerName: 'Jane Doe',
+      documentName: 'Agreement.pdf',
+      documentBase64: Buffer.from('%PDF').toString('base64'),
+      fields: [],
+    });
+
+    // No PUT call should have happened.
+    expect(calls.some((c) => c.url.endsWith('/document/doc-empty') && c.init.method === 'PUT')).toBe(false);
+    // Invite stayed as free-form (`to` is a string).
+    const inviteBody = JSON.parse(String(calls.find((c) => c.url.includes('/invite'))?.init.body));
+    expect(inviteBody.to).toBe('jane@example.com');
+  });
 });
 
 describe('SignNow client — getEnvelopeStatus (live)', () => {
