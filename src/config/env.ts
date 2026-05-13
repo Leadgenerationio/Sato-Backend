@@ -92,6 +92,12 @@ export const env = {
   // configured" gracefully.
   ANTHROPIC_API_KEY: v('ANTHROPIC_API_KEY'),
   ANTHROPIC_MODEL: v('ANTHROPIC_MODEL', 'claude-haiku-4-5-20251001'),
+
+  // #39 Attio bulk import — Sam's CRM. Bearer token from Attio's API
+  // settings page. Optional: when blank, the import endpoints return
+  // 503 so the FE shows "Attio not configured".
+  ATTIO_API_KEY: v('ATTIO_API_KEY'),
+  ATTIO_BASE_URL: v('ATTIO_BASE_URL', 'https://api.attio.com/v2'),
 };
 
 export function isProduction(): boolean {

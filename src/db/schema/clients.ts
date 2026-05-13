@@ -52,10 +52,14 @@ export const clients = pgTable('clients', {
   xeroContactId: varchar('xero_contact_id', { length: 100 }),
   leadbyteClientId: varchar('leadbyte_client_id', { length: 100 }),
   endoleCompanyId: varchar('endole_company_id', { length: 100 }),
+  // #39 Attio bulk import — Attio record_id of the company this client
+  // was imported from. Used to dedupe re-imports.
+  attioCompanyId: varchar('attio_company_id', { length: 100 }),
   notes: text('notes'),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 }, (table) => [
   index('clients_business_idx').on(table.businessId),
   index('clients_status_idx').on(table.status),
+  index('clients_attio_idx').on(table.attioCompanyId),
 ]);

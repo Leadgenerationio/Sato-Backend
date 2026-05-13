@@ -10,6 +10,7 @@ import * as clientInvoicesController from '../controllers/client-invoices.contro
 import * as clientCampaignsController from '../controllers/client-campaigns.controller.js';
 import * as clientActivityController from '../controllers/client-activity.controller.js';
 import * as clientEmailsController from '../controllers/client-emails.controller.js';
+import * as clientImportController from '../controllers/client-import.controller.js';
 
 export const clientRoutes: RouterType = Router();
 
@@ -90,6 +91,16 @@ clientRoutes.use(requireRole('owner', 'finance_admin', 'ops_manager'));
 
 clientRoutes.get('/', validate(listClientsQuerySchema), clientController.listClients);
 clientRoutes.get('/credit-alerts', clientController.getCreditAlerts);
+
+// #39 Attio bulk import. Static paths must be registered BEFORE /:id
+// catch-alls so Express doesn't route "import" to getClient.
+const importAttioSchema = z.object({
+  body: z.object({
+    attioIds: z.array(z.string().min(1).max(100)).min(1).max(200),
+  }),
+});
+clientRoutes.get('/import/attio/companies', clientImportController.browseAttio);
+clientRoutes.post('/import/attio', validate(importAttioSchema), clientImportController.importFromAttio);
 clientRoutes.get('/:id', clientController.getClient);
 clientRoutes.post('/', validate(createClientSchema), clientController.createClient);
 clientRoutes.put('/:id', validate(updateClientSchema), clientController.updateClient);
