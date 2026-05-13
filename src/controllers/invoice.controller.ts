@@ -4,13 +4,21 @@ import * as invoiceService from '../services/invoice.service.js';
 import { uuidShape } from '../utils/zod-helpers.js';
 import { classifyXeroError } from '../utils/xero-errors.js';
 
+const VALID_SORT_BY = new Set(['createdAt', 'dueDate', 'total', 'status', 'invoiceNumber']);
+
 export async function listInvoices(req: Request, res: Response) {
+  const rawSortBy = req.query.sortBy as string | undefined;
+  const sortBy = rawSortBy && VALID_SORT_BY.has(rawSortBy) ? (rawSortBy as invoiceService.InvoiceSortBy) : undefined;
+  const sortDir = req.query.sortDir === 'asc' ? 'asc' : req.query.sortDir === 'desc' ? 'desc' : undefined;
+
   const result = await invoiceService.listInvoices(req.user!, {
     status: req.query.status as string | undefined,
     clientId: req.query.client as string | undefined,
     search: req.query.search as string | undefined,
     page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
     limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+    sortBy,
+    sortDir,
   });
 
   res.json({
