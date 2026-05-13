@@ -65,6 +65,13 @@ export interface SendAgreementInput {
   clientId: string;
   signerEmail: string;
   signerName: string;
+  /**
+   * Sam Loom #68 — signatory title/role (e.g. "Director", "CEO", "Compliance
+   * Officer"). Free text up to 100 chars. Distinct from SignNow's internal
+   * workflow role — this is the legal capacity the person signs in.
+   * Optional for back-compat with existing dialogs/callers.
+   */
+  signerRole?: string;
   /** Inline base64-encoded PDF bytes. Capped at the API body limit (~10 MB). */
   documentBase64?: string;
   /**
@@ -120,6 +127,9 @@ export async function sendAgreement(input: SendAgreementInput) {
       providerEnvelopeId: envelope.envelopeId,
       signerEmail: input.signerEmail,
       signerName: input.signerName,
+      // Sam Loom #68 — signatory role/title. Empty/whitespace-only inputs
+      // collapse to null so we don't store accidental blanks.
+      signerRole: input.signerRole?.trim() || null,
       status: 'sent',
       sentAt: new Date(),
       // #47-50 — persist the placed fields so we can show them on the
@@ -133,6 +143,7 @@ export async function sendAgreement(input: SendAgreementInput) {
     agreementId: row.id,
     signerEmail: input.signerEmail,
     signerName: input.signerName,
+    signerRole: input.signerRole ?? null,
     fieldCount: input.fields?.length ?? 0,
   });
 

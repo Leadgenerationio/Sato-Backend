@@ -37,6 +37,12 @@ export const agreements = pgTable('agreements', {
   providerEnvelopeId: varchar('provider_envelope_id', { length: 128 }),
   signerEmail: varchar('signer_email', { length: 255 }),
   signerName: varchar('signer_name', { length: 255 }),
+  // Sam Loom #68 — editable signatory role/title (e.g. "Director", "CEO",
+  // "Compliance Officer") so the legal title under the signature line is
+  // accurate and the audit trail captures who signed in what capacity.
+  // Nullable for back-compat — agreements created before this column lands
+  // simply have no role recorded.
+  signerRole: varchar('signer_role', { length: 100 }),
   sentAt: timestamp('sent_at'),
   declinedAt: timestamp('declined_at'),
   declinedReason: varchar('declined_reason', { length: 500 }),

@@ -23,6 +23,10 @@ const sendSchema = z
     clientId: uuidShape(),
     signerEmail: z.string().email(),
     signerName: z.string().min(1),
+    // Sam Loom #68 — signatory role/title. Optional + bounded to 100 chars
+    // (matches the DB column). Empty string is allowed and collapses to
+    // null in the service.
+    signerRole: z.string().max(100).optional(),
     /** Either documentBase64 OR r2SourceKey must be set; never both. */
     documentBase64: z.string().min(1).optional(),
     r2SourceKey: z.string().min(1).optional(),

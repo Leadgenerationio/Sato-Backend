@@ -129,4 +129,34 @@ describe('POST /api/v1/agreements — validation error surfacing', () => {
     // expect anything BUT a 400 schema rejection.
     expect(res.status).not.toBe(400);
   });
+
+  // ─── Sam Loom #68 — signer_role validation ───────────────────────────
+  it('rejects signerRole longer than 100 chars', async () => {
+    const res = await request(app)
+      .post('/api/v1/agreements')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        clientId: '00000000-0000-0000-0000-000000000001',
+        signerEmail: 'john@apex.co',
+        signerName: 'John',
+        r2SourceKey: 'misc/test.pdf',
+        signerRole: 'a'.repeat(101),
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/signerRole/);
+  });
+
+  it('accepts a valid signerRole (passes schema)', async () => {
+    const res = await request(app)
+      .post('/api/v1/agreements')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        clientId: '00000000-0000-0000-0000-000000000001',
+        signerEmail: 'john@apex.co',
+        signerName: 'John',
+        r2SourceKey: 'misc/nonexistent.pdf',
+        signerRole: 'Director',
+      });
+    expect(res.status).not.toBe(400);
+  });
 });
