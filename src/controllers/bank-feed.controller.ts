@@ -7,7 +7,10 @@ export async function listTransactions(req: Request, res: Response) {
   const result = await bankFeed.listTransactions(req.user!, {
     uncategorizedOnly: req.query.uncategorized === 'true',
     categoryId: typeof req.query.categoryId === 'string' ? req.query.categoryId : undefined,
-    bucket: req.query.bucket === 'fixed' || req.query.bucket === 'one_off' ? req.query.bucket : undefined,
+    bucket:
+      req.query.bucket === 'fixed' || req.query.bucket === 'one_off' || req.query.bucket === 'advertising'
+        ? req.query.bucket
+        : undefined,
     search: typeof req.query.search === 'string' ? req.query.search : undefined,
     page: req.query.page ? Number(req.query.page) : undefined,
     limit: req.query.limit ? Number(req.query.limit) : undefined,
@@ -44,10 +47,12 @@ export async function listCategories(req: Request, res: Response) {
   res.json({ status: 'success', data: { categories } });
 }
 
+const VALID_BUCKETS = new Set(['fixed', 'one_off', 'advertising']);
+
 export async function createCategory(req: Request, res: Response) {
   const { name, bucket, color } = req.body ?? {};
-  if (!name || (bucket !== 'fixed' && bucket !== 'one_off')) {
-    res.status(400).json({ status: 'error', message: 'name and bucket (fixed|one_off) required' });
+  if (!name || !VALID_BUCKETS.has(bucket)) {
+    res.status(400).json({ status: 'error', message: 'name and bucket (fixed|one_off|advertising) required' });
     return;
   }
   const category = await bankFeed.createCategory(req.user!, { name, bucket, color });
