@@ -4,6 +4,7 @@ import { agreements } from '../db/schema/agreements.js';
 import { clients } from '../db/schema/clients.js';
 import { createEnvelope, downloadSignedPdf, getEnvelopeStatus } from '../integrations/signnow/signnow-client.js';
 import { uploadFile, downloadFile } from '../integrations/r2/r2-client.js';
+import type { R2Folder } from '../integrations/r2/r2-types.js';
 import { createContact as createXeroContact, isXeroConfigured } from '../integrations/xero/xero-client.js';
 import { notify } from './notification.service.js';
 import { logClientActivity } from './client-activity.service.js';
@@ -73,7 +74,9 @@ export interface SendAgreementInput {
    */
   r2SourceKey?: string;
   /** Folder the r2SourceKey lives under. Defaults to 'misc' (FileUpload default). */
-  r2SourceFolder?: 'invoices' | 'agreements' | 'creatives' | 'landing-pages' | 'sops' | 'misc';
+  /** Derived from the canonical R2Folder type so adding a folder in
+   *  r2-types.ts auto-propagates here without a manual edit. */
+  r2SourceFolder?: R2Folder;
   documentName?: string;
   /**
    * #47-50 PDF editor — drag-placed fields from the editor UI. When

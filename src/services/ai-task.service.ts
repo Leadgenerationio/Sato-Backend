@@ -1,7 +1,10 @@
 import { eq } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { sops } from '../db/schema/sops.js';
-import { env } from '../config/env.js';
+import {
+  callAnthropic as callAnthropicViaClient,
+  isAnthropicConfigured,
+} from '../integrations/anthropic/anthropic-client.js';
 import { logger } from '../utils/logger.js';
 
 // #91 AI new-task button (Sam Loom). Takes a one-line prompt and asks
@@ -92,42 +95,26 @@ function buildSystemPrompt(sopHints: SopHint[]): string {
   ].join('\n');
 }
 
-interface AnthropicResponse {
-  content?: Array<{ type: string; text?: string }>;
-  error?: { message?: string };
-}
-
+// Cleanup post-Hari-merge: was an inline fetch wrapper here. Now uses the
+// shared integrations/anthropic/anthropic-client.ts which adds prompt
+// caching on the system block (~10% cost on cache hits) and structured
+// usage logging.
 async function callAnthropic(systemPrompt: string, userPrompt: string): Promise<string> {
-  // Read process.env at call time (not env.* which is a module-init snapshot)
-  // so operators can rotate the key without bouncing the process and tests
-  // can toggle it per-case.
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? '';
-  const model = process.env.ANTHROPIC_MODEL ?? env.ANTHROPIC_MODEL;
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 1024,
-      // Lower temperature = more deterministic structured output.
-      temperature: 0.3,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
-    }),
+  const { text } = await callAnthropicViaClient({
+    system: systemPrompt,
+    userMessage: userPrompt,
+    // Tasks system prompt is short-ish but stable across all generate calls
+    // in a session — caching pays off after the first generation.
+    cacheSystem: true,
+    maxTokens: 1024,
+    // Lower temperature = more deterministic structured output.
+    temperature: 0.3,
+    // Override the shared client's default model (sonnet-4-6 — overkill
+    // for short structured-JSON tasks). Haiku is 10x cheaper and plenty
+    // capable for "draft a task from a sentence". Sticking with this so
+    // the cleanup is purely structural — no behavior change for users.
+    model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001',
   });
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Anthropic ${res.status}: ${body.slice(0, 200)}`);
-  }
-  const json = (await res.json()) as AnthropicResponse;
-  if (json.error) throw new Error(`Anthropic error: ${json.error.message ?? 'unknown'}`);
-  const textBlock = json.content?.find((c) => c.type === 'text');
-  const text = textBlock?.text ?? '';
   if (!text) throw new Error('Anthropic returned empty content');
   return text;
 }
@@ -185,7 +172,7 @@ export async function generateTaskSuggestion(
   prompt: string,
   businessId: string | null,
 ): Promise<AiTaskSuggestion> {
-  if (!process.env.ANTHROPIC_API_KEY) {
+  if (!isAnthropicConfigured()) {
     throw new AiNotConfiguredError();
   }
   const sopHints = await fetchSopHints(businessId);

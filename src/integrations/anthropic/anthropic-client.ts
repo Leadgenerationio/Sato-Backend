@@ -97,16 +97,21 @@ export async function callAnthropic(input: AnthropicCallInput): Promise<{ text: 
   }
 
   const data = (await res.json()) as AnthropicResponse;
-  const text = data.content.find((c) => c.type === 'text')?.text ?? '';
+  const text = data.content?.find((c) => c.type === 'text')?.text ?? '';
+  // Defensive: `usage` is always present in real Anthropic responses, but
+  // a missing field here shouldn't kill the caller — the logging is
+  // observability, not control flow. Falls back to zeros so the typed
+  // return shape stays stable.
+  const usage = data.usage ?? { input_tokens: 0, output_tokens: 0 };
   logger.info(
     {
       model: data.model,
-      inputTokens: data.usage.input_tokens,
-      outputTokens: data.usage.output_tokens,
-      cacheRead: data.usage.cache_read_input_tokens ?? 0,
-      cacheWrite: data.usage.cache_creation_input_tokens ?? 0,
+      inputTokens: usage.input_tokens,
+      outputTokens: usage.output_tokens,
+      cacheRead: usage.cache_read_input_tokens ?? 0,
+      cacheWrite: usage.cache_creation_input_tokens ?? 0,
     },
     'anthropic-messages',
   );
-  return { text, usage: data.usage };
+  return { text, usage };
 }

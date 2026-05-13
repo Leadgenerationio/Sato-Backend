@@ -17,14 +17,24 @@ const ORIGINAL_FETCH = global.fetch;
 const ORIGINAL_KEY = process.env.ANTHROPIC_API_KEY;
 
 function mockAnthropicResponse(text: string, status = 200): Response {
+  // Match the real Anthropic Messages API response shape — the shared
+  // client logs from `data.usage`, so the mock needs to include it or
+  // the client throws before returning the text.
+  const body = {
+    id: 'msg_test',
+    type: 'message',
+    role: 'assistant',
+    model: 'claude-haiku-4-5-20251001',
+    stop_reason: 'end_turn',
+    content: [{ type: 'text', text }],
+    usage: { input_tokens: 10, output_tokens: 20 },
+  };
   return {
     ok: status >= 200 && status < 300,
     status,
     headers: new Headers({ 'content-type': 'application/json' }),
-    json: async () => ({
-      content: [{ type: 'text', text }],
-    }),
-    text: async () => JSON.stringify({ content: [{ type: 'text', text }] }),
+    json: async () => body,
+    text: async () => JSON.stringify(body),
   } as unknown as Response;
 }
 

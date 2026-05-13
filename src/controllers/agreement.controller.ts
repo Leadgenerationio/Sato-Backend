@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { z } from 'zod';
 import * as agreementService from '../services/agreement.service.js';
 import { verifyWebhookSignature } from '../integrations/signnow/signnow-client.js';
+import { R2_FOLDER_TUPLE } from '../integrations/r2/r2-types.js';
 import { logger } from '../utils/logger.js';
 import { uuidShape } from '../utils/zod-helpers.js';
 
@@ -25,9 +26,9 @@ const sendSchema = z
     /** Either documentBase64 OR r2SourceKey must be set; never both. */
     documentBase64: z.string().min(1).optional(),
     r2SourceKey: z.string().min(1).optional(),
-    r2SourceFolder: z
-      .enum(['invoices', 'agreements', 'creatives', 'landing-pages', 'sops', 'misc'])
-      .optional(),
+    // Derived from the canonical R2_FOLDER_TUPLE so a new folder added in
+    // r2-types.ts shows up here without a manual edit.
+    r2SourceFolder: z.enum(R2_FOLDER_TUPLE).optional(),
     documentName: z.string().optional(),
     // #47-50 — optional drag-placed fields from the editor. Capped at 50
     // boxes — a typical agreement has 1-6.
