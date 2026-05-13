@@ -8,6 +8,8 @@ import * as clientController from '../controllers/client.controller.js';
 import * as clientDocumentsController from '../controllers/client-documents.controller.js';
 import * as clientInvoicesController from '../controllers/client-invoices.controller.js';
 import * as clientCampaignsController from '../controllers/client-campaigns.controller.js';
+import * as clientActivityController from '../controllers/client-activity.controller.js';
+import * as clientEmailsController from '../controllers/client-emails.controller.js';
 
 export const clientRoutes: RouterType = Router();
 
@@ -110,3 +112,22 @@ clientRoutes.post('/:id/sync-invoices', clientInvoicesController.syncForClient);
 
 // Slice 2 Day 1: reverse lookup — which campaigns is this client buying?
 clientRoutes.get('/:id/campaigns', clientCampaignsController.listForClient);
+
+// L #38 — full activity feed (every event tied to this client).
+clientRoutes.get('/:id/activity', clientActivityController.listActivity);
+
+// L #33 — email thread (inbound + outbound). POST for manual log of
+// inbound; outbound rows are auto-logged from the Resend send path.
+const logEmailSchema = z.object({
+  body: z.object({
+    direction: z.enum(['inbound', 'outbound']),
+    subject: z.string().max(500).optional(),
+    body: z.string().max(50000).optional(),
+    fromAddress: z.string().max(255).optional(),
+    toAddress: z.string().max(255).optional(),
+    occurredAt: z.string().datetime().optional(),
+  }),
+});
+clientRoutes.get('/:id/emails', clientEmailsController.listEmails);
+clientRoutes.post('/:id/emails', validate(logEmailSchema), clientEmailsController.logEmail);
+clientRoutes.delete('/:id/emails/:emailId', clientEmailsController.deleteEmail);

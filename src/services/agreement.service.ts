@@ -6,6 +6,7 @@ import { createEnvelope, downloadSignedPdf, getEnvelopeStatus } from '../integra
 import { uploadFile, downloadFile } from '../integrations/r2/r2-client.js';
 import { createContact as createXeroContact, isXeroConfigured } from '../integrations/xero/xero-client.js';
 import { notify } from './notification.service.js';
+import { logClientActivity } from './client-activity.service.js';
 import { logger } from '../utils/logger.js';
 import { ForbiddenError } from '../utils/errors.js';
 import type { EnvelopeStatus, SignNowWebhookEvent } from '../integrations/signnow/signnow-types.js';
@@ -101,6 +102,13 @@ export async function sendAgreement(input: SendAgreementInput) {
     })
     .returning();
 
+  // L #38 — surface in the per-client activity feed.
+  await logClientActivity(input.clientId, null, 'agreement_sent', {
+    agreementId: row.id,
+    signerEmail: input.signerEmail,
+    signerName: input.signerName,
+  });
+
   logger.info({ agreementId: row.id, envelopeId: envelope.envelopeId }, 'Agreement sent');
   return row;
 }
@@ -187,6 +195,15 @@ export async function handleSignNowWebhook(event: SignNowWebhookEvent) {
   }
 
   await db.update(agreements).set(patch).where(eq(agreements.id, existing.id));
+  // L #38 — emit a typed event so the timeline can highlight signed/declined.
+  const activityType =
+    status === 'completed' || status === 'signed' ? 'agreement_signed'
+      : status === 'declined' ? 'agreement_declined'
+      : 'agreement_status_changed';
+  await logClientActivity(existing.clientId, null, activityType, {
+    agreementId: existing.id,
+    status,
+  });
   logger.info({ agreementId: existing.id, status }, 'Agreement status updated');
 }
 

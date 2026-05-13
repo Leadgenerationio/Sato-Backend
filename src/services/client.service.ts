@@ -8,6 +8,7 @@ import { invoices } from '../db/schema/invoices.js';
 import * as creditCheck from '../integrations/credit-check/index.js';
 import { scoreToRiskRating } from '../integrations/credit-check/types.js';
 import { createNotification } from './notification.service.js';
+import { logClientActivity } from './client-activity.service.js';
 import { logger } from '../utils/logger.js';
 import type { AuthPayload } from '../types/index.js';
 
@@ -402,6 +403,11 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
   }
 
   const contacts = await loadContactsForClient(row.id);
+  // L #38 — surface creation in the activity feed.
+  await logClientActivity(row.id, requester.userId ?? null, 'client_created', {
+    companyName: row.companyName,
+    companyNumber: row.companyNumber,
+  });
   return toDetail(row, 0, 0, contacts);
 }
 
@@ -475,6 +481,19 @@ export async function updateClient(id: string, data: UpdateClientInput, requeste
     getRevenueForClient(id),
     loadContactsForClient(id),
   ]);
+  // L #38 — log the update with the diff payload. One event per call —
+  // the payload is the keys-that-changed map so the feed is readable
+  // without exploding into per-field rows.
+  // We compute `changed` from `patch` (which only carries the keys the
+  // caller actually sent). Skip `updatedAt` — it's noise.
+  const { updatedAt: _ignored, ...changedKeys } = patch as Record<string, unknown>;
+  void _ignored;
+  if (Object.keys(changedKeys).length > 0 || data.contacts !== undefined) {
+    await logClientActivity(id, requester.userId ?? null, 'client_updated', {
+      changed: Object.keys(changedKeys),
+      contactsReplaced: data.contacts !== undefined,
+    });
+  }
   return toDetail(row, count ?? 0, revenue, contacts);
 }
 
@@ -529,6 +548,15 @@ export async function runCreditCheck(clientId: string, requester: AuthPayload): 
       updatedAt: new Date(),
     })
     .where(eq(clients.id, clientId));
+
+  // L #38 — surface in activity feed. The diff (scoreChange) lets the
+  // timeline highlight risk-rating drops visually.
+  await logClientActivity(clientId, requester.userId ?? null, 'credit_check_run', {
+    creditScore: report.creditScore,
+    riskRating: report.riskRating,
+    previousScore: prevScore,
+    scoreChange,
+  });
 
   return {
     id: inserted.id,

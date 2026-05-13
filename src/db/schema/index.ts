@@ -23,3 +23,5 @@ export * from './staff.js';
 export * from './bank-feed.js';
 export * from './creative-approvals.js';
 export * from './sos-help.js';
+export * from './client-activity.js';
+export * from './client-emails.js';

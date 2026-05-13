@@ -2,6 +2,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { clientDocuments } from '../db/schema/client-documents.js';
 import { clients } from '../db/schema/clients.js';
+import { logClientActivity } from './client-activity.service.js';
 import type { AuthPayload } from '../types/index.js';
 
 export interface ClientDocument {
@@ -82,6 +83,12 @@ export async function addDocument(
       uploadedBy: requester.userId,
     })
     .returning();
+  // L #38 — surface uploads in the per-client activity feed.
+  await logClientActivity(clientId, requester.userId ?? null, 'document_uploaded', {
+    documentId: row.id,
+    name: row.name,
+    sizeBytes: row.sizeBytes,
+  });
   return toDocument(row);
 }
 
@@ -94,6 +101,12 @@ export async function removeDocument(
   const deleted = await db
     .delete(clientDocuments)
     .where(and(eq(clientDocuments.id, docId), eq(clientDocuments.clientId, clientId)))
-    .returning({ id: clientDocuments.id });
+    .returning({ id: clientDocuments.id, name: clientDocuments.name });
+  if (deleted.length > 0) {
+    await logClientActivity(clientId, requester.userId ?? null, 'document_removed', {
+      documentId: deleted[0].id,
+      name: deleted[0].name,
+    });
+  }
   return deleted.length > 0;
 }
