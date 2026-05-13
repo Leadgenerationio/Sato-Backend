@@ -16,6 +16,7 @@ import { sendEmail } from '../integrations/resend/resend-client.js';
 import type { ResendSendRequest } from '../integrations/resend/resend-types.js';
 import { emailQueue } from './queue.js';
 import * as invoiceService from '../services/invoice.service.js';
+import { runAutoInvoiceAllBusinesses } from '../services/auto-invoice.service.js';
 import { refreshWorkflowAggregates } from '../services/workflow.service.js';
 import { WORKFLOW_HANDLERS, isRegisteredHandler } from './workflow-handlers.js';
 import type { AuthPayload } from '../types/index.js';
@@ -91,6 +92,14 @@ new Worker('invoice', async (job) => {
       }
       logger.info({ overdue: overdue.length, enqueued }, 'chase-overdue-invoices complete');
       return { overdue: overdue.length, enqueued };
+    }
+    case 'auto-invoice-weekly': {
+      // Sam Loom #14 — Mondays 09:00 UTC. Iterates every business; per-tenant
+      // errors are caught + logged in auto_invoice_runs without aborting the
+      // whole sweep.
+      const result = await runAutoInvoiceAllBusinesses();
+      logger.info(result, 'auto-invoice-weekly complete');
+      return result;
     }
     default:
       logger.warn({ jobId: job.id, name: job.name }, 'Unknown invoice job — ignoring');
