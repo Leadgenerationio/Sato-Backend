@@ -2,6 +2,7 @@ import bcryptjs from 'bcryptjs';
 import { eq } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { users } from '../db/schema/index.js';
+import { clients } from '../db/schema/clients.js';
 import { NotFoundError, ForbiddenError, ValidationError, UnauthorizedError } from '../utils/errors.js';
 import type { UserRole, AuthPayload } from '../types/index.js';
 
@@ -67,6 +68,7 @@ export async function createUser(
   password: string,
   role: UserRole,
   requester: AuthPayload,
+  clientId?: string,
 ) {
   if (await findByEmail(email)) {
     throw new ValidationError('Email already registered');
@@ -75,6 +77,33 @@ export async function createUser(
   // Only the primary owner can create another owner
   if (role === 'owner' && !(await isPrimaryOwner(requester.userId))) {
     throw new ForbiddenError('Only the primary owner can create Owner users');
+  }
+
+  // clientId is meaningful only for portal users (role='client'). For
+  // internal roles, ignore any supplied clientId — they have no specific
+  // client they're scoped to.
+  let resolvedClientId: string | null = null;
+  if (role === 'client') {
+    if (!clientId) {
+      throw new ValidationError('clientId is required when role is "client"');
+    }
+    // Verify the client row exists AND belongs to the requester's business
+    // (or any business when requester is owner). Otherwise an admin could
+    // mint portal credentials for another tenant's client — security hole.
+    const [client] = await db.select().from(clients).where(eq(clients.id, clientId));
+    if (!client) {
+      throw new NotFoundError('Client');
+    }
+    if (
+      requester.role !== 'owner' &&
+      requester.businessId &&
+      client.businessId !== requester.businessId
+    ) {
+      throw new ForbiddenError('Cannot create a portal user for a client outside your business');
+    }
+    resolvedClientId = clientId;
+  } else if (clientId) {
+    throw new ValidationError('clientId is only allowed when role is "client"');
   }
 
   const passwordHash = await bcryptjs.hash(password, 12);
@@ -86,7 +115,7 @@ export async function createUser(
       name,
       role,
       businessId: requester.businessId ?? null,
-      clientId: null,
+      clientId: resolvedClientId,
       isActive: true,
       isPrimaryOwner: false,
     })

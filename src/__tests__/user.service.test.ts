@@ -5,6 +5,8 @@ import {
   updateOwnProfile, changeOwnPassword,
 } from '../services/user.service.js';
 import { findUserById, findUserByEmail, SEED_USER_IDS } from '../data/users.js';
+import { db } from '../config/database.js';
+import { clients } from '../db/schema/clients.js';
 import type { AuthPayload } from '../types/index.js';
 
 const ownerPayload: AuthPayload = {
@@ -75,6 +77,54 @@ describe('User Service', () => {
     it('inherits requester businessId', async () => {
       const user = await createUser(uniqueEmail('biz-user'), 'Biz User', 'pass123', 'readonly', opsPayload);
       expect(user.businessId).toBe(opsPayload.businessId);
+    });
+
+    // Portal-user creation — Benson Goldstein onboarding flow. Before this
+    // change, clientId was hardcoded to null on insert, so creating a
+    // client-role user via the admin API left the portal scoped to no client
+    // and rendered empty for the recipient.
+    describe('client-role users + clientId linkage', () => {
+      let bensonClientId: string;
+
+      beforeAll(async () => {
+        // Seed a Benson-like client row in the ops user's business so the
+        // happy-path test can link to it.
+        const [row] = await db
+          .insert(clients)
+          .values({
+            businessId: opsPayload.businessId!,
+            companyName: `Benson Test ${Date.now()}`,
+            currency: 'GBP',
+            status: 'active',
+          })
+          .returning({ id: clients.id });
+        bensonClientId = row.id;
+      });
+
+      it('creates a client-role user linked to a valid clientId in the requester business', async () => {
+        const email = uniqueEmail('benson-portal');
+        const user = await createUser(email, 'Benson Portal', 'pass123', 'client', opsPayload, bensonClientId);
+        expect(user.role).toBe('client');
+        expect(user.clientId).toBe(bensonClientId);
+      });
+
+      it('rejects client-role without clientId', async () => {
+        await expect(
+          createUser(uniqueEmail('no-client-id'), 'No CID', 'pass123', 'client', opsPayload),
+        ).rejects.toThrow(/clientId is required/);
+      });
+
+      it('rejects clientId on non-client roles (would have been silently ignored before)', async () => {
+        await expect(
+          createUser(uniqueEmail('wrong-role'), 'Wrong', 'pass123', 'readonly', opsPayload, bensonClientId),
+        ).rejects.toThrow(/only allowed when role is "client"/);
+      });
+
+      it('rejects clientId that doesn\'t exist', async () => {
+        await expect(
+          createUser(uniqueEmail('ghost'), 'Ghost', 'pass123', 'client', opsPayload, '00000000-0000-0000-0000-000000000000'),
+        ).rejects.toThrow(/not found/);
+      });
     });
   });
 

@@ -15,6 +15,10 @@ const createUserSchema = z.object({
     name: z.string().min(1).max(200),
     password: z.string().min(6).max(200),
     role: roleEnum,
+    // Required when role='client' — links the portal user to the client row
+    // whose data they're allowed to see. Must be omitted for internal roles.
+    // Validated server-side in user.service.ts.
+    clientId: z.string().uuid().optional(),
   }),
 });
 
