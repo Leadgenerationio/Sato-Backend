@@ -44,7 +44,7 @@ if (env.NODE_ENV === 'production' && configuredOrigins.length === 0) {
 const ALLOWED_ORIGINS = env.NODE_ENV === 'development'
   ? Array.from(new Set([...DEV_ALLOWED_ORIGINS, ...configuredOrigins]))
   : configuredOrigins;
-console.log('CORS allow-list:', ALLOWED_ORIGINS);
+logger.info({ allowedOrigins: ALLOWED_ORIGINS }, 'CORS allow-list configured');
 app.use(
   cors({
     origin: (origin, cb) => {
