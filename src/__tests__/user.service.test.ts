@@ -269,26 +269,39 @@ describe('User Service', () => {
   });
 
   describe('changeOwnPassword', () => {
+    // Use a freshly-created user instead of the seeded finance@stato.app —
+    // previously the test mutated the seed user's password and restored it,
+    // but mid-run failures left it in a half-changed state and broke other
+    // tests (auth-profile.test.ts, ordering-dependent). Isolation > seed reuse.
+    let pwTestUserId: string;
+    const PW_INITIAL = 'initial-pw-12345';
+
+    beforeAll(async () => {
+      const email = `pw-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@test.com`;
+      const u = await createUser(email, 'Password Test', PW_INITIAL, 'readonly', ownerPayload);
+      pwTestUserId = u.id;
+    });
+
     it('changes the password when current is correct', async () => {
-      await changeOwnPassword(SEED_USER_IDS.FINANCE, 'finance123', 'finance-new-pw');
-      const user = (await findUserByEmail('finance@stato.app'))!;
-      expect(await bcryptjs.compare('finance-new-pw', user.passwordHash)).toBe(true);
-      // Restore
-      await changeOwnPassword(SEED_USER_IDS.FINANCE, 'finance-new-pw', 'finance123');
+      await changeOwnPassword(pwTestUserId, PW_INITIAL, 'new-pw-67890');
+      const user = (await findUserById(pwTestUserId))!;
+      expect(await bcryptjs.compare('new-pw-67890', user.passwordHash)).toBe(true);
+      // Restore in case other tests share this fixture
+      await changeOwnPassword(pwTestUserId, 'new-pw-67890', PW_INITIAL);
     });
 
     it('rejects an incorrect current password', async () => {
-      await expect(changeOwnPassword(SEED_USER_IDS.FINANCE, 'wrong', 'finance-new-pw'))
+      await expect(changeOwnPassword(pwTestUserId, 'wrong', 'new-pw-67890'))
         .rejects.toThrow('Current password is incorrect');
     });
 
     it('rejects a too-short new password', async () => {
-      await expect(changeOwnPassword(SEED_USER_IDS.FINANCE, 'finance123', 'short'))
+      await expect(changeOwnPassword(pwTestUserId, PW_INITIAL, 'short'))
         .rejects.toThrow('at least 6 characters');
     });
 
     it('rejects reusing the same password', async () => {
-      await expect(changeOwnPassword(SEED_USER_IDS.FINANCE, 'finance123', 'finance123'))
+      await expect(changeOwnPassword(pwTestUserId, PW_INITIAL, PW_INITIAL))
         .rejects.toThrow('must differ');
     });
   });

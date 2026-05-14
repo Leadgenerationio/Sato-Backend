@@ -4,7 +4,8 @@ import app from '../index.js';
 
 let ownerToken: string;
 let financeToken: string;
-let financeCurrentPassword = 'finance123';
+let financeCurrentPassword = 'fresh-finance-pw-12345';
+let freshFinanceEmail: string;
 
 describe('Profile & Password API', () => {
   beforeAll(async () => {
@@ -13,9 +14,24 @@ describe('Profile & Password API', () => {
       .send({ email: 'owner@stato.app', password: 'owner123' });
     ownerToken = ownerRes.body.data.tokens.accessToken;
 
+    // Create a fresh finance_admin user instead of relying on the seeded
+    // finance@stato.app password — that password was mutated by previous
+    // user.service.test.ts runs and the dev DB never auto-resets. Using a
+    // freshly-minted user makes this test independent of dev DB drift.
+    freshFinanceEmail = `auth-profile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@test.com`;
+    await request(app)
+      .post('/api/v1/users')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        email: freshFinanceEmail,
+        name: 'Fresh Finance',
+        password: financeCurrentPassword,
+        role: 'finance_admin',
+      });
+
     const financeRes = await request(app)
       .post('/api/v1/auth/login')
-      .send({ email: 'finance@stato.app', password: financeCurrentPassword });
+      .send({ email: freshFinanceEmail, password: financeCurrentPassword });
     financeToken = financeRes.body.data.tokens.accessToken;
   });
 
@@ -82,13 +98,13 @@ describe('Profile & Password API', () => {
       // Old password no longer works
       const oldLogin = await request(app)
         .post('/api/v1/auth/login')
-        .send({ email: 'finance@stato.app', password: financeCurrentPassword });
+        .send({ email: freshFinanceEmail, password: financeCurrentPassword });
       expect(oldLogin.status).toBe(401);
 
       // New password works
       const newLogin = await request(app)
         .post('/api/v1/auth/login')
-        .send({ email: 'finance@stato.app', password: newPw });
+        .send({ email: freshFinanceEmail, password: newPw });
       expect(newLogin.status).toBe(200);
 
       // Restore so other tests keep working

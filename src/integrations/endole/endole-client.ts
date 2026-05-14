@@ -80,25 +80,15 @@ function normalise(raw: EndoleApiResponse, companyNumber: string, companyName: s
   };
 }
 
-function mockReport(companyNumber: string, companyName: string): EndoleCreditReport {
-  const score = Math.floor(Math.random() * 60) + 40;
-  return {
-    companyId: `endole-${companyNumber}`,
-    companyName,
-    companyNumber,
-    creditScore: score,
-    riskRating: scoreToRiskRating(score),
-    ccjCount: score < 50 ? Math.floor(Math.random() * 3) + 1 : 0,
-    ccjTotal: score < 50 ? Math.floor(Math.random() * 15000) : 0,
-    registrationDate: '2018-03-15',
-    checkedAt: new Date().toISOString(),
-  };
-}
-
 export async function runCreditCheck(companyNumber: string, companyName: string): Promise<EndoleCreditReport> {
   if (!isEndoleConfigured()) {
-    logger.warn('Endole running in MOCK mode — ENDOLE_APP_ID or ENDOLE_APP_KEY missing');
-    return mockReport(companyNumber, companyName);
+    // No-fake-data policy: never fabricate a credit score. The credit-check
+    // router (integrations/credit-check/index.ts) throws
+    // CreditProviderNotConfiguredError before reaching this path in the normal
+    // call path; this duplicate guard catches any direct caller that bypasses
+    // the router. Removed the previous Math.random() mockReport that returned
+    // 40-99 scores indistinguishable from real data.
+    throw new Error('Endole not configured (missing ENDOLE_APP_ID or ENDOLE_APP_KEY) — refusing to fabricate a credit score');
   }
 
   const qs = isSandbox() ? '?sandbox=true' : '';

@@ -554,8 +554,13 @@ function logMock(scope: string): void {
 
 export async function getCampaignById(id: string | number): Promise<LeadByteCampaignDetail> {
   if (!isConfigured()) {
+    // No-fake-data policy: previously returned a named "Mock Campaign (for demo)"
+    // object which could land in the UI looking like a real row. All other
+    // LeadByte mocks return empty arrays/objects so unconfigured deploys
+    // surface as obvious "no data" instead of fake content. Single-object
+    // getters now return an empty-shape placeholder rather than a named fake.
     logMock(`getCampaignById(${id})`);
-    return { id: String(id), name: 'Mock Campaign (for demo)', reference: `MOCK-${id}`, active: 'Yes', fields: [] };
+    return { id: String(id), name: '', reference: '', active: 'No', fields: [] };
   }
   return lbGet<LeadByteCampaignDetail>(`/campaigns/${id}`);
 }
