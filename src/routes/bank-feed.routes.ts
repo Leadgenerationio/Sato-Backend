@@ -25,7 +25,7 @@ const categorizeSchema = z.object({
 const createCategorySchema = z.object({
   body: z.object({
     name: z.string().min(1).max(100),
-    bucket: z.enum(['fixed', 'one_off']),
+    bucket: z.enum(['fixed', 'one_off', 'advertising']),
     color: z.string().max(20).optional(),
   }),
 });

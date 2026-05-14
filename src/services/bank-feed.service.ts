@@ -53,6 +53,13 @@ function requireBusinessId(requester: AuthPayload): string {
 
 export async function listCategories(requester: AuthPayload): Promise<CostCategory[]> {
   const businessId = requireBusinessId(requester);
+  // Sam 2026-05-14 — ensure every business has an Advertising option in the
+  // row dropdown so Facebook/Google card bills can be tagged without first
+  // having to "+ New category". Idempotent via the (business_id, name) unique.
+  await db
+    .insert(costCategories)
+    .values({ businessId, name: 'Advertising', bucket: 'advertising', color: null })
+    .onConflictDoNothing({ target: [costCategories.businessId, costCategories.name] });
   const rows = await db
     .select()
     .from(costCategories)
