@@ -297,7 +297,11 @@ describe('Xero — getBankBalances (statement balance via Finance API)', () => {
     expect(accounts[0].unreconciledLines).toBeNull();
   });
 
-  it('requests the finance.statements.read scope on the access token', async () => {
+  it('requests only the accounting scopes the Custom Connection is entitled to', async () => {
+    // finance.statements.read is intentionally NOT requested here — see the
+    // SCOPES comment in xero-client.ts. Requesting an unentitled scope fails
+    // the entire token exchange with invalid_scope; the bank-balance feature
+    // falls back to /Accounts.Balance when CashValidation isn't available.
     let bodyOnTokenCall = '';
     global.fetch = vi.fn(async (url: string, init: RequestInit) => {
       const u = String(url);
@@ -309,6 +313,10 @@ describe('Xero — getBankBalances (statement balance via Finance API)', () => {
     }) as unknown as typeof fetch;
 
     await xero.getValidToken();
-    expect(bodyOnTokenCall).toContain('finance.statements.read');
+    expect(bodyOnTokenCall).toContain('accounting.transactions');
+    expect(bodyOnTokenCall).toContain('accounting.contacts');
+    expect(bodyOnTokenCall).toContain('accounting.reports.read');
+    expect(bodyOnTokenCall).toContain('accounting.settings.read');
+    expect(bodyOnTokenCall).not.toContain('finance.statements.read');
   });
 });

@@ -17,7 +17,17 @@ import { logger } from '../../utils/logger.js';
 const IDENTITY_HOST = 'https://identity.xero.com';
 const API_HOST = 'https://api.xero.com';
 
-const SCOPES = 'accounting.transactions accounting.contacts accounting.reports.read accounting.settings.read finance.statements.read';
+// Scope strategy:
+//   * `finance.statements.read` is intentionally OMITTED — Custom Connection
+//     apps don't ship with Finance API access by default, and requesting a
+//     scope the app isn't entitled to fails the ENTIRE token exchange with
+//     invalid_scope (rather than just degrading the Finance feature). The
+//     bank-balance path already falls back to /Accounts.Balance when
+//     CashValidation isn't available, so we lose the unreconciled-lines
+//     count but bank balances still surface correctly. Re-add the scope
+//     once the Custom Connection has Finance API enabled in the developer
+//     portal — gated separately on developer.xero.com.
+const SCOPES = 'accounting.transactions accounting.contacts accounting.reports.read accounting.settings.read';
 
 interface XeroCache {
   accessToken: string;
