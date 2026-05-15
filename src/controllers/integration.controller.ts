@@ -13,7 +13,7 @@ import { getActiveProvider } from '../integrations/credit-check/index.js';
 import { isResendConfigured } from '../integrations/resend/resend-client.js';
 import { isSignNowConfigured } from '../integrations/signnow/signnow-client.js';
 import { isR2Configured } from '../integrations/r2/r2-client.js';
-import { isCatchrConfigured } from '../integrations/catchr/catchr-client.js';
+import { isCatchrConfigured, listSources as listCatchrSources } from '../integrations/catchr/catchr-client.js';
 import { getLastCatchrSyncAt } from './ad-spend.controller.js';
 import { syncQueue } from '../jobs/queue.js';
 import { cached } from '../utils/cache.js';
@@ -235,6 +235,68 @@ export async function catchrStatus(_req: Request, res: Response) {
       lastSyncAt: getLastCatchrSyncAt(),
     },
   });
+}
+
+// Cache list-sources for a few minutes — the account list rarely changes
+// (Sam's connected ad accounts are stable across sessions) and the MCP
+// round-trip is ~600-1200ms because of session handshake overhead.
+const CATCHR_ACCOUNTS_TTL_SECONDS = 300;
+
+export interface CatchrAccountSummary {
+  /** Catchr account identifier — what we persist into traffic_sources.account_id. */
+  id: string;
+  /** Human label shown in the dropdown. */
+  name: string;
+  /** Normalised platform key (facebook/google/bing/...). */
+  platform: string;
+  /** Catchr's parent source row — useful for "Open in Catchr" deep-links. */
+  sourceName: string;
+}
+
+/**
+ * List Catchr ad accounts the user can pick from when configuring a
+ * traffic source — Sam's 2026-05-15 Loom: the campaign-source UI was
+ * forcing users to paste a Catchr URL by hand, when the Catchr API
+ * already exposes the same dropdown leadreports.io renders. With a
+ * platform filter we return only Facebook accounts when the user picks
+ * Facebook (etc); without it we return everything so a single fetch
+ * powers a fully-populated combobox in the future.
+ *
+ * Returns `{ accounts: [] }` when Catchr isn't configured so the UI
+ * can gracefully fall back to manual entry without a 500.
+ */
+export async function catchrAccounts(req: Request, res: Response) {
+  if (!isCatchrConfigured()) {
+    res.json({ status: 'success', data: { configured: false, accounts: [] } });
+    return;
+  }
+  const platform = String(req.query.platform ?? '').trim().toLowerCase();
+  try {
+    const result = await cached(
+      `catchr:accounts:${platform || 'all'}`,
+      CATCHR_ACCOUNTS_TTL_SECONDS,
+      () => listCatchrSources({ platform: platform || undefined, includeAvailableAccounts: true }),
+    );
+    const accounts: CatchrAccountSummary[] = (result.sources ?? []).flatMap((src) =>
+      (src.available_accounts ?? []).map((acct) => ({
+        id: String(acct.id),
+        name: acct.name,
+        platform: String(src.platform || '').toLowerCase(),
+        sourceName: src.name,
+      })),
+    );
+    res.json({ status: 'success', data: { configured: true, accounts } });
+  } catch (err) {
+    logger.warn({ err, platform }, 'Catchr listSources failed in /accounts');
+    res.json({
+      status: 'success',
+      data: {
+        configured: true,
+        accounts: [],
+        error: err instanceof Error ? err.message : 'Catchr fetch failed',
+      },
+    });
+  }
 }
 
 function maskId(value: string): string {

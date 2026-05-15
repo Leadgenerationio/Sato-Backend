@@ -214,4 +214,37 @@ describe('Integration API', () => {
       expect(res.status).toBe(403);
     });
   });
+
+  // ─── Catchr account picker for the campaign Traffic Sources UI ───
+  //
+  // Sam's 2026-05-15 Loom: the traffic-source dialog forced users to paste
+  // a Catchr NCP URL by hand. New endpoint surfaces the same dropdown
+  // leadreports.io renders. Must return `{ accounts: [] }` (not 500) when
+  // Catchr isn't configured so the UI degrades to manual-URL entry gracefully.
+
+  describe('GET /api/v1/integrations/catchr/accounts', () => {
+    const originalEnv = { ...process.env };
+    afterEach(async () => {
+      process.env = { ...originalEnv };
+      await invalidateCache('catchr:accounts:all');
+      await invalidateCache('catchr:accounts:facebook');
+    });
+
+    it('returns configured:false + empty accounts when Catchr not configured', async () => {
+      delete process.env.CATCHR_ACCESS_TOKEN;
+      await invalidateCache('catchr:accounts:all');
+      const res = await request(app)
+        .get('/api/v1/integrations/catchr/accounts')
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data).toMatchObject({ configured: false, accounts: [] });
+    });
+
+    it('client role gets 403', async () => {
+      const res = await request(app)
+        .get('/api/v1/integrations/catchr/accounts?platform=facebook')
+        .set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(403);
+    });
+  });
 });

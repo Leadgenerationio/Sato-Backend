@@ -29,3 +29,6 @@ integrationRoutes.get('/resend/status', integrationController.resendStatus);
 integrationRoutes.get('/signnow/status', integrationController.signnowStatus);
 integrationRoutes.get('/r2/status', integrationController.r2Status);
 integrationRoutes.get('/catchr/status', integrationController.catchrStatus);
+// Account picker for the campaign Traffic Sources UI — replaces the
+// free-form Catchr URL paste with a real dropdown.
+integrationRoutes.get('/catchr/accounts', integrationController.catchrAccounts);
