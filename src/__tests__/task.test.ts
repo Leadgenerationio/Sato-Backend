@@ -132,6 +132,40 @@ describe('Task API', () => {
     });
   });
 
+  // Sam (2026-05-15 Loom) called out the missing delete button. The route
+  // is a straight hard-delete with FK-cascade on subtasks/attachments/etc.
+  // These tests use freshly-created rows so other tests' fixtures aren't
+  // destroyed mid-suite.
+  describe('DELETE /api/v1/tasks/:id', () => {
+    it('hard-deletes a task for owner', async () => {
+      const createRes = await request(app)
+        .post('/api/v1/tasks')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ title: `Delete me ${Date.now()}`, assignee: 'Sam Owner', category: 'billing' });
+      expect(createRes.status).toBe(201);
+      const id = createRes.body.data.task.id as string;
+
+      const delRes = await request(app)
+        .delete(`/api/v1/tasks/${id}`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(delRes.status).toBe(200);
+      expect(delRes.body.data).toMatchObject({ deleted: true });
+
+      // The row really is gone — subsequent GET 404s.
+      const getRes = await request(app)
+        .get(`/api/v1/tasks/${id}`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(getRes.status).toBe(404);
+    });
+
+    it('returns 404 for non-existent task', async () => {
+      const res = await request(app)
+        .delete(`/api/v1/tasks/${MISSING_UUID}`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(404);
+    });
+  });
+
   describe('PATCH /api/v1/tasks/:id/status', () => {
     it('updates task status', async () => {
       const res = await request(app).patch(`/api/v1/tasks/${seededTaskId}/status`).set('Authorization', `Bearer ${ownerToken}`).send({

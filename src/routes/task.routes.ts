@@ -107,6 +107,7 @@ taskRoutes.post('/from-template', internalRoles, validate(createFromTemplateSche
 taskRoutes.get('/:id', internalRoles, taskController.getTask);
 taskRoutes.post('/', internalRoles, validate(createTaskSchema), taskController.createTask);
 taskRoutes.put('/:id', internalRoles, validate(updateTaskSchema), taskController.updateTask);
+taskRoutes.delete('/:id', internalRoles, taskController.deleteTask);
 taskRoutes.patch('/:id/status', internalRoles, validate(updateTaskStatusSchema), taskController.updateTaskStatus);
 taskRoutes.post('/:id/comments', internalRoles, validate(addCommentSchema), taskController.addComment);
 

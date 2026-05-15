@@ -5,6 +5,7 @@ import { logActivity, listActivityForTask, type TaskActivityEvent } from './task
 import { loadSubtasksForTask, type TaskSubtask } from './task-subtasks.service.js';
 import { loadAttachmentsForTask, type TaskAttachment } from './task-attachments.service.js';
 import { cronNextFire, isValidCron } from '../utils/cron-next.js';
+import { logger } from '../utils/logger.js';
 import type { AuthPayload } from '../types/index.js';
 
 export interface TaskComment {
@@ -297,6 +298,32 @@ export async function updateTaskStatus(
   });
   const commentsMap = await loadCommentsForTasks([id]);
   return taskToDto(row, commentsMap.get(id) ?? []);
+}
+
+/**
+ * Hard-delete a task and its dependants.
+ *
+ * Sam (2026-05-15 Loom): "there's no delete button" — soft-delete would have
+ * been the safer default but the existing schema has no `deleted_at` column
+ * and Sam wants the row truly gone (he's pruning the noise from old test
+ * tasks, not archiving). FKs on subtasks / attachments / comments / activity
+ * cascade; `parent_task_id` is `set null` so child-task rows survive an
+ * accidental parent-delete and surface as top-level instead of orphaning.
+ *
+ * Returns `false` when the row doesn't exist so the controller can 404
+ * cleanly without a separate read.
+ */
+export async function deleteTask(id: string, requester?: AuthPayload): Promise<boolean> {
+  const result = await db.delete(tasks).where(eq(tasks.id, id)).returning({ id: tasks.id });
+  if (result.length === 0) return false;
+  // logActivity targets the deleted row's id which is now gone — emit a
+  // workspace-level audit line via the logger instead. Activity table FK
+  // would otherwise CASCADE this away.
+  logger.info(
+    { taskId: id, userId: requester?.userId ?? null },
+    'task_deleted',
+  );
+  return true;
 }
 
 export async function addComment(

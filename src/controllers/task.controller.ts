@@ -53,6 +53,15 @@ export async function updateTask(req: Request, res: Response) {
   res.json({ status: 'success', data: { task } });
 }
 
+export async function deleteTask(req: Request, res: Response) {
+  const ok = await taskService.deleteTask(req.params.id as string, req.user!);
+  if (!ok) {
+    res.status(404).json({ status: 'error', message: 'Task not found' });
+    return;
+  }
+  res.json({ status: 'success', data: { deleted: true } });
+}
+
 export async function updateTaskStatus(req: Request, res: Response) {
   const { status } = req.body;
   if (!status) {
