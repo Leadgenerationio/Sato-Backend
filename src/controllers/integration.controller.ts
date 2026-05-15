@@ -298,11 +298,13 @@ async function buildOverview() {
   const xeroConfigured = xeroClient.isXeroConfigured();
   let xeroConnected = false;
   let xeroTenantName: string | null = null;
+  let xeroError: string | null = null;
   if (xeroConfigured) {
     try {
       const status = await xeroClient.getStatus();
       xeroConnected = status.connected ?? false;
       xeroTenantName = status.tenantName ?? null;
+      xeroError = status.lastError ?? null;
     } catch (err) {
       logger.warn({ err }, 'Xero status fetch failed in overview');
     }
@@ -315,6 +317,7 @@ async function buildOverview() {
       configured: xeroConfigured,
       connected: xeroConnected,
       tenantName: xeroTenantName,
+      lastError: xeroError,
     },
     leadbyte: {
       configured: isLeadByteConfigured(),

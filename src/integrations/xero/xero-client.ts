@@ -28,9 +28,15 @@ interface XeroCache {
 
 let cache: XeroCache | null = null;
 
+// Last token-exchange or /connections error message. Surfaced via getStatus()
+// so the integrations page can show "invalid_scope" / "invalid_client" inline
+// instead of forcing the operator into Railway logs.
+let lastAuthError: string | null = null;
+
 export const __testing = {
   resetCache() {
     cache = null;
+    lastAuthError = null;
   },
 };
 
@@ -78,6 +84,18 @@ async function exchangeCredentials(): Promise<{ accessToken: string; expiresAt: 
   if (!res.ok) {
     const body = await res.text();
     logger.error({ status: res.status, body }, 'Xero token exchange failed');
+    // Pull Xero's standard OAuth error code/description out of the response
+    // body so the UI can show a human-actionable message rather than a 4xx.
+    let detail = `HTTP ${res.status}`;
+    try {
+      const parsed = JSON.parse(body) as { error?: string; error_description?: string };
+      if (parsed.error) {
+        detail = parsed.error_description ? `${parsed.error}: ${parsed.error_description}` : parsed.error;
+      }
+    } catch {
+      // Body wasn't JSON — keep the HTTP-status fallback.
+    }
+    lastAuthError = detail;
     throw new Error(`Xero auth failed: ${res.status}`);
   }
 
@@ -129,6 +147,7 @@ export async function getValidToken(): Promise<{ accessToken: string; tenantId: 
     : await fetchBoundTenant(accessToken);
 
   cache = { accessToken, expiresAt, tenantId: tenant.tenantId, tenantName: tenant.tenantName };
+  lastAuthError = null;
   logger.info({ tenantName: tenant.tenantName, tenantId: tenant.tenantId }, 'Xero authenticated (Custom Connection)');
   return { accessToken, tenantId: cache.tenantId };
 }
@@ -139,6 +158,8 @@ export interface XeroStatus {
   tenantId?: string;
   tenantName?: string;
   expiresAt?: Date;
+  /** Human-readable reason the last auth attempt failed (e.g. "invalid_scope"). */
+  lastError?: string;
 }
 
 /**
@@ -158,7 +179,11 @@ export async function getStatus(): Promise<XeroStatus> {
       expiresAt: new Date(cache.expiresAt),
     };
   }
-  return { configured: true, connected: false };
+  return {
+    configured: true,
+    connected: false,
+    ...(lastAuthError ? { lastError: lastAuthError } : {}),
+  };
 }
 
 /**
