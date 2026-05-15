@@ -13,7 +13,11 @@ import { getActiveProvider } from '../integrations/credit-check/index.js';
 import { isResendConfigured } from '../integrations/resend/resend-client.js';
 import { isSignNowConfigured } from '../integrations/signnow/signnow-client.js';
 import { isR2Configured } from '../integrations/r2/r2-client.js';
-import { isCatchrConfigured, listSources as listCatchrSources } from '../integrations/catchr/catchr-client.js';
+import {
+  isCatchrConfigured,
+  listSources as listCatchrSources,
+  listPlatforms as listCatchrPlatforms,
+} from '../integrations/catchr/catchr-client.js';
 import { getLastCatchrSyncAt } from './ad-spend.controller.js';
 import { syncQueue } from '../jobs/queue.js';
 import { cached } from '../utils/cache.js';
@@ -243,22 +247,20 @@ export async function catchrStatus(_req: Request, res: Response) {
 const CATCHR_ACCOUNTS_TTL_SECONDS = 300;
 
 /**
- * The Stato UI uses short platform keys (`facebook`, `google`, `tiktok`)
- * but Catchr's `list_sources` API filters on its own slugs
- * (`facebook-ads`, `google-ads`, `tik-tok`) — see CatchrPlatform in
- * catchr-types.ts. Without this mapping, every platform-scoped fetch
- * returns zero rows even when Sam has the account connected on Catchr.
- * Sam called this out on 2026-05-15 when "No facebook accounts found"
- * showed up despite his Catchr workspace having a Facebook source.
+ * Catchr platforms list (slug + display name). The Stato UI fetches this
+ * at runtime so the supplier dropdown stays in sync with whatever Sam has
+ * actually connected on Catchr — no hardcoded list to maintain, no slug
+ * mismatch ever again (e.g. our old 'facebook' UI key vs Catchr's
+ * 'facebook-ads'). Sam called out the picker showing "No facebook accounts
+ * found" on 2026-05-15 — root cause was exactly that mismatch.
  */
-const PLATFORM_UI_TO_CATCHR: Record<string, string> = {
-  facebook: 'facebook-ads',
-  google: 'google-ads',
-  bing: 'bing-ads',
-  tiktok: 'tik-tok',
-  taboola: 'taboola',
-  outbrain: 'outbrain',
-};
+export interface CatchrPlatformOption {
+  id: string;
+  name: string;
+  connected: boolean;
+}
+
+const CATCHR_PLATFORMS_TTL_SECONDS = 600; // 10 min — connected-platforms list barely changes
 
 export interface CatchrAccountSummary {
   /** Catchr account identifier — what we persist into traffic_sources.account_id. */
@@ -288,25 +290,21 @@ export async function catchrAccounts(req: Request, res: Response) {
     res.json({ status: 'success', data: { configured: false, accounts: [] } });
     return;
   }
-  const platform = String(req.query.platform ?? '').trim().toLowerCase();
-  // Map the UI's short slug to Catchr's listSources filter value. Unknown
-  // platforms (or empty) pass through unchanged so callers can still ask
-  // for the whole catalog.
-  const catchrPlatform = platform ? (PLATFORM_UI_TO_CATCHR[platform] ?? platform) : undefined;
+  // The picker now uses Catchr's canonical slugs (e.g. 'facebook-ads')
+  // end-to-end, populated dynamically from /catchr/platforms. No more
+  // UI→Catchr slug translation step.
+  const platform = String(req.query.platform ?? '').trim();
   try {
     const result = await cached(
-      `catchr:accounts:${catchrPlatform ?? 'all'}`,
+      `catchr:accounts:${platform || 'all'}`,
       CATCHR_ACCOUNTS_TTL_SECONDS,
-      () => listCatchrSources({ platform: catchrPlatform, includeAvailableAccounts: true }),
+      () => listCatchrSources({ platform: platform || undefined, includeAvailableAccounts: true }),
     );
     const accounts: CatchrAccountSummary[] = (result.sources ?? []).flatMap((src) =>
       (src.available_accounts ?? []).map((acct) => ({
         id: String(acct.id),
         name: acct.name,
-        // Echo back the UI's slug (not Catchr's) so the frontend's
-        // platform comparisons stay simple and the API contract doesn't
-        // leak Catchr-specific slugs.
-        platform: platform || String(src.platform || '').toLowerCase(),
+        platform: String(src.platform || '').toLowerCase(),
         sourceName: src.name,
       })),
     );
@@ -318,6 +316,48 @@ export async function catchrAccounts(req: Request, res: Response) {
       data: {
         configured: true,
         accounts: [],
+        error: err instanceof Error ? err.message : 'Catchr fetch failed',
+      },
+    });
+  }
+}
+
+/**
+ * List Catchr platforms (Facebook Ads, Google Ads, etc.) so the supplier
+ * dropdown in the campaign Traffic Sources UI is driven by what Sam has
+ * connected on Catchr, not by a hardcoded list that drifts. Default
+ * `connected=true` keeps the picker focused on actionable platforms.
+ *
+ * Sam's 2026-05-15 Loom: the previous hardcoded list mapped 'facebook' →
+ * 'facebook-ads' manually and missed everything else Catchr supports
+ * (every other Ads/Analytics platform). With this endpoint the picker is
+ * always in sync with his actual Catchr workspace.
+ */
+export async function catchrPlatforms(req: Request, res: Response) {
+  if (!isCatchrConfigured()) {
+    res.json({ status: 'success', data: { configured: false, platforms: [] } });
+    return;
+  }
+  const connectedOnly = String(req.query.connected ?? 'true').toLowerCase() !== 'false';
+  try {
+    const result = await cached(
+      `catchr:platforms:${connectedOnly ? 'connected' : 'all'}`,
+      CATCHR_PLATFORMS_TTL_SECONDS,
+      () => listCatchrPlatforms(connectedOnly),
+    );
+    const platforms: CatchrPlatformOption[] = (result.platforms ?? []).map((p) => ({
+      id: String(p.id),
+      name: p.name,
+      connected: p.connected,
+    }));
+    res.json({ status: 'success', data: { configured: true, platforms } });
+  } catch (err) {
+    logger.warn({ err, connectedOnly }, 'Catchr listPlatforms failed');
+    res.json({
+      status: 'success',
+      data: {
+        configured: true,
+        platforms: [],
         error: err instanceof Error ? err.message : 'Catchr fetch failed',
       },
     });

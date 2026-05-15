@@ -252,20 +252,17 @@ describe('Integration API', () => {
       expect(res.status).toBe(403);
     });
 
-    // Sam saw "No facebook accounts found" on the picker even though his
-    // Catchr workspace had a Facebook source — the UI's short slugs don't
-    // match Catchr's (`facebook-ads`/`google-ads`/`tik-tok`). The controller
-    // now translates the slug before hitting listSources. This test pins the
-    // mapping so the bug doesn't recur.
-    it('maps the UI platform slug to Catchr\'s listSources filter slug', async () => {
+    // Frontend now fetches the supplier list from /catchr/platforms and
+    // sends Catchr's canonical slug (e.g. 'facebook-ads') straight to
+    // /catchr/accounts. The controller no longer translates — whatever
+    // slug arrives is passed through to listSources. This test pins the
+    // pass-through so a future change doesn't silently re-introduce a
+    // mapping that would drift out of sync with Catchr's catalog.
+    it('passes the platform query param straight through to Catchr listSources', async () => {
       process.env.CATCHR_ACCESS_TOKEN = 'test-token';
       const capturedPlatforms: string[] = [];
 
-      // Mock the MCP JSON-RPC handshake + list_sources response. We don't
-      // care about session-id details for this assertion — just intercept
-      // the body of the list_sources call and capture its platform arg.
-      global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === 'string' ? input : input.toString();
+      global.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
         const bodyStr = typeof init?.body === 'string' ? init.body : '';
         let rpc: { method?: string; params?: { name?: string; arguments?: { platform?: string } } } = {};
         try { rpc = JSON.parse(bodyStr); } catch { /* not JSON */ }
@@ -280,24 +277,33 @@ describe('Integration API', () => {
           capturedPlatforms.push(rpc.params.arguments?.platform ?? '');
           return new Response(JSON.stringify({
             jsonrpc: '2.0',
-            id: rpc.params ? 2 : 0,
+            id: 2,
             result: { content: [{ type: 'text', text: JSON.stringify({ count: 0, sources: [] }) }] },
           }), { status: 200, headers: { 'content-type': 'application/json' } });
         }
-        // notifications/initialized and anything else: 202 no-content.
         return new Response('', { status: 202, headers: { 'content-type': 'application/json' } });
       }) as unknown as typeof fetch;
 
       await invalidateCache('catchr:accounts:facebook-ads');
       const res = await request(app)
-        .get('/api/v1/integrations/catchr/accounts?platform=facebook')
+        .get('/api/v1/integrations/catchr/accounts?platform=facebook-ads')
         .set('Authorization', `Bearer ${ownerToken}`);
 
       expect(res.status).toBe(200);
       expect(res.body.data).toMatchObject({ configured: true, accounts: [] });
-      // The Catchr-facing call must use 'facebook-ads', NOT 'facebook'.
+      // Whatever slug came in (Catchr's canonical 'facebook-ads' from the
+      // /platforms list) goes straight through — no transformation.
       expect(capturedPlatforms).toContain('facebook-ads');
-      expect(capturedPlatforms).not.toContain('facebook');
+    });
+
+    it('returns configured:true + empty platforms when Catchr is off (via /platforms)', async () => {
+      delete process.env.CATCHR_ACCESS_TOKEN;
+      await invalidateCache('catchr:platforms:connected');
+      const res = await request(app)
+        .get('/api/v1/integrations/catchr/platforms')
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data).toMatchObject({ configured: false, platforms: [] });
     });
   });
 });
