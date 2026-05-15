@@ -437,6 +437,35 @@ async function buildOverview() {
     }
   }
 
+  // Probe Catchr the same way we probe Xero — actually call list_platforms
+  // and surface the result on the Integrations card. Without this probe,
+  // the card claimed "Live" while every call silently failed (Sam, 2026-
+  // 05-15: "No facebook accounts" with no clue why). Cap the probe at 3s
+  // so a slow/unreachable Catchr can't stall the whole Integrations page.
+  const catchrConfigured = isCatchrConfigured();
+  let catchrConnected = false;
+  let catchrPlatformsCount = 0;
+  let catchrError: string | null = null;
+  if (catchrConfigured) {
+    try {
+      const result = await Promise.race([
+        cached(
+          'catchr:probe:platforms',
+          CATCHR_PLATFORMS_TTL_SECONDS,
+          () => listCatchrPlatforms(true),
+        ),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Catchr probe timed out after 3s')), 3000),
+        ),
+      ]);
+      catchrPlatformsCount = (result.platforms ?? []).filter((p) => p.connected).length;
+      catchrConnected = catchrPlatformsCount > 0;
+    } catch (err) {
+      catchrError = err instanceof Error ? err.message : 'Catchr fetch failed';
+      logger.warn({ err }, 'Catchr probe failed in overview');
+    }
+  }
+
   const creditProvider = getActiveProvider();
 
   return {
@@ -452,7 +481,10 @@ async function buildOverview() {
       leadsThisMonth: leadsThisMonthRow[0]?.count ?? 0,
     },
     catchr: {
-      configured: isCatchrConfigured(),
+      configured: catchrConfigured,
+      connected: catchrConnected,
+      platformsConnected: catchrPlatformsCount,
+      lastError: catchrError,
       lastSyncAt: getLastCatchrSyncAt(),
       adSpendLast30Days: Math.round((adSpend30dRow[0]?.total ?? 0) * 100) / 100,
       currency: 'GBP',
