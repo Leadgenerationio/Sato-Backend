@@ -242,6 +242,24 @@ export async function catchrStatus(_req: Request, res: Response) {
 // round-trip is ~600-1200ms because of session handshake overhead.
 const CATCHR_ACCOUNTS_TTL_SECONDS = 300;
 
+/**
+ * The Stato UI uses short platform keys (`facebook`, `google`, `tiktok`)
+ * but Catchr's `list_sources` API filters on its own slugs
+ * (`facebook-ads`, `google-ads`, `tik-tok`) — see CatchrPlatform in
+ * catchr-types.ts. Without this mapping, every platform-scoped fetch
+ * returns zero rows even when Sam has the account connected on Catchr.
+ * Sam called this out on 2026-05-15 when "No facebook accounts found"
+ * showed up despite his Catchr workspace having a Facebook source.
+ */
+const PLATFORM_UI_TO_CATCHR: Record<string, string> = {
+  facebook: 'facebook-ads',
+  google: 'google-ads',
+  bing: 'bing-ads',
+  tiktok: 'tik-tok',
+  taboola: 'taboola',
+  outbrain: 'outbrain',
+};
+
 export interface CatchrAccountSummary {
   /** Catchr account identifier — what we persist into traffic_sources.account_id. */
   id: string;
@@ -271,17 +289,24 @@ export async function catchrAccounts(req: Request, res: Response) {
     return;
   }
   const platform = String(req.query.platform ?? '').trim().toLowerCase();
+  // Map the UI's short slug to Catchr's listSources filter value. Unknown
+  // platforms (or empty) pass through unchanged so callers can still ask
+  // for the whole catalog.
+  const catchrPlatform = platform ? (PLATFORM_UI_TO_CATCHR[platform] ?? platform) : undefined;
   try {
     const result = await cached(
-      `catchr:accounts:${platform || 'all'}`,
+      `catchr:accounts:${catchrPlatform ?? 'all'}`,
       CATCHR_ACCOUNTS_TTL_SECONDS,
-      () => listCatchrSources({ platform: platform || undefined, includeAvailableAccounts: true }),
+      () => listCatchrSources({ platform: catchrPlatform, includeAvailableAccounts: true }),
     );
     const accounts: CatchrAccountSummary[] = (result.sources ?? []).flatMap((src) =>
       (src.available_accounts ?? []).map((acct) => ({
         id: String(acct.id),
         name: acct.name,
-        platform: String(src.platform || '').toLowerCase(),
+        // Echo back the UI's slug (not Catchr's) so the frontend's
+        // platform comparisons stay simple and the API contract doesn't
+        // leak Catchr-specific slugs.
+        platform: platform || String(src.platform || '').toLowerCase(),
         sourceName: src.name,
       })),
     );

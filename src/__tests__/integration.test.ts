@@ -224,10 +224,15 @@ describe('Integration API', () => {
 
   describe('GET /api/v1/integrations/catchr/accounts', () => {
     const originalEnv = { ...process.env };
+    const originalFetch = global.fetch;
+
     afterEach(async () => {
       process.env = { ...originalEnv };
+      global.fetch = originalFetch;
       await invalidateCache('catchr:accounts:all');
-      await invalidateCache('catchr:accounts:facebook');
+      await invalidateCache('catchr:accounts:facebook-ads');
+      await invalidateCache('catchr:accounts:google-ads');
+      await invalidateCache('catchr:accounts:tik-tok');
     });
 
     it('returns configured:false + empty accounts when Catchr not configured', async () => {
@@ -245,6 +250,54 @@ describe('Integration API', () => {
         .get('/api/v1/integrations/catchr/accounts?platform=facebook')
         .set('Authorization', `Bearer ${clientToken}`);
       expect(res.status).toBe(403);
+    });
+
+    // Sam saw "No facebook accounts found" on the picker even though his
+    // Catchr workspace had a Facebook source — the UI's short slugs don't
+    // match Catchr's (`facebook-ads`/`google-ads`/`tik-tok`). The controller
+    // now translates the slug before hitting listSources. This test pins the
+    // mapping so the bug doesn't recur.
+    it('maps the UI platform slug to Catchr\'s listSources filter slug', async () => {
+      process.env.CATCHR_ACCESS_TOKEN = 'test-token';
+      const capturedPlatforms: string[] = [];
+
+      // Mock the MCP JSON-RPC handshake + list_sources response. We don't
+      // care about session-id details for this assertion — just intercept
+      // the body of the list_sources call and capture its platform arg.
+      global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const bodyStr = typeof init?.body === 'string' ? init.body : '';
+        let rpc: { method?: string; params?: { name?: string; arguments?: { platform?: string } } } = {};
+        try { rpc = JSON.parse(bodyStr); } catch { /* not JSON */ }
+
+        if (rpc.method === 'initialize') {
+          return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+            status: 200,
+            headers: { 'content-type': 'application/json', 'mcp-session-id': 'sess-1' },
+          });
+        }
+        if (rpc.method === 'tools/call' && rpc.params?.name === 'list_sources') {
+          capturedPlatforms.push(rpc.params.arguments?.platform ?? '');
+          return new Response(JSON.stringify({
+            jsonrpc: '2.0',
+            id: rpc.params ? 2 : 0,
+            result: { content: [{ type: 'text', text: JSON.stringify({ count: 0, sources: [] }) }] },
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        // notifications/initialized and anything else: 202 no-content.
+        return new Response('', { status: 202, headers: { 'content-type': 'application/json' } });
+      }) as unknown as typeof fetch;
+
+      await invalidateCache('catchr:accounts:facebook-ads');
+      const res = await request(app)
+        .get('/api/v1/integrations/catchr/accounts?platform=facebook')
+        .set('Authorization', `Bearer ${ownerToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data).toMatchObject({ configured: true, accounts: [] });
+      // The Catchr-facing call must use 'facebook-ads', NOT 'facebook'.
+      expect(capturedPlatforms).toContain('facebook-ads');
+      expect(capturedPlatforms).not.toContain('facebook');
     });
   });
 });
