@@ -213,6 +213,21 @@ export interface LeadBytePingInput {
   callback_url: string;
 }
 
+/**
+ * Per-period delivery caps. LeadByte returns these on GET /deliveries (when
+ * configured on the delivery rule) AND accepts them on PUT /deliveries/:id
+ * to update. Sam (Loom, 2026-05-15) called out caps as a missing data point —
+ * he wants the UI to surface them so he can see lead-flow ceilings without
+ * leaving Stato. Counts are absolute (e.g. `total: 1000` = 1k leads, ever),
+ * not deltas-since-last-window.
+ */
+export interface LeadByteDeliveryCaps {
+  day?: number;
+  week?: number;
+  month?: number;
+  total?: number;
+}
+
 export interface LeadByteDelivery {
   id: number | string;
   reference?: string;
@@ -220,6 +235,7 @@ export interface LeadByteDelivery {
   campaign?: { id: string | number; name: string };
   deliver_to?: 'Store Lead' | 'Email' | 'SMS' | 'Direct Post';
   buyer?: { id: string | number; name: string; bid?: string };
+  caps?: LeadByteDeliveryCaps;
   [key: string]: unknown;
 }
 
@@ -241,7 +257,7 @@ export interface LeadByteDeliveryCreateInput {
 export interface LeadByteDeliveryUpdate {
   status?: 'Active' | 'Inactive';
   revenue?: number;
-  caps?: { day?: number; week?: number; month?: number; total?: number };
+  caps?: LeadByteDeliveryCaps;
   [key: string]: unknown;
 }
 
