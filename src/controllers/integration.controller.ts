@@ -249,7 +249,11 @@ function maskId(value: string): string {
 // and cache the whole payload for 60s — owner-only page, opened occasionally,
 // metrics don't need second-precision freshness.
 
-const OVERVIEW_TTL_SECONDS = 60;
+// Short cache so the integrations page reflects a fresh Xero re-auth
+// within a few seconds instead of sitting on a stale "Auth pending"
+// value until the previous cache window expires. The expensive DB
+// counts are still de-duplicated within the window.
+const OVERVIEW_TTL_SECONDS = 15;
 
 function startOfMonthIso(): string {
   return new Date(new Date().getFullYear(), new Date().getMonth(), 1)
@@ -347,6 +351,21 @@ async function buildOverview() {
 
 export async function overview(_req: Request, res: Response) {
   try {
+    // Warm the Xero token cache OUTSIDE the overview cache so a fresh
+    // re-auth in the developer portal flips the UI from "Auth pending"
+    // to "Live" on the very next request, instead of waiting for the
+    // overview TTL to expire. getValidToken() is itself cached for the
+    // token lifetime (~30 min) at the xero-client level, so this is a
+    // no-op after the first successful exchange. Errors are swallowed —
+    // buildOverview's getStatus() reports `connected:false` in that case.
+    if (xeroClient.isXeroConfigured()) {
+      try {
+        await xeroClient.getValidToken();
+      } catch (err) {
+        logger.warn({ err }, 'Xero token warmup failed in overview');
+      }
+    }
+
     const data = await cached(
       'integrations:overview',
       OVERVIEW_TTL_SECONDS,

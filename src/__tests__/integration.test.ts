@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import app from '../index.js';
+import * as xero from '../integrations/xero/xero-client.js';
+import { invalidateCache } from '../utils/cache.js';
 
 let ownerToken: string;
 let clientToken: string;
@@ -109,6 +111,90 @@ describe('Integration API', () => {
     it('client role gets 403', async () => {
       const res = await request(app).get('/api/v1/integrations/overview').set('Authorization', `Bearer ${clientToken}`);
       expect(res.status).toBe(403);
+    });
+
+    // The integrations dashboard was sitting on "Auth pending" even after a
+    // valid Xero re-auth because getStatus() only reads the in-memory token
+    // cache, and the overview endpoint never triggered a token exchange. The
+    // fix warms the token on every overview request, so the very next call
+    // after a portal-side re-auth surfaces "Live · <tenant>" rather than the
+    // stale "Auth pending" state.
+    describe('Xero token warmup', () => {
+      const originalEnv = { ...process.env };
+      const originalFetch = global.fetch;
+
+      beforeEach(async () => {
+        process.env.XERO_CLIENT_ID = 'test-id';
+        process.env.XERO_CLIENT_SECRET = 'test-secret';
+        xero.__testing.resetCache();
+        // The overview response is Redis-cached for 15s; prior tests in
+        // this file populate it, which would mask the warmup behavior.
+        await invalidateCache('integrations:overview');
+      });
+      afterEach(async () => {
+        process.env = { ...originalEnv };
+        global.fetch = originalFetch;
+        xero.__testing.resetCache();
+        await invalidateCache('integrations:overview');
+      });
+
+      it('flips xero.connected to true after a fresh exchange on the first overview call', async () => {
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+          const url = typeof input === 'string' ? input : input.toString();
+          if (url.includes('identity.xero.com/connect/token')) {
+            return new Response(
+              JSON.stringify({ access_token: 'tok-abc', token_type: 'Bearer', expires_in: 1800 }),
+              { status: 200, headers: { 'content-type': 'application/json' } },
+            );
+          }
+          if (url.includes('api.xero.com/connections')) {
+            return new Response(
+              JSON.stringify([
+                { id: 'c1', tenantId: 'tenant-1', tenantName: 'Clinical Marketing Solutions Ltd' },
+              ]),
+              { status: 200, headers: { 'content-type': 'application/json' } },
+            );
+          }
+          // Any other Xero call during this test is unexpected.
+          return new Response('{}', { status: 500 });
+        });
+        global.fetch = fetchMock as unknown as typeof fetch;
+
+        const res = await request(app)
+          .get('/api/v1/integrations/overview')
+          .set('Authorization', `Bearer ${ownerToken}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.data.xero).toMatchObject({
+          configured: true,
+          connected: true,
+          tenantName: 'Clinical Marketing Solutions Ltd',
+        });
+        // Token endpoint was hit exactly once — the warmup happened.
+        const tokenCalls = fetchMock.mock.calls.filter(([u]) =>
+          (typeof u === 'string' ? u : (u as URL).toString()).includes('identity.xero.com/connect/token'),
+        );
+        expect(tokenCalls.length).toBeGreaterThanOrEqual(1);
+      });
+
+      it('reports connected:false (not 500) when the warmup exchange fails', async () => {
+        global.fetch = vi.fn(async () =>
+          new Response(JSON.stringify({ error: 'invalid_scope' }), {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          }),
+        ) as unknown as typeof fetch;
+
+        const res = await request(app)
+          .get('/api/v1/integrations/overview')
+          .set('Authorization', `Bearer ${ownerToken}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.data.xero).toMatchObject({
+          configured: true,
+          connected: false,
+        });
+      });
     });
   });
 
