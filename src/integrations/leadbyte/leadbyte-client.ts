@@ -860,6 +860,7 @@ export interface SyncResult {
   campaignsFetched: number;
   campaignsUpdated: number;
   campaignsCreated: number;
+  campaignLinksCreated: number;
   unmappedCampaignIds: string[];
   error?: string;
 }
@@ -871,11 +872,20 @@ export interface SyncResult {
  * this is the FK target that `client_campaigns` and `lead_deliveries` reference,
  * so without it those dashboards stay empty.
  *
+ * Piece 2: also auto-links Sato clients (clients.leadbyte_client_id) to
+ * campaigns via the client_campaigns join table when LeadByte's buyer report
+ * shows a buyer on a campaign whose name matches a Sato client's. Conservative
+ * — only links when the LeadByte buyer id maps to exactly one Sato client and
+ * the name matches case-insensitively; ON CONFLICT DO NOTHING via the
+ * (client_id, campaign_id) unique index, so re-runs are idempotent.
+ *
  * Invoked by the `sync` BullMQ worker when job name === 'leadbyte-hourly-sync'.
  */
 export async function syncAll(deps: {
   db: typeof import('../../config/database.js').db;
   campaigns: typeof import('../../db/schema/campaigns.js').campaigns;
+  clients?: typeof import('../../db/schema/clients.js').clients;
+  clientCampaigns?: typeof import('../../db/schema/client-campaigns.js').clientCampaigns;
 }): Promise<SyncResult> {
   const startedAt = new Date().toISOString();
   const result: SyncResult = {
@@ -884,6 +894,7 @@ export async function syncAll(deps: {
     campaignsFetched: 0,
     campaignsUpdated: 0,
     campaignsCreated: 0,
+    campaignLinksCreated: 0,
     unmappedCampaignIds: [],
   };
 
@@ -946,12 +957,31 @@ export async function syncAll(deps: {
       }
     }
 
+    // Piece 2: auto-link clients ↔ campaigns via client_campaigns. Skipped
+    // when the caller didn't pass the schemas (existing callers/tests stay
+    // happy) or when there are no Sato clients mapped to a LeadByte buyer id.
+    if (deps.clients && deps.clientCampaigns) {
+      try {
+        result.campaignLinksCreated = await discoverClientCampaignLinks({
+          db: deps.db,
+          campaigns: deps.campaigns,
+          clients: deps.clients,
+          clientCampaigns: deps.clientCampaigns,
+        });
+      } catch (err) {
+        // Discovery failures don't fail the sync — the campaign UPDATE/INSERT
+        // pass above is the primary value; auto-linking is a nice-to-have.
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'LeadByte client_campaigns discovery failed');
+      }
+    }
+
     result.finishedAt = new Date().toISOString();
     logger.info(
       {
         fetched: result.campaignsFetched,
         updated: result.campaignsUpdated,
         created: result.campaignsCreated,
+        linksCreated: result.campaignLinksCreated,
         unmapped: result.unmappedCampaignIds.length,
       },
       'LeadByte sync complete',
@@ -963,4 +993,120 @@ export async function syncAll(deps: {
     logger.error({ err }, 'LeadByte sync failed');
     return result;
   }
+}
+
+/**
+ * Auto-link Sato clients to LeadByte campaigns via client_campaigns. For each
+ * local campaign that has NO existing links, fetch LeadByte's /reports/buyer
+ * for that campaign, match the buyer name to a LeadByte buyer id, then map
+ * that to a Sato client via clients.leadbyte_client_id. Inserts are
+ * idempotent thanks to the (client_id, campaign_id) unique index.
+ *
+ * Returns the count of NEW client_campaigns rows created.
+ */
+async function discoverClientCampaignLinks(deps: {
+  db: typeof import('../../config/database.js').db;
+  campaigns: typeof import('../../db/schema/campaigns.js').campaigns;
+  clients: typeof import('../../db/schema/clients.js').clients;
+  clientCampaigns: typeof import('../../db/schema/client-campaigns.js').clientCampaigns;
+}): Promise<number> {
+  const { sql, isNotNull } = await import('drizzle-orm');
+
+  // 1) Load Sato clients that have a LeadByte buyer id. If none, nothing to link.
+  const satoClientsRaw = await deps.db
+    .select({
+      id: deps.clients.id,
+      companyName: deps.clients.companyName,
+      leadbyteClientId: deps.clients.leadbyteClientId,
+    })
+    .from(deps.clients)
+    .where(isNotNull(deps.clients.leadbyteClientId));
+  if (satoClientsRaw.length === 0) return 0;
+
+  const byLeadbyteBuyerId = new Map<string, { id: string; companyName: string }>();
+  for (const c of satoClientsRaw) {
+    if (c.leadbyteClientId) {
+      byLeadbyteBuyerId.set(String(c.leadbyteClientId), { id: c.id, companyName: c.companyName });
+    }
+  }
+
+  // 2) Find campaigns that need linking: have a leadbyte_campaign_id AND no
+  // existing client_campaigns rows yet. One LEFT JOIN + WHERE NULL pattern.
+  const candidates = await deps.db
+    .select({
+      campaignId: deps.campaigns.id,
+      leadbyteCampaignId: deps.campaigns.leadbyteCampaignId,
+    })
+    .from(deps.campaigns)
+    .where(sql`${deps.campaigns.leadbyteCampaignId} IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM client_campaigns WHERE client_campaigns.campaign_id = ${deps.campaigns.id})`);
+  if (candidates.length === 0) return 0;
+
+  // 3) Load buyers once: name (lowercased) → leadbyte buyer id. Used to
+  // resolve the buyer name returned by /reports/buyer back to a buyer id we
+  // can match against clients.leadbyte_client_id.
+  const buyers = await getBuyers();
+  const nameToBuyerId = new Map<string, string>();
+  for (const b of buyers) {
+    if (b.company && b.id != null) {
+      nameToBuyerId.set(b.company.trim().toLowerCase(), String(b.id));
+    }
+  }
+
+  // 4) Per-campaign buyer-report discovery. ytd window so we catch any
+  // historical buyer even if last_month is empty. Each call is independent —
+  // a per-campaign failure logs + continues.
+  let created = 0;
+  for (const candidate of candidates) {
+    if (!candidate.leadbyteCampaignId) continue;
+    let report: LeadByteBuyerReportRow[];
+    try {
+      report = await getBuyerReport({
+        campaignId: candidate.leadbyteCampaignId,
+        window: 'ytd',
+      });
+    } catch (err) {
+      logger.warn(
+        { campaignId: candidate.leadbyteCampaignId, err: err instanceof Error ? err.message : String(err) },
+        'LeadByte buyer-report fetch failed during discovery — skipping campaign',
+      );
+      continue;
+    }
+
+    const buyerNames = new Set<string>();
+    for (const row of report) {
+      if (row.buyer) buyerNames.add(row.buyer.trim().toLowerCase());
+    }
+
+    for (const buyerName of buyerNames) {
+      const buyerId = nameToBuyerId.get(buyerName);
+      if (!buyerId) continue;
+      const satoClient = byLeadbyteBuyerId.get(buyerId);
+      if (!satoClient) continue;
+
+      // ON CONFLICT DO NOTHING via the (client_id, campaign_id) unique index.
+      const inserted = await deps.db
+        .insert(deps.clientCampaigns)
+        .values({
+          clientId: satoClient.id,
+          campaignId: candidate.campaignId,
+        })
+        .onConflictDoNothing()
+        .returning({ id: deps.clientCampaigns.id });
+      if (inserted.length > 0) {
+        created++;
+        logger.info(
+          {
+            clientId: satoClient.id,
+            clientName: satoClient.companyName,
+            campaignId: candidate.campaignId,
+            leadbyteCampaignId: candidate.leadbyteCampaignId,
+          },
+          'LeadByte auto-linked client ↔ campaign',
+        );
+      }
+    }
+  }
+
+  return created;
 }

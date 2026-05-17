@@ -4,6 +4,8 @@ import { redis } from '../config/redis.js';
 import { logger } from '../utils/logger.js';
 import { db } from '../config/database.js';
 import { campaigns } from '../db/schema/campaigns.js';
+import { clients } from '../db/schema/clients.js';
+import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { workflows, workflowExecutions } from '../db/schema/workflows.js';
 import { syncAll } from '../integrations/leadbyte/leadbyte-client.js';
 import { recordLeadByteSync } from '../controllers/integration.controller.js';
@@ -250,7 +252,7 @@ new Worker('sync', async (job) => {
 
   switch (job.name) {
     case 'leadbyte-hourly-sync': {
-      const result = await syncAll({ db, campaigns });
+      const result = await syncAll({ db, campaigns, clients, clientCampaigns });
       recordLeadByteSync(result.finishedAt);
       return result;
     }

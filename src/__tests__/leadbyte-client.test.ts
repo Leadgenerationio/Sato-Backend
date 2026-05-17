@@ -676,6 +676,135 @@ describe('LeadByte client — syncAll()', () => {
     expect(insertedValues[1]).toMatchObject({ leadbyteCampaignId: 'ext-2', name: 'Campaign Two' });
   });
 
+  it('auto-links Sato client to a campaign when LeadByte buyer report matches (Piece 2)', async () => {
+    process.env.LEADBYTE_API_KEY = 'test-key';
+    process.env.LEADBYTE_BASE_URL = 'https://example.test/restapi/v1.3';
+
+    // /campaigns → one LeadByte campaign, then /buyers → one buyer matching
+    // the Sato client by leadbyte id, then /reports/buyer for the campaign
+    // → one row showing that buyer was active.
+    fetchMock
+      .mockResolvedValueOnce(
+        mockJsonResponse([
+          { id: 'lb-camp-1', name: 'Solar Panels', active: 'Yes', archived: 'No', currency: 'GBP' },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          data: [
+            { id: 113, company: 'Benson Goldstein Ltd', status: 'Active' },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          report: [
+            {
+              campaign: 'Solar Panels',
+              buyer: 'Benson Goldstein Ltd',
+              posted: 50,
+              accepted: 50,
+              sold: 50,
+              rejected: 0,
+              returned: 0,
+              revenue: 1000,
+              currency: 'GBP',
+            },
+          ],
+        }),
+      );
+
+    const insertedLinks: unknown[] = [];
+
+    // Campaign UPDATE always misses; INSERT creates a stato row.
+    // Then discovery: select(clients) returns 1, select(campaigns) returns 1
+    // candidate, then insert(clientCampaigns) succeeds.
+    let campaignsInsertCount = 0;
+    const dbMock = {
+      update: () => ({
+        set: () => ({
+          where: () => ({
+            returning: async () => [],
+          }),
+        }),
+      }),
+      insert: (table: unknown) => ({
+        values: (v: unknown) => {
+          // Distinguish campaigns insert from clientCampaigns insert by the
+          // table object passed.
+          if (table === campaignsTableRef) {
+            campaignsInsertCount++;
+            return { returning: async () => [{ id: 'stato-camp-1' }] };
+          }
+          // clientCampaigns insert
+          insertedLinks.push(v);
+          return {
+            onConflictDoNothing: () => ({
+              returning: async () => [{ id: 'cc-1' }],
+            }),
+          };
+        },
+      }),
+      select: () => ({
+        from: (table: unknown) => ({
+          where: async (_clause: unknown) => {
+            if (table === clientsTableRef) {
+              return [{ id: 'sato-client-1', companyName: 'Benson Goldstein Ltd', leadbyteClientId: '113' }];
+            }
+            // campaigns candidates
+            return [{ campaignId: 'stato-camp-1', leadbyteCampaignId: 'lb-camp-1' }];
+          },
+        }),
+      }),
+    };
+
+    // Use distinct token objects so the mock can identify which table was
+    // passed to insert()/select().from().
+    const campaignsTableRef = { __ref: 'campaigns' };
+    const clientsTableRef = { __ref: 'clients' };
+    const clientCampaignsTableRef = { __ref: 'clientCampaigns' };
+
+    const result = await lb.syncAll({
+      db: dbMock as never,
+      campaigns: campaignsTableRef as never,
+      clients: clientsTableRef as never,
+      clientCampaigns: clientCampaignsTableRef as never,
+    });
+
+    expect(result.campaignsFetched).toBe(1);
+    expect(result.campaignsCreated).toBe(1);
+    expect(campaignsInsertCount).toBe(1);
+    expect(result.campaignLinksCreated).toBe(1);
+    expect(insertedLinks).toEqual([{ clientId: 'sato-client-1', campaignId: 'stato-camp-1' }]);
+  });
+
+  it('skips client_campaigns discovery when clients/clientCampaigns deps are omitted (legacy callers)', async () => {
+    process.env.LEADBYTE_API_KEY = 'test-key';
+    process.env.LEADBYTE_BASE_URL = 'https://example.test/restapi/v1.3';
+    fetchMock.mockResolvedValue(
+      mockJsonResponse([
+        { id: 'ext-1', name: 'Campaign One', active: 'Yes', archived: 'No', currency: 'GBP' },
+      ]),
+    );
+
+    const dbMock = {
+      update: () => ({
+        set: () => ({
+          where: () => ({
+            returning: async () => [{ id: 'stato-1' }],
+          }),
+        }),
+      }),
+    };
+
+    const result = await lb.syncAll({
+      db: dbMock as never,
+      campaigns: { leadbyteCampaignId: 'col' } as never,
+    });
+
+    expect(result.campaignLinksCreated).toBe(0);
+  });
+
   it('still falls back to unmappedCampaignIds when both update and insert return 0 rows', async () => {
     process.env.LEADBYTE_API_KEY = 'test-key';
     process.env.LEADBYTE_BASE_URL = 'https://example.test/restapi/v1.3';
