@@ -6,6 +6,8 @@ import { adSpend } from '../db/schema/ad-spend.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { isUuid } from '../utils/zod-helpers.js';
 import { resolveSatoCampaignId } from '../utils/resolve-campaign-id.js';
+import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
+import { logger } from '../utils/logger.js';
 import type { AuthPayload } from '../types/index.js';
 
 /**
@@ -126,7 +128,40 @@ export async function listSourcesForCampaign(
   for (const s of spendRows) {
     spendByKey.set(`${s.platform}|${s.accountId}`, Number(s.spend));
   }
-  const totalLeadsForCampaign = leadAgg[0]?.leads ?? 0;
+
+  // Local lead_deliveries only gets populated for single-linked-client
+  // campaigns (Piece 3). For everything else — most campaigns currently —
+  // the local sum is 0 even when LeadByte has thousands of real leads. Fall
+  // back to LeadByte's last_month + this_month windowed report so the
+  // sources table doesn't sit at 0 leads next to a non-empty
+  // /reports/campaign result on the same page.
+  let totalLeadsForCampaign = leadAgg[0]?.leads ?? 0;
+  if (totalLeadsForCampaign === 0 && rows.length > 0 && lbCampaignId) {
+    try {
+      const [thisMonth, lastMonth] = await Promise.all([
+        leadbyte.getCampaignReport('this_month'),
+        leadbyte.getCampaignReport('last_month'),
+      ]);
+      // /reports/campaign rows key by campaign name, which we don't have here
+      // — but we DO have the leadbyte_campaign_id. Pull the campaign name
+      // from the resolved row, then sum matching rows.
+      const [campNameRow] = await db
+        .select({ name: campaignsTable.name })
+        .from(campaignsTable)
+        .where(eq(campaignsTable.id, satoId));
+      const campName = campNameRow?.name;
+      if (campName) {
+        const thisMonthLeads = thisMonth.find((r) => r.campaign === campName)?.leads ?? 0;
+        const lastMonthLeads = lastMonth.find((r) => r.campaign === campName)?.leads ?? 0;
+        totalLeadsForCampaign = thisMonthLeads + lastMonthLeads;
+      }
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), satoId },
+        'traffic-source: LeadByte lead fallback failed — using local 0',
+      );
+    }
+  }
 
   return rows.map((r) => {
     const key = `${r.platform ?? ''}|${r.accountId ?? ''}`;
