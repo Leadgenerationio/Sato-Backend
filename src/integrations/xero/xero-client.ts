@@ -578,14 +578,17 @@ export async function getVatLiability(fromDate: string, toDate: string): Promise
 
   // Xero rate-limits the TaxSummary endpoint aggressively, especially when
   // the dashboard fans out across multiple quarters. Without retry, a single
-  // 429 propagates to the widget as "VAT fetch failed". Retry once on 429,
-  // honoring the Retry-After header (capped at 10s so the widget doesn't
-  // hang waiting forever — a cold cache miss still feels snappy).
+  // 429 propagates to the widget as "VAT fetch failed". Retry up to 3 times
+  // with exponential backoff (5s, 10s, 20s — capped each step) honoring
+  // Retry-After when Xero supplies it. Combined with the controller's 60min
+  // cache, this should mask all but the deepest rate-limit windows.
+  const backoffSchedule = [5, 10, 20];
   let res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
-  if (res.status === 429) {
-    const retryAfter = Math.min(Number(res.headers.get('Retry-After') ?? '5'), 10);
-    logger.warn({ retryAfter, fromDate, toDate }, 'Xero TaxSummary 429 — retrying once');
-    await new Promise((r) => setTimeout(r, retryAfter * 1000));
+  for (let attempt = 0; attempt < backoffSchedule.length && res.status === 429; attempt++) {
+    const xeroHint = Number(res.headers.get('Retry-After') ?? '0');
+    const waitSec = xeroHint > 0 ? Math.min(xeroHint, 30) : backoffSchedule[attempt];
+    logger.warn({ attempt: attempt + 1, waitSec, fromDate, toDate }, 'Xero TaxSummary 429 — backing off');
+    await new Promise((r) => setTimeout(r, waitSec * 1000));
     res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
   }
 
