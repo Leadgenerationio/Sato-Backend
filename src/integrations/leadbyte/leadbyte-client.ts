@@ -984,13 +984,6 @@ export async function syncAll(deps: {
     // (client × campaign) pair so the dashboard leads-by-day chart, KPI
     // tiles, and auto-invoice cron have real data to read. Skipped when
     // schemas are missing (legacy callers) or there are no links yet.
-    logger.info(
-      {
-        hasClientCampaigns: !!deps.clientCampaigns,
-        hasLeadDeliveries: !!deps.leadDeliveries,
-      },
-      'lead_deliveries: pre-check deps',
-    );
     if (deps.clientCampaigns && deps.leadDeliveries) {
       try {
         const dr = await populateLeadDeliveries({
@@ -1002,7 +995,7 @@ export async function syncAll(deps: {
         result.deliveriesUpserted = dr.rowsUpserted;
         result.deliveryCampaignsSkipped = dr.campaignsSkipped;
       } catch (err) {
-        logger.warn({ err: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined }, 'LeadByte lead_deliveries write failed');
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'LeadByte lead_deliveries write failed');
       }
     }
 
@@ -1177,7 +1170,6 @@ async function populateLeadDeliveries(deps: {
     .from(deps.clientCampaigns)
     .innerJoin(deps.campaigns, eq(deps.campaigns.id, deps.clientCampaigns.campaignId))
     .where(isNotNull(deps.campaigns.leadbyteCampaignId));
-  logger.info({ linksCount: links.length, links: links.slice(0, 3) }, 'lead_deliveries: links query result');
   if (links.length === 0) return { rowsUpserted: 0, campaignsSkipped: 0 };
 
   const byCampaign = new Map<string, { campaignId: string; leadbyteCampaignId: string; clientIds: string[] }>();
@@ -1216,7 +1208,16 @@ async function populateLeadDeliveries(deps: {
     const clientId = entry.clientIds[0];
     let dailyRows: LeadByteDeliveryReport[];
     try {
-      dailyRows = await getDeliveryReports(entry.leadbyteCampaignId, 30);
+      // /reports/leadactivity silently returns 0 rows when fed an arbitrary
+      // from/to range (the number-of-days overload); only named windows
+      // actually pull data. Pull last_month + this_month so we cover the
+      // dashboard's "leads this month" + "leads last month" KPIs in full.
+      // Idempotent upsert below dedupes overlap.
+      const [lastMonth, thisMonth] = await Promise.all([
+        getDeliveryReports(entry.leadbyteCampaignId, 'last_month'),
+        getDeliveryReports(entry.leadbyteCampaignId, 'this_month'),
+      ]);
+      dailyRows = [...lastMonth, ...thisMonth];
     } catch (err) {
       logger.warn(
         { campaignId: entry.campaignId, err: err instanceof Error ? err.message : String(err) },

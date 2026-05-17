@@ -815,6 +815,12 @@ describe('LeadByte client — syncAll()', () => {
           ],
         }),
       )
+      // Piece 3 now fetches BOTH last_month and this_month per campaign.
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          report: [{ date: '2026-04-15', count: 5 }],
+        }),
+      )
       .mockResolvedValueOnce(
         mockJsonResponse({
           report: [
@@ -891,9 +897,15 @@ describe('LeadByte client — syncAll()', () => {
       leadDeliveries: leadDeliveriesTableRef as never,
     });
 
-    expect(result.deliveriesUpserted).toBe(2);
+    expect(result.deliveriesUpserted).toBe(3);
     expect(result.deliveryCampaignsSkipped).toBe(0);
     expect(upsertedDeliveries).toEqual([
+      expect.objectContaining({
+        campaignId: 'stato-camp-1',
+        clientId: 'sato-client-1',
+        deliveryDate: '2026-04-15',
+        leadCount: 5,
+      }),
       expect.objectContaining({
         campaignId: 'stato-camp-1',
         clientId: 'sato-client-1',
