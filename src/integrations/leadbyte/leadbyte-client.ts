@@ -859,14 +859,17 @@ export interface SyncResult {
   finishedAt: string;
   campaignsFetched: number;
   campaignsUpdated: number;
+  campaignsCreated: number;
   unmappedCampaignIds: string[];
   error?: string;
 }
 
 /**
  * Hourly sync job — refreshes our campaigns table with the latest name/status/vertical
- * from LeadByte. Only updates campaigns that already have `leadbyte_campaign_id` set;
- * unmapped LeadByte IDs are returned so Sam can populate the mapping in Settings.
+ * from LeadByte. Updates existing rows by `leadbyte_campaign_id`, and auto-creates
+ * a Sato-side row for any LeadByte campaign that doesn't have a local row yet —
+ * this is the FK target that `client_campaigns` and `lead_deliveries` reference,
+ * so without it those dashboards stay empty.
  *
  * Invoked by the `sync` BullMQ worker when job name === 'leadbyte-hourly-sync'.
  */
@@ -880,6 +883,7 @@ export async function syncAll(deps: {
     finishedAt: startedAt,
     campaignsFetched: 0,
     campaignsUpdated: 0,
+    campaignsCreated: 0,
     unmappedCampaignIds: [],
   };
 
@@ -917,6 +921,26 @@ export async function syncAll(deps: {
 
       if (updated.length > 0) {
         result.campaignsUpdated += updated.length;
+        continue;
+      }
+
+      // Piece 1: no local row yet — auto-create one so this LeadByte campaign
+      // becomes a valid FK target for client_campaigns / lead_deliveries.
+      // Sato-side overrides (cost_per_lead, campaign_type) start at schema
+      // defaults; staff can edit them later from the campaign detail page.
+      const inserted = await deps.db
+        .insert(deps.campaigns)
+        .values({
+          leadbyteCampaignId: c.id,
+          name: c.name,
+          vertical: c.vertical || null,
+          status: c.status,
+          currency: c.currency,
+        })
+        .returning({ id: deps.campaigns.id });
+
+      if (inserted.length > 0) {
+        result.campaignsCreated += inserted.length;
       } else {
         result.unmappedCampaignIds.push(c.id);
       }
@@ -927,6 +951,7 @@ export async function syncAll(deps: {
       {
         fetched: result.campaignsFetched,
         updated: result.campaignsUpdated,
+        created: result.campaignsCreated,
         unmapped: result.unmappedCampaignIds.length,
       },
       'LeadByte sync complete',

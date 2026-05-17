@@ -630,17 +630,18 @@ describe('LeadByte client — syncAll()', () => {
     expect(result.error).toMatch(/Database not configured/);
   });
 
-  it('fetches campaigns and reports unmapped ids when no DB rows match', async () => {
+  it('auto-creates local campaign rows for LeadByte campaigns with no DB match (Piece 1)', async () => {
     process.env.LEADBYTE_API_KEY = 'test-key';
     process.env.LEADBYTE_BASE_URL = 'https://example.test/restapi/v1.3';
     fetchMock.mockResolvedValue(
       mockJsonResponse([
-        { campaignId: 'ext-1', name: 'Campaign One', status: 'Active', type: 'Solar', pricePerLead: '10' },
-        { campaignId: 'ext-2', name: 'Campaign Two', status: 'Active', type: 'Finance', pricePerLead: '20' },
+        { id: 'ext-1', name: 'Campaign One', active: 'Yes', archived: 'No', currency: 'GBP' },
+        { id: 'ext-2', name: 'Campaign Two', active: 'Yes', archived: 'No', currency: 'GBP' },
       ]),
     );
 
-    // db.update(...).set(...).where(...).returning() — always returns [] (no matches)
+    const insertedValues: unknown[] = [];
+    // UPDATE always misses (no existing rows); INSERT always succeeds.
     const dbMock = {
       update: () => ({
         set: () => ({
@@ -648,6 +649,14 @@ describe('LeadByte client — syncAll()', () => {
             returning: async () => [],
           }),
         }),
+      }),
+      insert: () => ({
+        values: (v: unknown) => {
+          insertedValues.push(v);
+          return {
+            returning: async () => [{ id: 'stato-new' }],
+          };
+        },
       }),
     };
 
@@ -658,8 +667,46 @@ describe('LeadByte client — syncAll()', () => {
 
     expect(result.campaignsFetched).toBe(2);
     expect(result.campaignsUpdated).toBe(0);
-    expect(result.unmappedCampaignIds).toHaveLength(2);
+    expect(result.campaignsCreated).toBe(2);
+    expect(result.unmappedCampaignIds).toHaveLength(0);
     expect(result.error).toBeUndefined();
+    // Verify the rows we asked to insert carry the LeadByte campaign id + name.
+    expect(insertedValues).toHaveLength(2);
+    expect(insertedValues[0]).toMatchObject({ leadbyteCampaignId: 'ext-1', name: 'Campaign One' });
+    expect(insertedValues[1]).toMatchObject({ leadbyteCampaignId: 'ext-2', name: 'Campaign Two' });
+  });
+
+  it('still falls back to unmappedCampaignIds when both update and insert return 0 rows', async () => {
+    process.env.LEADBYTE_API_KEY = 'test-key';
+    process.env.LEADBYTE_BASE_URL = 'https://example.test/restapi/v1.3';
+    fetchMock.mockResolvedValue(
+      mockJsonResponse([
+        { id: 'ext-1', name: 'Campaign One', active: 'Yes', archived: 'No', currency: 'GBP' },
+      ]),
+    );
+
+    const dbMock = {
+      update: () => ({
+        set: () => ({
+          where: () => ({
+            returning: async () => [],
+          }),
+        }),
+      }),
+      insert: () => ({
+        values: () => ({
+          returning: async () => [],
+        }),
+      }),
+    };
+
+    const result = await lb.syncAll({
+      db: dbMock as never,
+      campaigns: { leadbyteCampaignId: 'col' } as never,
+    });
+
+    expect(result.campaignsCreated).toBe(0);
+    expect(result.unmappedCampaignIds).toEqual(['ext-1']);
   });
 
   it('counts campaignsUpdated when db.update returns a row', async () => {
@@ -667,7 +714,7 @@ describe('LeadByte client — syncAll()', () => {
     process.env.LEADBYTE_BASE_URL = 'https://example.test/restapi/v1.3';
     fetchMock.mockResolvedValue(
       mockJsonResponse([
-        { campaignId: 'ext-1', name: 'Campaign One', status: 'Active', type: 'Solar', pricePerLead: '10' },
+        { id: 'ext-1', name: 'Campaign One', active: 'Yes', archived: 'No', currency: 'GBP' },
       ]),
     );
 
