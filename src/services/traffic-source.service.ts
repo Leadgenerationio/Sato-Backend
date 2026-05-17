@@ -3,6 +3,7 @@ import { db } from '../config/database.js';
 import { trafficSources } from '../db/schema/traffic-sources.js';
 import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
 import { isUuid } from '../utils/zod-helpers.js';
+import { resolveSatoCampaignId } from '../utils/resolve-campaign-id.js';
 import type { AuthPayload } from '../types/index.js';
 
 /**
@@ -65,28 +66,30 @@ export async function listSourcesForCampaign(
   campaignId: string,
   _requester: AuthPayload,
 ): Promise<TrafficSource[]> {
-  // LeadByte campaigns have numeric IDs and no internal traffic-source rows.
-  // Skip the DB query before Postgres rejects the non-uuid value.
-  if (!isUuid(campaignId)) return [];
+  // FE passes either the Sato UUID or LeadByte's numeric campaign id ("38").
+  // Resolve to Sato UUID first so the DB query has a valid FK to match.
+  const satoId = await resolveSatoCampaignId(campaignId);
+  if (!satoId) return [];
 
   // Load lead price + sources in parallel; both are tiny single-table reads.
   const [leadPrice, rows] = await Promise.all([
-    leadPriceForCampaign(campaignId),
+    leadPriceForCampaign(satoId),
     db
       .select()
       .from(trafficSources)
-      .where(eq(trafficSources.campaignId, campaignId))
+      .where(eq(trafficSources.campaignId, satoId))
       .orderBy(desc(trafficSources.totalSpend)),
   ]);
   return rows.map((r) => toDto(r, leadPrice));
 }
 
 export async function countSourcesForCampaign(campaignId: string): Promise<number> {
-  if (!isUuid(campaignId)) return 0;
+  const satoId = await resolveSatoCampaignId(campaignId);
+  if (!satoId) return 0;
   const [row] = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(trafficSources)
-    .where(and(eq(trafficSources.campaignId, campaignId), eq(trafficSources.isActive, true)));
+    .where(and(eq(trafficSources.campaignId, satoId), eq(trafficSources.isActive, true)));
   return row?.count ?? 0;
 }
 
@@ -125,11 +128,12 @@ export async function createSource(
   input: CreateTrafficSourceInput,
   _requester: AuthPayload,
 ): Promise<TrafficSource | null> {
-  if (!isUuid(campaignId)) return null;
+  const satoId = await resolveSatoCampaignId(campaignId);
+  if (!satoId) return null;
   const [row] = await db
     .insert(trafficSources)
     .values({
-      campaignId,
+      campaignId: satoId,
       name: input.name,
       platform: input.platform || null,
       accountId: input.accountId || null,
@@ -137,7 +141,7 @@ export async function createSource(
       isActive: input.isActive ?? true,
     })
     .returning();
-  const leadPrice = await leadPriceForCampaign(campaignId);
+  const leadPrice = await leadPriceForCampaign(satoId);
   return toDto(row, leadPrice);
 }
 
@@ -147,7 +151,9 @@ export async function updateSource(
   input: UpdateTrafficSourceInput,
   _requester: AuthPayload,
 ): Promise<TrafficSource | null> {
-  if (!isUuid(campaignId) || !isUuid(sourceId)) return null;
+  if (!isUuid(sourceId)) return null;
+  const satoId = await resolveSatoCampaignId(campaignId);
+  if (!satoId) return null;
   const patch: Partial<SourceRow> = { updatedAt: new Date() };
   if (input.name !== undefined) patch.name = input.name;
   if (input.platform !== undefined) patch.platform = input.platform || null;
@@ -160,10 +166,10 @@ export async function updateSource(
   const [row] = await db
     .update(trafficSources)
     .set(patch)
-    .where(and(eq(trafficSources.id, sourceId), eq(trafficSources.campaignId, campaignId)))
+    .where(and(eq(trafficSources.id, sourceId), eq(trafficSources.campaignId, satoId)))
     .returning();
   if (!row) return null;
-  const leadPrice = await leadPriceForCampaign(campaignId);
+  const leadPrice = await leadPriceForCampaign(satoId);
   return toDto(row, leadPrice);
 }
 
@@ -172,10 +178,12 @@ export async function deleteSource(
   sourceId: string,
   _requester: AuthPayload,
 ): Promise<boolean> {
-  if (!isUuid(campaignId) || !isUuid(sourceId)) return false;
+  if (!isUuid(sourceId)) return false;
+  const satoId = await resolveSatoCampaignId(campaignId);
+  if (!satoId) return false;
   const deleted = await db
     .delete(trafficSources)
-    .where(and(eq(trafficSources.id, sourceId), eq(trafficSources.campaignId, campaignId)))
+    .where(and(eq(trafficSources.id, sourceId), eq(trafficSources.campaignId, satoId)))
     .returning({ id: trafficSources.id });
   return deleted.length > 0;
 }

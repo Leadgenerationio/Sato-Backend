@@ -4,7 +4,8 @@ import { creatives } from '../db/schema/creatives.js';
 import { campaigns } from '../db/schema/campaigns.js';
 import { clients } from '../db/schema/clients.js';
 import { logger } from '../utils/logger.js';
-import { isUuid, uuidOrNull } from '../utils/zod-helpers.js';
+import { uuidOrNull } from '../utils/zod-helpers.js';
+import { resolveSatoCampaignId } from '../utils/resolve-campaign-id.js';
 import type { AuthPayload } from '../types/index.js';
 
 /** Verify a campaign belongs to a client owned by the requester's business. */
@@ -58,17 +59,17 @@ export async function listCreativesForCampaign(
   const businessId = requester.businessId;
   if (!businessId) return [];
 
-  // LeadByte campaign IDs are numeric strings ("2", "157") — they have no
-  // local creative rows because the column is a Postgres uuid. Short-circuit
-  // before the DB query to avoid an "invalid input syntax for type uuid" 500.
-  if (!isUuid(campaignId)) return [];
+  // FE passes either the Sato UUID or LeadByte's numeric campaign id ("38").
+  // Resolve to Sato UUID first so the DB query has a valid FK to match.
+  const satoId = await resolveSatoCampaignId(campaignId);
+  if (!satoId) return [];
 
-  if (!(await campaignBelongsToBusiness(campaignId, businessId))) return [];
+  if (!(await campaignBelongsToBusiness(satoId, businessId))) return [];
 
   const rows = await db
     .select()
     .from(creatives)
-    .where(and(eq(creatives.campaignId, campaignId), eq(creatives.isDeleted, false)));
+    .where(and(eq(creatives.campaignId, satoId), eq(creatives.isDeleted, false)));
   return rows.map(toDto);
 }
 
