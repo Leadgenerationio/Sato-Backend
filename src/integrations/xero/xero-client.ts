@@ -569,17 +569,26 @@ export async function getBankTransactions(
  */
 export async function getVatLiability(fromDate: string, toDate: string): Promise<XeroVatLiability> {
   const { accessToken, tenantId } = await getValidToken();
-  const res = await fetch(
-    `${API_HOST}/api.xro/2.0/Reports/TaxSummary?fromDate=${fromDate}&toDate=${toDate}`,
-    {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'xero-tenant-id': tenantId,
-        Accept: 'application/json',
-      },
-      signal: AbortSignal.timeout(15_000),
-    },
-  );
+  const url = `${API_HOST}/api.xro/2.0/Reports/TaxSummary?fromDate=${fromDate}&toDate=${toDate}`;
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    'xero-tenant-id': tenantId,
+    Accept: 'application/json',
+  };
+
+  // Xero rate-limits the TaxSummary endpoint aggressively, especially when
+  // the dashboard fans out across multiple quarters. Without retry, a single
+  // 429 propagates to the widget as "VAT fetch failed". Retry once on 429,
+  // honoring the Retry-After header (capped at 10s so the widget doesn't
+  // hang waiting forever — a cold cache miss still feels snappy).
+  let res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+  if (res.status === 429) {
+    const retryAfter = Math.min(Number(res.headers.get('Retry-After') ?? '5'), 10);
+    logger.warn({ retryAfter, fromDate, toDate }, 'Xero TaxSummary 429 — retrying once');
+    await new Promise((r) => setTimeout(r, retryAfter * 1000));
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+  }
+
   if (!res.ok) {
     const body = await res.text();
     // 404 from Xero on TaxSummary almost always means the organisation isn't
