@@ -73,7 +73,7 @@ async function postMcp(body: object, extraHeaders: Record<string, string> = {}):
       ...extraHeaders,
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(90_000),
   });
 }
 
