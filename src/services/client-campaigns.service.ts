@@ -3,6 +3,7 @@ import { db } from '../config/database.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { campaigns } from '../db/schema/campaigns.js';
 import { clients } from '../db/schema/clients.js';
+import { resolveSatoCampaignId } from '../utils/resolve-campaign-id.js';
 import type { AuthPayload } from '../types/index.js';
 
 // Slice 2 Day 1: Sam Loom #40 — campaigns are now verticals (Solar Panels)
@@ -24,26 +25,28 @@ export interface ClientCampaignLink {
   endedAt: string | null;
 }
 
-async function campaignInScope(campaignId: string, requester: AuthPayload): Promise<boolean> {
-  if (!requester.businessId) return false;
-  // Phase 1 is single-tenant — every campaign in the DB belongs to the one
-  // business. We only need to confirm the campaign row exists; multi-tenant
-  // scoping comes back later via either an explicit campaigns.business_id
-  // or a "must have at least one linked client in this business" rule. The
-  // tighter rule was breaking the bootstrap case (link the FIRST buyer to a
-  // brand-new vertical-only campaign with zero existing links).
+/**
+ * Resolve LeadByte numeric id or Sato uuid to a confirmed Sato uuid in scope
+ * of the requester's business. Phase 1 is single-tenant so we only check the
+ * campaign exists; multi-tenant scoping comes later.
+ */
+async function campaignSatoId(campaignId: string, requester: AuthPayload): Promise<string | null> {
+  if (!requester.businessId) return null;
+  const satoId = await resolveSatoCampaignId(campaignId);
+  if (!satoId) return null;
   const [c] = await db
     .select({ id: campaigns.id })
     .from(campaigns)
-    .where(eq(campaigns.id, campaignId));
-  return !!c;
+    .where(eq(campaigns.id, satoId));
+  return c ? satoId : null;
 }
 
 export async function listClientsForCampaign(
   campaignId: string,
   requester: AuthPayload,
 ): Promise<ClientCampaignLink[] | null> {
-  if (!(await campaignInScope(campaignId, requester))) return null;
+  const satoId = await campaignSatoId(campaignId, requester);
+  if (!satoId) return null;
   const rows = await db
     .select({
       id: clientCampaigns.id,
@@ -60,7 +63,7 @@ export async function listClientsForCampaign(
     .from(clientCampaigns)
     .innerJoin(clients, eq(clients.id, clientCampaigns.clientId))
     .innerJoin(campaigns, eq(campaigns.id, clientCampaigns.campaignId))
-    .where(eq(clientCampaigns.campaignId, campaignId))
+    .where(eq(clientCampaigns.campaignId, satoId))
     .orderBy(desc(clientCampaigns.startedAt));
 
   return rows.map((r) => ({
@@ -132,7 +135,8 @@ export async function linkClientToCampaign(
   input: LinkClientToCampaignInput,
   requester: AuthPayload,
 ): Promise<ClientCampaignLink | null> {
-  if (!(await campaignInScope(campaignId, requester))) return null;
+  const satoId = await campaignSatoId(campaignId, requester);
+  if (!satoId) return null;
   // Verify the target client is also in scope.
   const [target] = await db
     .select({ id: clients.id })
@@ -145,7 +149,7 @@ export async function linkClientToCampaign(
   await db
     .insert(clientCampaigns)
     .values({
-      campaignId,
+      campaignId: satoId,
       clientId: input.clientId,
       leadPrice: input.leadPrice != null ? String(input.leadPrice) : null,
       currency: input.currency || 'GBP',
@@ -162,7 +166,7 @@ export async function linkClientToCampaign(
       },
     });
 
-  const links = await listClientsForCampaign(campaignId, requester);
+  const links = await listClientsForCampaign(satoId, requester);
   return links?.find((l) => l.clientId === input.clientId) ?? null;
 }
 
@@ -171,10 +175,12 @@ export async function unlinkClientFromCampaign(
   clientId: string,
   requester: AuthPayload,
 ): Promise<boolean> {
-  if (!(await campaignInScope(campaignId, requester))) return false;
-  const deleted = await db
+  const satoId = await campaignSatoId(campaignId, requester);
+  if (!satoId) return false;
+  // Idempotent — already-unlinked rows return true so the FE doesn't show
+  // a "not found" toast on a double-click.
+  await db
     .delete(clientCampaigns)
-    .where(and(eq(clientCampaigns.campaignId, campaignId), eq(clientCampaigns.clientId, clientId)))
-    .returning({ id: clientCampaigns.id });
-  return deleted.length > 0;
+    .where(and(eq(clientCampaigns.campaignId, satoId), eq(clientCampaigns.clientId, clientId)));
+  return true;
 }

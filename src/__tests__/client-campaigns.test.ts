@@ -289,11 +289,15 @@ describe('Client ↔ Campaigns links', () => {
       expect(clientIds).not.toContain(secondClientId);
     });
 
-    it('returns 404 for non-existent link', async () => {
+    it('is idempotent — returns 204 even when the link is already gone', async () => {
+      // Idempotency is the REST convention for DELETE. The FE double-clicks
+      // the trash icon often; surfacing a 404 on the second click as a "not
+      // found" toast was the source of confused-user reports. As long as the
+      // campaign itself exists, deleting a non-link is a no-op success.
       const res = await request(app)
         .delete(`/api/v1/campaigns/${campaignId}/clients/${MISSING_UUID}`)
         .set('Authorization', `Bearer ${ownerToken}`);
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(204);
     });
   });
 });

@@ -90,12 +90,16 @@ export async function createCreative(
   const businessId = requester.businessId;
   if (!businessId) return null;
 
-  if (!(await campaignBelongsToBusiness(input.campaignId, businessId))) return null;
+  // FE may pass either Sato uuid or LeadByte numeric id — resolve first.
+  const satoId = await resolveSatoCampaignId(input.campaignId);
+  if (!satoId) return null;
+
+  if (!(await campaignBelongsToBusiness(satoId, businessId))) return null;
 
   const [row] = await db
     .insert(creatives)
     .values({
-      campaignId: input.campaignId,
+      campaignId: satoId,
       name: input.name,
       type: input.type,
       fileUrl: input.fileUrl,
@@ -106,7 +110,7 @@ export async function createCreative(
     })
     .returning();
 
-  logger.info({ creativeId: row.id, campaignId: input.campaignId }, 'Creative uploaded');
+  logger.info({ creativeId: row.id, campaignId: satoId }, 'Creative uploaded');
   return toDto(row);
 }
 

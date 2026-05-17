@@ -181,11 +181,14 @@ export async function deleteSource(
   if (!isUuid(sourceId)) return false;
   const satoId = await resolveSatoCampaignId(campaignId);
   if (!satoId) return false;
-  const deleted = await db
+  // Idempotent — return true even if 0 rows deleted (row already gone or
+  // never existed for this campaign). REST DELETE convention + avoids the
+  // "Source not found" toast spam when the FE double-clicks the trash icon.
+  // Only returns false when the campaign itself is unknown (above).
+  await db
     .delete(trafficSources)
-    .where(and(eq(trafficSources.id, sourceId), eq(trafficSources.campaignId, satoId)))
-    .returning({ id: trafficSources.id });
-  return deleted.length > 0;
+    .where(and(eq(trafficSources.id, sourceId), eq(trafficSources.campaignId, satoId)));
+  return true;
 }
 
 /**
