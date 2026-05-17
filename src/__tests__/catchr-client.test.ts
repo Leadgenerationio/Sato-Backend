@@ -334,4 +334,22 @@ describe('Catchr field map', () => {
       expect.arrayContaining(['google-ads', 'facebook-ads', 'bing-ads', 'tik-tok', 'taboola']),
     );
   });
+
+  it('uses Daily (not TimePeriod) for Bing date — TimePeriod fails Summary aggregation', () => {
+    const map = fieldMapFor('bing-ads');
+    expect(map).not.toBeNull();
+    expect(map!.date).not.toBe('TimePeriod');
+    expect(map!.date).toBe('Daily');
+  });
+
+  it('has a non-null field map for TikTok with valid platform-native field IDs', () => {
+    const map = fieldMapFor('tik-tok');
+    expect(map).not.toBeNull();
+    expect(map!.spend).toBe('spend');
+    expect(map!.campaignId).toBe('campaign/campaign_id');
+    expect(map!.campaignName).toBe('campaign/campaign_name');
+    expect(map!.accountName).toBe('advertiser/name');
+    expect(map!.accountCurrency).toBe('advertiser/currency');
+    expect(map!.date).toBe('_NORMALIZED_DATE_FIELD_YEAR_MONTH_DAY');
+  });
 });

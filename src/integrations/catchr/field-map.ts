@@ -41,23 +41,31 @@ export const FIELD_MAP: Record<CatchrPlatform, PlatformFieldMap | null> = {
     accountCurrency: 'AccountCurrencyCode',
     date: 'Date',
   },
-  // Best-effort defaults — verify with list_fields_by_platform and update
+  // Confirmed 2026-05-17 via list_fields_by_platform.
+  // `TimePeriod` (TEXT) is incompatible with Microsoft Advertising's Summary
+  // report aggregation; `Daily` (YEAR_MONTH_DAY) is the proper daily-date
+  // dimension and switches Catchr to the Daily aggregation under the hood.
   'bing-ads': {
     spend: 'Spend',
     campaignId: 'CampaignId',
     campaignName: 'CampaignName',
     accountName: 'AccountName',
     accountCurrency: 'CurrencyCode',
-    date: 'TimePeriod',
+    date: 'Daily',
   },
-  // 2026-05-03: Catchr returns FIELD_NOT_KNOW for advertiser_name / currency /
-  // campaign_name on TikTok accounts in Sam's tenant — the previous defaults
-  // are wrong. Skipping until the correct field IDs are confirmed via
-  // Catchr's list_fields_for_account / list_fields_by_platform tool. The
-  // sync handler treats null as "skip this platform" (see ad-spend.service.ts).
-  // Runbook: ask Catchr support or call list_fields_by_platform with platform
-  // 'tik-tok' to get the real field IDs, then restore this map.
-  'tik-tok': null,
+  // Confirmed 2026-05-17 via list_fields_by_platform. The 2026-05-03
+  // FIELD_NOT_KNOW errors were because `account_name` / `account_currency`
+  // / `campaign_name` don't exist on TikTok — the platform uses
+  // `advertiser/*` and `campaign/*` namespaces, and `stat_time_day` is
+  // deprecated in favour of the Catchr-normalized date field.
+  'tik-tok': {
+    spend: 'spend',
+    campaignId: 'campaign/campaign_id',
+    campaignName: 'campaign/campaign_name',
+    accountName: 'advertiser/name',
+    accountCurrency: 'advertiser/currency',
+    date: '_NORMALIZED_DATE_FIELD_YEAR_MONTH_DAY',
+  },
   'taboola': {
     spend: 'spend',
     campaignId: 'campaign_id',
