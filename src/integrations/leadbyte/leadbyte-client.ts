@@ -861,6 +861,8 @@ export interface SyncResult {
   campaignsUpdated: number;
   campaignsCreated: number;
   campaignLinksCreated: number;
+  deliveriesUpserted: number;
+  deliveryCampaignsSkipped: number;
   unmappedCampaignIds: string[];
   error?: string;
 }
@@ -886,6 +888,7 @@ export async function syncAll(deps: {
   campaigns: typeof import('../../db/schema/campaigns.js').campaigns;
   clients?: typeof import('../../db/schema/clients.js').clients;
   clientCampaigns?: typeof import('../../db/schema/client-campaigns.js').clientCampaigns;
+  leadDeliveries?: typeof import('../../db/schema/lead-deliveries.js').leadDeliveries;
 }): Promise<SyncResult> {
   const startedAt = new Date().toISOString();
   const result: SyncResult = {
@@ -895,6 +898,8 @@ export async function syncAll(deps: {
     campaignsUpdated: 0,
     campaignsCreated: 0,
     campaignLinksCreated: 0,
+    deliveriesUpserted: 0,
+    deliveryCampaignsSkipped: 0,
     unmappedCampaignIds: [],
   };
 
@@ -975,6 +980,25 @@ export async function syncAll(deps: {
       }
     }
 
+    // Piece 3: write per-day lead_deliveries rows for each linked
+    // (client × campaign) pair so the dashboard leads-by-day chart, KPI
+    // tiles, and auto-invoice cron have real data to read. Skipped when
+    // schemas are missing (legacy callers) or there are no links yet.
+    if (deps.clientCampaigns && deps.leadDeliveries) {
+      try {
+        const dr = await populateLeadDeliveries({
+          db: deps.db,
+          campaigns: deps.campaigns,
+          clientCampaigns: deps.clientCampaigns,
+          leadDeliveries: deps.leadDeliveries,
+        });
+        result.deliveriesUpserted = dr.rowsUpserted;
+        result.deliveryCampaignsSkipped = dr.campaignsSkipped;
+      } catch (err) {
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'LeadByte lead_deliveries write failed');
+      }
+    }
+
     result.finishedAt = new Date().toISOString();
     logger.info(
       {
@@ -982,6 +1006,8 @@ export async function syncAll(deps: {
         updated: result.campaignsUpdated,
         created: result.campaignsCreated,
         linksCreated: result.campaignLinksCreated,
+        deliveriesUpserted: result.deliveriesUpserted,
+        deliverySkipped: result.deliveryCampaignsSkipped,
         unmapped: result.unmappedCampaignIds.length,
       },
       'LeadByte sync complete',
@@ -1109,4 +1135,115 @@ async function discoverClientCampaignLinks(deps: {
   }
 
   return created;
+}
+
+/**
+ * Piece 3: write daily lead_deliveries rows for each linked (client, campaign)
+ * pair.
+ *
+ * LeadByte's /reports/leadactivity returns daily lead counts per CAMPAIGN
+ * (not per-buyer). To safely attribute counts to a specific client, we only
+ * write for campaigns with exactly ONE linked client — those daily totals
+ * unambiguously belong to that client. Multi-client campaigns are skipped
+ * with a log line (we don't have per-buyer daily granularity from the API
+ * yet; misattribution would corrupt the dashboard).
+ *
+ * Idempotent via the (campaign_id, client_id, delivery_date) unique index
+ * — re-runs UPDATE the same rows so the table converges to the latest
+ * LeadByte numbers each cycle.
+ */
+async function populateLeadDeliveries(deps: {
+  db: typeof import('../../config/database.js').db;
+  campaigns: typeof import('../../db/schema/campaigns.js').campaigns;
+  clientCampaigns: typeof import('../../db/schema/client-campaigns.js').clientCampaigns;
+  leadDeliveries: typeof import('../../db/schema/lead-deliveries.js').leadDeliveries;
+}): Promise<{ rowsUpserted: number; campaignsSkipped: number }> {
+  const { sql } = await import('drizzle-orm');
+
+  // Group links by campaign: campaign_id → list of client_ids.
+  const links = await deps.db
+    .select({
+      campaignId: deps.clientCampaigns.campaignId,
+      clientId: deps.clientCampaigns.clientId,
+      leadbyteCampaignId: deps.campaigns.leadbyteCampaignId,
+    })
+    .from(deps.clientCampaigns)
+    .innerJoin(deps.campaigns, sql`${deps.campaigns.id} = ${deps.clientCampaigns.campaignId}`)
+    .where(sql`${deps.campaigns.leadbyteCampaignId} IS NOT NULL`);
+  if (links.length === 0) return { rowsUpserted: 0, campaignsSkipped: 0 };
+
+  const byCampaign = new Map<string, { campaignId: string; leadbyteCampaignId: string; clientIds: string[] }>();
+  for (const l of links) {
+    const lbId = l.leadbyteCampaignId;
+    if (!lbId) continue;
+    const entry = byCampaign.get(l.campaignId) ?? {
+      campaignId: l.campaignId,
+      leadbyteCampaignId: lbId,
+      clientIds: [],
+    };
+    entry.clientIds.push(l.clientId);
+    byCampaign.set(l.campaignId, entry);
+  }
+
+  let rowsUpserted = 0;
+  let campaignsSkipped = 0;
+
+  for (const entry of byCampaign.values()) {
+    if (entry.clientIds.length !== 1) {
+      // Multi-client campaign: API only returns campaign-level daily totals,
+      // can't safely attribute. Skip + log. Future enhancement: per-buyer
+      // groupBy on /reports/* if LeadByte supports it.
+      campaignsSkipped++;
+      logger.warn(
+        {
+          campaignId: entry.campaignId,
+          leadbyteCampaignId: entry.leadbyteCampaignId,
+          linkedClientCount: entry.clientIds.length,
+        },
+        'lead_deliveries: skipping multi-client campaign — no per-buyer daily attribution yet',
+      );
+      continue;
+    }
+
+    const clientId = entry.clientIds[0];
+    let dailyRows: LeadByteDeliveryReport[];
+    try {
+      dailyRows = await getDeliveryReports(entry.leadbyteCampaignId, 30);
+    } catch (err) {
+      logger.warn(
+        { campaignId: entry.campaignId, err: err instanceof Error ? err.message : String(err) },
+        'lead_deliveries: getDeliveryReports failed — skipping campaign',
+      );
+      continue;
+    }
+
+    for (const row of dailyRows) {
+      if (!row.date || row.leadCount <= 0) continue;
+      const upserted = await deps.db
+        .insert(deps.leadDeliveries)
+        .values({
+          campaignId: entry.campaignId,
+          clientId,
+          deliveryDate: row.date,
+          leadCount: row.leadCount,
+          validLeadCount: row.validLeads,
+          invalidLeadCount: row.invalidLeads,
+          leadbyteReportId: row.reportId,
+          source: 'leadbyte',
+        })
+        .onConflictDoUpdate({
+          target: [deps.leadDeliveries.campaignId, deps.leadDeliveries.clientId, deps.leadDeliveries.deliveryDate],
+          set: {
+            leadCount: row.leadCount,
+            validLeadCount: row.validLeads,
+            invalidLeadCount: row.invalidLeads,
+            leadbyteReportId: row.reportId,
+          },
+        })
+        .returning({ id: deps.leadDeliveries.id });
+      if (upserted.length > 0) rowsUpserted++;
+    }
+  }
+
+  return { rowsUpserted, campaignsSkipped };
 }

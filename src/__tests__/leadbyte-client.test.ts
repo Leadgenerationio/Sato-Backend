@@ -778,6 +778,190 @@ describe('LeadByte client — syncAll()', () => {
     expect(insertedLinks).toEqual([{ clientId: 'sato-client-1', campaignId: 'stato-camp-1' }]);
   });
 
+  it('writes per-day lead_deliveries for single-linked-client campaigns (Piece 3)', async () => {
+    process.env.LEADBYTE_API_KEY = 'test-key';
+    process.env.LEADBYTE_BASE_URL = 'https://example.test/restapi/v1.3';
+
+    // Sequence:
+    //  1. /campaigns → 1 campaign
+    //  2. /buyers (Piece 2) → 1 buyer
+    //  3. /reports/buyer (Piece 2) → 1 buyer row matching the client
+    //  4. /reports/leadactivity (Piece 3) → 2 daily rows
+    fetchMock
+      .mockResolvedValueOnce(
+        mockJsonResponse([
+          { id: 'lb-camp-1', name: 'Solar Panels', active: 'Yes', archived: 'No', currency: 'GBP' },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          data: [{ id: 113, company: 'Benson Goldstein Ltd', status: 'Active' }],
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          report: [
+            {
+              campaign: 'Solar Panels',
+              buyer: 'Benson Goldstein Ltd',
+              posted: 50,
+              accepted: 50,
+              sold: 50,
+              rejected: 0,
+              returned: 0,
+              revenue: 1000,
+              currency: 'GBP',
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          report: [
+            { date: '2026-05-15', count: 8 },
+            { date: '2026-05-16', count: 12 },
+          ],
+        }),
+      );
+
+    const upsertedDeliveries: unknown[] = [];
+
+    const campaignsTableRef = { __ref: 'campaigns' };
+    const clientsTableRef = { __ref: 'clients' };
+    const clientCampaignsTableRef = { __ref: 'clientCampaigns' };
+    const leadDeliveriesTableRef = {
+      campaignId: 'd_campaignId',
+      clientId: 'd_clientId',
+      deliveryDate: 'd_deliveryDate',
+      id: 'd_id',
+      __ref: 'leadDeliveries',
+    };
+
+    const dbMock = {
+      update: () => ({
+        set: () => ({
+          where: () => ({
+            returning: async () => [],
+          }),
+        }),
+      }),
+      insert: (table: unknown) => ({
+        values: (v: unknown) => {
+          if (table === campaignsTableRef) {
+            return { returning: async () => [{ id: 'stato-camp-1' }] };
+          }
+          if (table === clientCampaignsTableRef) {
+            return {
+              onConflictDoNothing: () => ({
+                returning: async () => [{ id: 'cc-1' }],
+              }),
+            };
+          }
+          // leadDeliveries insert
+          upsertedDeliveries.push(v);
+          return {
+            onConflictDoUpdate: () => ({
+              returning: async () => [{ id: 'ld-' + upsertedDeliveries.length }],
+            }),
+          };
+        },
+      }),
+      select: () => ({
+        from: (table: unknown) => ({
+          where: async () => {
+            if (table === clientsTableRef) {
+              return [{ id: 'sato-client-1', companyName: 'Benson Goldstein Ltd', leadbyteClientId: '113' }];
+            }
+            return [{ campaignId: 'stato-camp-1', leadbyteCampaignId: 'lb-camp-1' }];
+          },
+          innerJoin: () => ({
+            where: async () => [
+              { campaignId: 'stato-camp-1', clientId: 'sato-client-1', leadbyteCampaignId: 'lb-camp-1' },
+            ],
+          }),
+        }),
+      }),
+    };
+
+    const result = await lb.syncAll({
+      db: dbMock as never,
+      campaigns: campaignsTableRef as never,
+      clients: clientsTableRef as never,
+      clientCampaigns: clientCampaignsTableRef as never,
+      leadDeliveries: leadDeliveriesTableRef as never,
+    });
+
+    expect(result.deliveriesUpserted).toBe(2);
+    expect(result.deliveryCampaignsSkipped).toBe(0);
+    expect(upsertedDeliveries).toEqual([
+      expect.objectContaining({
+        campaignId: 'stato-camp-1',
+        clientId: 'sato-client-1',
+        deliveryDate: '2026-05-15',
+        leadCount: 8,
+      }),
+      expect.objectContaining({
+        campaignId: 'stato-camp-1',
+        clientId: 'sato-client-1',
+        deliveryDate: '2026-05-16',
+        leadCount: 12,
+      }),
+    ]);
+  });
+
+  it('skips lead_deliveries write for campaigns linked to multiple clients (Piece 3 safety)', async () => {
+    process.env.LEADBYTE_API_KEY = 'test-key';
+    process.env.LEADBYTE_BASE_URL = 'https://example.test/restapi/v1.3';
+
+    fetchMock
+      .mockResolvedValueOnce(
+        mockJsonResponse([
+          { id: 'lb-camp-1', name: 'Solar Panels', active: 'Yes', archived: 'No', currency: 'GBP' },
+        ]),
+      )
+      .mockResolvedValueOnce(mockJsonResponse({ data: [] })) // /buyers
+      .mockResolvedValueOnce(mockJsonResponse({ report: [] })); // /reports/buyer (no new links)
+
+    const campaignsTableRef = { __ref: 'campaigns' };
+    const clientsTableRef = { __ref: 'clients' };
+    const clientCampaignsTableRef = { __ref: 'clientCampaigns' };
+    const leadDeliveriesTableRef = { __ref: 'leadDeliveries' };
+
+    const dbMock = {
+      update: () => ({ set: () => ({ where: () => ({ returning: async () => [{ id: 'x' }] }) }) }),
+      insert: () => ({
+        values: () => ({
+          onConflictDoNothing: () => ({ returning: async () => [] }),
+          onConflictDoUpdate: () => ({ returning: async () => [] }),
+          returning: async () => [{ id: 'x' }],
+        }),
+      }),
+      select: () => ({
+        from: (table: unknown) => ({
+          where: async () => (table === clientsTableRef ? [] : []),
+          innerJoin: () => ({
+            where: async () => [
+              // Two clients linked to the same campaign — should skip.
+              { campaignId: 'stato-camp-1', clientId: 'sato-client-1', leadbyteCampaignId: 'lb-camp-1' },
+              { campaignId: 'stato-camp-1', clientId: 'sato-client-2', leadbyteCampaignId: 'lb-camp-1' },
+            ],
+          }),
+        }),
+      }),
+    };
+
+    const result = await lb.syncAll({
+      db: dbMock as never,
+      campaigns: campaignsTableRef as never,
+      clients: clientsTableRef as never,
+      clientCampaigns: clientCampaignsTableRef as never,
+      leadDeliveries: leadDeliveriesTableRef as never,
+    });
+
+    expect(result.deliveriesUpserted).toBe(0);
+    expect(result.deliveryCampaignsSkipped).toBe(1);
+  });
+
   it('skips client_campaigns discovery when clients/clientCampaigns deps are omitted (legacy callers)', async () => {
     process.env.LEADBYTE_API_KEY = 'test-key';
     process.env.LEADBYTE_BASE_URL = 'https://example.test/restapi/v1.3';
