@@ -21,6 +21,7 @@ import {
 import { getLastCatchrSyncAt } from './ad-spend.controller.js';
 import { syncQueue } from '../jobs/queue.js';
 import { cached } from '../utils/cache.js';
+import { redis } from '../config/redis.js';
 import { logger } from '../utils/logger.js';
 
 // Xero balances + VAT change slowly. Caching their server-side fetches
@@ -97,15 +98,43 @@ export async function xeroVatLiability(req: Request, res: Response) {
     ? vatService.historicalQuarters(requestedHistory)
     : [];
 
+  // Stale-while-revalidate for VAT: when Xero is rate-limiting (or any other
+  // upstream failure), serve the last-known-good response from a 7-day "stale"
+  // key instead of an error toast. Primary cache lives 1h via `cached()`; on
+  // every successful fetch we also write a 7-day mirror under
+  // `xero:vat:lastgood:*`. Empty result still wins as primary (no point keeping
+  // a 0-VAT stale value around).
   async function fetchRange(r: { fromDate: string; toDate: string; label?: string }) {
-    return cached(
-      `xero:vat:${r.fromDate}:${r.toDate}`,
-      XERO_VAT_TTL_SECONDS,
-      () => xeroClient.getVatLiability(r.fromDate, r.toDate),
-    ).catch((err) => {
-      logger.warn({ err, range: r }, 'Xero VAT fetch failed');
+    const lastGoodKey = `xero:vat:lastgood:${r.fromDate}:${r.toDate}`;
+    try {
+      const fresh = await cached(
+        `xero:vat:${r.fromDate}:${r.toDate}`,
+        XERO_VAT_TTL_SECONDS,
+        () => xeroClient.getVatLiability(r.fromDate, r.toDate),
+      );
+      // Persist last-known-good for SWR fallback. 7-day TTL is well clear of
+      // any realistic Xero rate-limit lockout window.
+      if (redis && redis.status === 'ready') {
+        redis.set(lastGoodKey, JSON.stringify(fresh), 'EX', 7 * 24 * 3600)
+          .catch((err) => logger.warn({ err, lastGoodKey }, 'VAT lastgood write failed'));
+      }
+      return fresh;
+    } catch (err) {
+      logger.warn({ err, range: r }, 'Xero VAT fetch failed — trying lastgood');
+      if (redis && redis.status === 'ready') {
+        try {
+          const stale = await redis.get(lastGoodKey);
+          if (stale) {
+            const parsed = JSON.parse(stale);
+            logger.info({ range: r }, 'Serving stale VAT (SWR fallback)');
+            return { ...parsed, _stale: true };
+          }
+        } catch (readErr) {
+          logger.warn({ readErr, lastGoodKey }, 'VAT lastgood read failed');
+        }
+      }
       return { fromDate: r.fromDate, toDate: r.toDate, error: err instanceof Error ? err.message : 'fetch failed' };
-    });
+    }
   }
 
   const [prevResult, currResult, ...historyResults] = await Promise.all([
