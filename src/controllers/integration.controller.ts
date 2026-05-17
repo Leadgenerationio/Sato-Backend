@@ -29,7 +29,11 @@ import { logger } from '../utils/logger.js';
 // fresh 700-1000ms Xero round-trip. Xero docs explicitly support this
 // access pattern; balances are end-of-day-accurate, not minute-accurate.
 const XERO_BANK_TTL_SECONDS = 300;   // 5 min
-const XERO_VAT_TTL_SECONDS = 900;    // 15 min — VAT moves quarterly
+// VAT data moves quarterly, not by-minute, and Xero rate-limits the
+// TaxSummary endpoint hard. 60min cache reduces miss-during-429 risk
+// from "every page refresh" to "once per hour" without sacrificing
+// any meaningful freshness.
+const XERO_VAT_TTL_SECONDS = 3600;   // 60 min — VAT moves quarterly
 
 let lastLeadByteSyncAt: string | null = null;
 export function recordLeadByteSync(ts: string): void {
