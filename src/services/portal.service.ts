@@ -1,7 +1,8 @@
-import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { clients } from '../db/schema/clients.js';
 import { campaigns } from '../db/schema/campaigns.js';
+import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { invoices } from '../db/schema/invoices.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { creatives } from '../db/schema/creatives.js';
@@ -9,6 +10,24 @@ import { landingPages } from '../db/schema/landing-pages.js';
 import { agreements } from '../db/schema/agreements.js';
 import { getApprovalStatesForCreatives } from './creative-approval.service.js';
 import type { AuthPayload } from '../types/index.js';
+
+/**
+ * Resolve a clientId to the list of campaign UUIDs they're linked to via the
+ * client_campaigns join table (Slice 2 concept inversion, Sam Loom #40).
+ *
+ * Replaces the older `campaigns.client_id = $1` direct lookup, which silently
+ * returned zero rows for campaigns Piece 1 auto-inserted (clientId is NULL on
+ * those — the buyer set lives in client_campaigns). Without this helper, real
+ * buyers like UK Energy Saving Network see empty Dashboard / Campaigns /
+ * Compliance pages despite having thousands of lead_deliveries rows.
+ */
+async function campaignIdsForClient(clientId: string): Promise<string[]> {
+  const rows = await db
+    .select({ campaignId: clientCampaigns.campaignId })
+    .from(clientCampaigns)
+    .where(eq(clientCampaigns.clientId, clientId));
+  return rows.map((r) => r.campaignId);
+}
 
 export interface PortalDashboard {
   companyName: string;
@@ -109,6 +128,10 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
   const fourteenDaysAgo = new Date(Date.now() - 14 * 86_400_000);
   const fourteenDaysAgoDate = fourteenDaysAgo.toISOString().split('T')[0];
 
+  // Resolve the buyer's campaign set via client_campaigns first — the old
+  // campaigns.client_id filter misses every campaign Piece 1 auto-inserted.
+  const linkedCampaignIds = await campaignIdsForClient(clientId);
+
   const [
     [{ activeCampaigns }],
     [{ totalThisMonth }],
@@ -116,10 +139,12 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
     invoiceRows,
     recentDeliveries,
   ] = await Promise.all([
-    db
-      .select({ activeCampaigns: sql<number>`count(*)::int` })
-      .from(campaigns)
-      .where(and(eq(campaigns.clientId, clientId), eq(campaigns.status, 'active'))),
+    linkedCampaignIds.length === 0
+      ? Promise.resolve([{ activeCampaigns: 0 }])
+      : db
+          .select({ activeCampaigns: sql<number>`count(*)::int` })
+          .from(campaigns)
+          .where(and(inArray(campaigns.id, linkedCampaignIds), eq(campaigns.status, 'active'))),
     db
       .select({
         totalThisMonth: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int`,
@@ -192,10 +217,17 @@ export async function getCampaigns(requester: AuthPayload): Promise<PortalCampai
   const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0];
   const weekStart = new Date(Date.now() - 7 * 86_400_000).toISOString().split('T')[0];
 
+  // Slice 2 fix: a buyer's campaigns live in client_campaigns, not the legacy
+  // campaigns.client_id column (which is NULL for every Piece 1 auto-inserted
+  // row). Without this, multi-linked buyers like UK Energy Saving Network see
+  // zero campaigns in the portal despite the join table having links.
+  const linkedCampaignIds = await campaignIdsForClient(clientId);
+  if (linkedCampaignIds.length === 0) return [];
+
   const rows = await db
     .select()
     .from(campaigns)
-    .where(eq(campaigns.clientId, clientId));
+    .where(inArray(campaigns.id, linkedCampaignIds));
 
   if (rows.length === 0) return [];
 
@@ -340,7 +372,14 @@ export async function getInvoices(requester: AuthPayload): Promise<PortalInvoice
 export async function getCompliance(requester: AuthPayload): Promise<PortalCompliance[]> {
   const clientId = requireClientId(requester);
 
-  const campaignRows = await db.select().from(campaigns).where(eq(campaigns.clientId, clientId));
+  // Same Slice 2 fix as getCampaigns / getDashboard.
+  const linkedCampaignIds = await campaignIdsForClient(clientId);
+  if (linkedCampaignIds.length === 0) return [];
+
+  const campaignRows = await db
+    .select()
+    .from(campaigns)
+    .where(inArray(campaigns.id, linkedCampaignIds));
   if (campaignRows.length === 0) return [];
 
   const campaignIds = campaignRows.map((c) => c.id);
