@@ -382,7 +382,17 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
     todayReport, yesterdayReport, weekReport, lastWeekReport,
     monthReport, lastMonthReport, ytdReport,
   ] = await Promise.all([
-    cached(`lb:deliveries:${id}:30d:v1`, PER_CAMPAIGN_TTL, () => leadbyte.getDeliveryReports(id, 30)),
+    // LeadByte's /reports/leadactivity silently returns 0 rows for the
+    // arbitrary-days-range overload (verified 2026-05-17). Pull last_month
+    // + this_month named windows and merge — same ~30 days of coverage
+    // but actually populated.
+    cached(`lb:deliveries:${id}:30d:v2`, PER_CAMPAIGN_TTL, async () => {
+      const [last, current] = await Promise.all([
+        leadbyte.getDeliveryReports(id, 'last_month'),
+        leadbyte.getDeliveryReports(id, 'this_month'),
+      ]);
+      return [...last, ...current];
+    }),
     cached(`lb:suppliers:${id}:30d:v1`, PER_CAMPAIGN_TTL, () => leadbyte.getSuppliers(id)),
     // Sato-side metadata is intentionally NOT cached — cost_per_lead is
     // edited inline by users and stale reads break the UX immediately.
@@ -425,16 +435,31 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
     ytd: rowToWindow(ytdRow),
   };
 
-  const totalLeads = ytdRow?.leads ?? 0;
+  // Same ytd-is-empty fallback used in listCampaigns: LeadByte's ytd window
+  // returns zeros for some campaigns even when last_month + this_month
+  // report real activity. Sum the windows we have when ytd is hollow so the
+  // KPI tiles ("Total Leads", "Total Revenue") never silently show 0 next
+  // to a "237 today" badge.
+  const sumWindows = (
+    rows: Array<typeof todayRow | undefined>,
+    key: 'leads' | 'revenue' | 'payout' | 'emailCost' | 'smsCost' | 'validationCost',
+  ) => rows.reduce((sum, r) => sum + ((r?.[key] as number | undefined) ?? 0), 0);
+  const ytdHasData = (ytdRow?.leads ?? 0) > 0 || (ytdRow?.revenue ?? 0) > 0;
+  const fallbackRows = [todayRow, weekRow, monthRow, lastMonthRow];
+
+  const totalLeads = ytdHasData ? (ytdRow?.leads ?? 0) : sumWindows(fallbackRows, 'leads');
   const leadsToday = todayRow?.leads ?? 0;
   const leadsThisWeek = weekRow?.leads ?? 0;
   const leadsThisMonth = monthRow?.leads ?? 0;
-  const totalRevenue = ytdRow?.revenue ?? 0;
-  const totalCost =
-    (ytdRow?.payout ?? 0) +
-    (ytdRow?.emailCost ?? 0) +
-    (ytdRow?.smsCost ?? 0) +
-    (ytdRow?.validationCost ?? 0);
+  const totalRevenue = ytdHasData ? (ytdRow?.revenue ?? 0) : sumWindows(fallbackRows, 'revenue');
+  const fallbackCost =
+    sumWindows(fallbackRows, 'payout') +
+    sumWindows(fallbackRows, 'emailCost') +
+    sumWindows(fallbackRows, 'smsCost') +
+    sumWindows(fallbackRows, 'validationCost');
+  const totalCost = ytdHasData
+    ? (ytdRow?.payout ?? 0) + (ytdRow?.emailCost ?? 0) + (ytdRow?.smsCost ?? 0) + (ytdRow?.validationCost ?? 0)
+    : fallbackCost;
   const cpl = totalLeads > 0 ? totalCost / totalLeads : 0;
   const margin = totalRevenue > 0 ? ((totalRevenue - totalCost) / totalRevenue) * 100 : 0;
 

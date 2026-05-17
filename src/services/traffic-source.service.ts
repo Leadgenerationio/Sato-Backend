@@ -2,6 +2,8 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { trafficSources } from '../db/schema/traffic-sources.js';
 import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
+import { adSpend } from '../db/schema/ad-spend.js';
+import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { isUuid } from '../utils/zod-helpers.js';
 import { resolveSatoCampaignId } from '../utils/resolve-campaign-id.js';
 import type { AuthPayload } from '../types/index.js';
@@ -32,9 +34,14 @@ export interface TrafficSource {
 
 type SourceRow = typeof trafficSources.$inferSelect;
 
-function toDto(row: SourceRow, leadPrice = 0): TrafficSource {
-  const totalSpend = Number(row.totalSpend ?? 0);
-  const totalLeads = row.totalLeads ?? 0;
+function toDto(
+  row: SourceRow,
+  leadPrice = 0,
+  liveSpend?: number,
+  liveLeads?: number,
+): TrafficSource {
+  const totalSpend = liveSpend !== undefined ? liveSpend : Number(row.totalSpend ?? 0);
+  const totalLeads = liveLeads !== undefined ? liveLeads : (row.totalLeads ?? 0);
   const revenue = Math.round(leadPrice * totalLeads * 100) / 100;
   return {
     id: row.id,
@@ -71,16 +78,68 @@ export async function listSourcesForCampaign(
   const satoId = await resolveSatoCampaignId(campaignId);
   if (!satoId) return [];
 
-  // Load lead price + sources in parallel; both are tiny single-table reads.
-  const [leadPrice, rows] = await Promise.all([
-    leadPriceForCampaign(satoId),
+  // Get the LeadByte id so we can join ad_spend on it (ad_spend.campaign_id
+  // stores the platform-side campaign id Catchr ingested, which is the
+  // LeadByte numeric id for our setup).
+  const [campRow] = await db
+    .select({
+      leadPrice: campaignsTable.leadPrice,
+      leadbyteCampaignId: campaignsTable.leadbyteCampaignId,
+    })
+    .from(campaignsTable)
+    .where(eq(campaignsTable.id, satoId));
+  const leadPrice = campRow?.leadPrice ? Number(campRow.leadPrice) : 0;
+  const lbCampaignId = campRow?.leadbyteCampaignId ?? '';
+
+  // Pull traffic source rows + live ad-spend aggregates + lead deliveries
+  // total in parallel. Without this join the totalSpend column stays at
+  // its 0 default forever (nothing writes to it on the sync path).
+  const [rows, spendRows, leadAgg] = await Promise.all([
     db
       .select()
       .from(trafficSources)
       .where(eq(trafficSources.campaignId, satoId))
       .orderBy(desc(trafficSources.totalSpend)),
+    // SUM ad_spend by (platform, account_id) for this campaign's LB id.
+    // Empty when nothing matches — sources without spend show £0.
+    lbCampaignId
+      ? db
+          .select({
+            platform: adSpend.platform,
+            accountId: adSpend.accountId,
+            spend: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text`,
+          })
+          .from(adSpend)
+          .where(eq(adSpend.campaignId, lbCampaignId))
+          .groupBy(adSpend.platform, adSpend.accountId)
+      : Promise.resolve([] as Array<{ platform: string; accountId: string; spend: string }>),
+    // Campaign-level total leads. Per-source attribution isn't possible from
+    // the LeadByte aggregate report, so for now every source on the same
+    // campaign shows the same lead count (shared denominator).
+    db
+      .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
+      .from(leadDeliveries)
+      .where(eq(leadDeliveries.campaignId, satoId)),
   ]);
-  return rows.map((r) => toDto(r, leadPrice));
+
+  const spendByKey = new Map<string, number>();
+  for (const s of spendRows) {
+    spendByKey.set(`${s.platform}|${s.accountId}`, Number(s.spend));
+  }
+  const totalLeadsForCampaign = leadAgg[0]?.leads ?? 0;
+
+  return rows.map((r) => {
+    const key = `${r.platform ?? ''}|${r.accountId ?? ''}`;
+    const liveSpend = spendByKey.get(key);
+    return toDto(
+      r,
+      leadPrice,
+      // Override the static columns with live aggregates when we have them.
+      liveSpend !== undefined ? liveSpend : Number(r.totalSpend ?? 0),
+      // Leads stay campaign-total until per-source attribution exists.
+      totalLeadsForCampaign,
+    );
+  });
 }
 
 export async function countSourcesForCampaign(campaignId: string): Promise<number> {
