@@ -236,6 +236,7 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
     cached('lb:report:today:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('today')),
     cached('lb:report:this_week:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_week')),
     cached('lb:report:this_month:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('this_month')),
+    cached('lb:report:last_month:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('last_month')),
     cached('lb:report:ytd:v5', DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport('ytd')),
   ]);
   const pickOrEmpty = (p: PromiseSettledResult<typeof empty>, label: string): typeof empty => {
@@ -246,7 +247,8 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
   const todayReport = pickOrEmpty(settled[0], 'today');
   const weekReport = pickOrEmpty(settled[1], 'this_week');
   const monthReport = pickOrEmpty(settled[2], 'this_month');
-  const ytdReport = pickOrEmpty(settled[3], 'ytd');
+  const lastMonthReport = pickOrEmpty(settled[3], 'last_month');
+  const ytdReport = pickOrEmpty(settled[4], 'ytd');
 
   // The report rows are keyed by campaign NAME (LeadByte's choice), so we
   // build name-keyed maps for fast lookup per campaign.
@@ -255,12 +257,14 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
   const todayByName = byName(todayReport);
   const weekByName = byName(weekReport);
   const monthByName = byName(monthReport);
+  const lastMonthByName = byName(lastMonthReport);
   const ytdByName = byName(ytdReport);
 
   return campaigns.map((c): CampaignSummary => {
     const today = todayByName.get(c.name);
     const week = weekByName.get(c.name);
     const month = monthByName.get(c.name);
+    const lastMonth = lastMonthByName.get(c.name);
     const ytd = ytdByName.get(c.name);
 
     // Revenue/cost/margin use the YTD figures when LeadByte returns them,
@@ -278,10 +282,10 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
       rows.reduce((sum, r) => sum + ((r?.[key] as number | undefined) ?? 0), 0);
 
     const ytdHasData = (ytd?.leads ?? 0) > 0 || (ytd?.revenue ?? 0) > 0;
-    const fallbackRows = [today, week, month];
-    // We fetch last_month upstream into one of the cached calls — but to keep
-    // the fallback simple, sum the windows we already have (today + this_week
-    // + this_month). This_month alone already covers most active revenue.
+    // last_month + this_month covers ~60 days with zero overlap. Was
+    // [today, week, month] which double-counted today's leads (today ⊆
+    // this_week ⊆ this_month).
+    const fallbackRows = [month, lastMonth];
     const totalLeads = ytdHasData ? (ytd?.leads ?? 0) : sumWindows(fallbackRows, 'leads');
     const totalRevenue = ytdHasData ? (ytd?.revenue ?? 0) : sumWindows(fallbackRows, 'revenue');
     const fallbackCost =
@@ -437,15 +441,16 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
 
   // Same ytd-is-empty fallback used in listCampaigns: LeadByte's ytd window
   // returns zeros for some campaigns even when last_month + this_month
-  // report real activity. Sum the windows we have when ytd is hollow so the
-  // KPI tiles ("Total Leads", "Total Revenue") never silently show 0 next
-  // to a "237 today" badge.
+  // report real activity. Sum only the non-overlapping windows so we don't
+  // triple-count today's leads (today ⊆ this_week ⊆ this_month).
   const sumWindows = (
     rows: Array<typeof todayRow | undefined>,
     key: 'leads' | 'revenue' | 'payout' | 'emailCost' | 'smsCost' | 'validationCost',
   ) => rows.reduce((sum, r) => sum + ((r?.[key] as number | undefined) ?? 0), 0);
   const ytdHasData = (ytdRow?.leads ?? 0) > 0 || (ytdRow?.revenue ?? 0) > 0;
-  const fallbackRows = [todayRow, weekRow, monthRow, lastMonthRow];
+  // last_month + this_month covers ~60 days with zero overlap. Was
+  // [today, week, month, last_month] which triple-counted today's leads.
+  const fallbackRows = [monthRow, lastMonthRow];
 
   const totalLeads = ytdHasData ? (ytdRow?.leads ?? 0) : sumWindows(fallbackRows, 'leads');
   const leadsToday = todayRow?.leads ?? 0;
