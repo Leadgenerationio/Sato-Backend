@@ -1158,7 +1158,7 @@ async function populateLeadDeliveries(deps: {
   clientCampaigns: typeof import('../../db/schema/client-campaigns.js').clientCampaigns;
   leadDeliveries: typeof import('../../db/schema/lead-deliveries.js').leadDeliveries;
 }): Promise<{ rowsUpserted: number; campaignsSkipped: number }> {
-  const { sql } = await import('drizzle-orm');
+  const { eq, isNotNull } = await import('drizzle-orm');
 
   // Group links by campaign: campaign_id → list of client_ids.
   const links = await deps.db
@@ -1168,8 +1168,8 @@ async function populateLeadDeliveries(deps: {
       leadbyteCampaignId: deps.campaigns.leadbyteCampaignId,
     })
     .from(deps.clientCampaigns)
-    .innerJoin(deps.campaigns, sql`${deps.campaigns.id} = ${deps.clientCampaigns.campaignId}`)
-    .where(sql`${deps.campaigns.leadbyteCampaignId} IS NOT NULL`);
+    .innerJoin(deps.campaigns, eq(deps.campaigns.id, deps.clientCampaigns.campaignId))
+    .where(isNotNull(deps.campaigns.leadbyteCampaignId));
   if (links.length === 0) return { rowsUpserted: 0, campaignsSkipped: 0 };
 
   const byCampaign = new Map<string, { campaignId: string; leadbyteCampaignId: string; clientIds: string[] }>();
