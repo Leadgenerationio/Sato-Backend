@@ -1063,3 +1063,136 @@ describe('LeadByte client — syncAll()', () => {
     expect(result.unmappedCampaignIds).toHaveLength(0);
   });
 });
+
+describe('LeadByte client — normalizeBuyerName', () => {
+  it('treats "Benson Goldstein Ltd" and "Benson Goldstein" as the same buyer', () => {
+    expect(lb.normalizeBuyerName('Benson Goldstein Ltd')).toBe(
+      lb.normalizeBuyerName('Benson Goldstein'),
+    );
+  });
+
+  it('treats "Limited" and "Ltd" suffixes as equivalent', () => {
+    expect(lb.normalizeBuyerName('Acme Limited')).toBe(lb.normalizeBuyerName('Acme Ltd'));
+  });
+
+  it('strips trailing punctuation and case differences', () => {
+    expect(lb.normalizeBuyerName('Tomic Zero, Inc.')).toBe(
+      lb.normalizeBuyerName('tomic zero inc'),
+    );
+  });
+
+  it('collapses internal whitespace', () => {
+    expect(lb.normalizeBuyerName('  Two   Words  ')).toBe('two words');
+  });
+
+  it('keeps distinct buyers distinct', () => {
+    expect(lb.normalizeBuyerName('Acme')).not.toBe(lb.normalizeBuyerName('Acme Solutions'));
+  });
+
+  it('handles PLC / Corp / LLC / Co suffixes', () => {
+    const base = lb.normalizeBuyerName('Northwind');
+    expect(lb.normalizeBuyerName('Northwind PLC')).toBe(base);
+    expect(lb.normalizeBuyerName('Northwind Corp')).toBe(base);
+    expect(lb.normalizeBuyerName('Northwind LLC')).toBe(base);
+    expect(lb.normalizeBuyerName('Northwind Co.')).toBe(base);
+    expect(lb.normalizeBuyerName('Northwind Corporation')).toBe(base);
+  });
+});
+
+describe('LeadByte client — discoverClientCampaignLinks name-suffix tolerance', () => {
+  const originalEnv = { ...process.env };
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    fetchMock.mockReset();
+    global.fetch = fetchMock as unknown as typeof fetch;
+    process.env.LEADBYTE_API_KEY = 'test-key';
+    process.env.LEADBYTE_BASE_URL = 'https://example.test/restapi/v1.3';
+  });
+  afterEach(() => {
+    global.fetch = ORIGINAL_FETCH;
+    process.env = { ...originalEnv };
+  });
+
+  // Regression test for Benson Goldstein (2026-05-17): /buyers returned
+  // "Benson Goldstein Ltd" but /reports/buyer returned "Benson Goldstein" so
+  // the old exact-name match silently dropped the link despite
+  // leadbyte_client_id being set on the Sato client. The normalizer should
+  // close this gap.
+  it('links a client even when /buyers and /reports/buyer disagree on the Ltd suffix', async () => {
+    fetchMock
+      // 1) /campaigns
+      .mockResolvedValueOnce(
+        mockJsonResponse([
+          { id: 'lb-camp-1', name: 'Solar Panels', active: 'Yes', archived: 'No', currency: 'GBP' },
+        ]),
+      )
+      // 2) /buyers — name has the Ltd suffix
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          data: [{ id: 113, company: 'Benson Goldstein Ltd', status: 'Active' }],
+        }),
+      )
+      // 3) /reports/buyer — same buyer, no suffix
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          report: [
+            {
+              campaign: 'Solar Panels',
+              buyer: 'Benson Goldstein',
+              posted: 50,
+              accepted: 50,
+              sold: 50,
+              rejected: 0,
+              returned: 0,
+              revenue: 1000,
+              currency: 'GBP',
+            },
+          ],
+        }),
+      );
+
+    const insertedLinks: unknown[] = [];
+    const campaignsTableRef = { __ref: 'campaigns' };
+    const clientsTableRef = { __ref: 'clients' };
+    const clientCampaignsTableRef = { __ref: 'clientCampaigns' };
+
+    const dbMock = {
+      update: () => ({
+        set: () => ({ where: () => ({ returning: async () => [] }) }),
+      }),
+      insert: (table: unknown) => ({
+        values: (v: unknown) => {
+          if (table === campaignsTableRef) {
+            return { returning: async () => [{ id: 'stato-camp-1' }] };
+          }
+          insertedLinks.push(v);
+          return {
+            onConflictDoNothing: () => ({
+              returning: async () => [{ id: 'cc-1' }],
+            }),
+          };
+        },
+      }),
+      select: () => ({
+        from: (table: unknown) => ({
+          where: async () => {
+            if (table === clientsTableRef) {
+              return [{ id: 'sato-client-1', companyName: 'Benson Goldstein Ltd', leadbyteClientId: '113' }];
+            }
+            return [{ campaignId: 'stato-camp-1', leadbyteCampaignId: 'lb-camp-1' }];
+          },
+        }),
+      }),
+    };
+
+    const result = await lb.syncAll({
+      db: dbMock as never,
+      campaigns: campaignsTableRef as never,
+      clients: clientsTableRef as never,
+      clientCampaigns: clientCampaignsTableRef as never,
+    });
+
+    expect(result.campaignLinksCreated).toBe(1);
+    expect(insertedLinks).toEqual([{ clientId: 'sato-client-1', campaignId: 'stato-camp-1' }]);
+  });
+});

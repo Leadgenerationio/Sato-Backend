@@ -60,4 +60,39 @@ describe('Campaign API', () => {
       expect(res.status).toBe(404);
     });
   });
+
+  // Sam Loom 2026-05-15: surface LeadByte buyer caps. Service runs in MOCK
+  // mode here (no LEADBYTE_API_KEY) so the endpoint serves the LeadByte mock
+  // delivery list — assertion is on shape, not specific data.
+  describe('GET /api/v1/campaigns/:id/deliveries', () => {
+    it('owner gets 200 + shape with caps when passing a LeadByte id', async () => {
+      const res = await request(app)
+        .get('/api/v1/campaigns/some-leadbyte-id/deliveries')
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.data.deliveries)).toBe(true);
+      // Every delivery row carries a caps object even when individual fields are null.
+      for (const d of res.body.data.deliveries) {
+        expect(d).toHaveProperty('caps');
+        expect(d.caps).toHaveProperty('day');
+        expect(d.caps).toHaveProperty('week');
+        expect(d.caps).toHaveProperty('month');
+        expect(d.caps).toHaveProperty('total');
+      }
+    });
+
+    it('returns 404 when passing a uuid that does not exist', async () => {
+      const res = await request(app)
+        .get('/api/v1/campaigns/00000000-0000-0000-0000-000000000000/deliveries')
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(404);
+    });
+
+    it('client cannot read deliveries', async () => {
+      const res = await request(app)
+        .get('/api/v1/campaigns/some-leadbyte-id/deliveries')
+        .set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(403);
+    });
+  });
 });

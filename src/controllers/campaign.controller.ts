@@ -51,6 +51,17 @@ export async function listTrafficSources(req: Request, res: Response) {
   res.json({ status: 'success', data: { sources } });
 }
 
+// Sam Loom 2026-05-15: surface LeadByte per-buyer caps without leaving Stato.
+// Read-only — LeadByte UI remains the write surface for delivery rules.
+export async function listCampaignDeliveries(req: Request, res: Response) {
+  const deliveries = await campaignService.getCampaignDeliveries(req.params.id as string);
+  if (deliveries === null) {
+    res.status(404).json({ status: 'error', message: 'Campaign not found' });
+    return;
+  }
+  res.json({ status: 'success', data: { deliveries } });
+}
+
 // Sam Loom #42-46: leadreports.io-style CRUD on per-campaign traffic
 // sources. Each row maps a supplier (Facebook/Google/...) → Catchr NCP →
 // ad-spend and surfaces revenue + net profit.

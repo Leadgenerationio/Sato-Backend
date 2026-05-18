@@ -61,6 +61,7 @@ campaignRoutes.get('/', validate(listCampaignsQuerySchema), campaignController.l
 campaignRoutes.get('/:id', campaignController.getCampaign);
 campaignRoutes.patch('/:id', validate(updateCampaignSchema), campaignController.updateCampaign);
 campaignRoutes.get('/:id/sources', campaignController.listTrafficSources);
+campaignRoutes.get('/:id/deliveries', campaignController.listCampaignDeliveries);
 campaignRoutes.post('/:id/sources', validate(createTrafficSourceSchema), campaignController.createTrafficSource);
 campaignRoutes.patch('/:id/sources/:sourceId', validate(updateTrafficSourceSchema), campaignController.updateTrafficSource);
 campaignRoutes.delete('/:id/sources/:sourceId', campaignController.deleteTrafficSource);

@@ -363,6 +363,62 @@ async function loadSatoCampaignMetadata(leadbyteId: string): Promise<{
   };
 }
 
+/**
+ * Per-buyer delivery rules for a campaign, including the day/week/month/total
+ * caps Sam called out in the 2026-05-15 Loom as "missing from the UI".
+ * Surfaced read-only — LeadByte's UI remains the write surface.
+ *
+ * Accepts either a Sato uuid or a LeadByte campaign id (FE convention).
+ * Returns `null` when the campaign can't be resolved, `[]` when the campaign
+ * exists but has no `leadbyteCampaignId` set (local-only campaigns).
+ */
+export interface CampaignDelivery {
+  id: string;
+  reference: string | null;
+  status: string | null;
+  buyer: { id: string | null; name: string } | null;
+  caps: { day: number | null; week: number | null; month: number | null; total: number | null };
+}
+
+export async function getCampaignDeliveries(idOrLeadbyteId: string): Promise<CampaignDelivery[] | null> {
+  // Resolve to the LeadByte campaign id — that's what /deliveries returns
+  // on `d.campaign.id`. If the caller passed a uuid, look up the LB id from
+  // our campaigns row; if they passed the LB id directly (FE convention),
+  // use it as-is.
+  let leadbyteCampaignId: string | null = null;
+  const { isUuid } = await import('../utils/zod-helpers.js');
+  if (isUuid(idOrLeadbyteId)) {
+    const [row] = await db
+      .select({ leadbyteCampaignId: campaignsTable.leadbyteCampaignId })
+      .from(campaignsTable)
+      .where(eq(campaignsTable.id, idOrLeadbyteId));
+    if (!row) return null;
+    leadbyteCampaignId = row.leadbyteCampaignId ?? null;
+  } else {
+    leadbyteCampaignId = idOrLeadbyteId;
+  }
+
+  if (!leadbyteCampaignId) return [];
+
+  const deliveries = await leadbyte.getDeliveries();
+  return deliveries
+    .filter((d) => String(d.campaign?.id ?? '') === String(leadbyteCampaignId))
+    .map((d) => ({
+      id: String(d.id),
+      reference: d.reference ?? null,
+      status: d.status ?? null,
+      buyer: d.buyer
+        ? { id: d.buyer.id != null ? String(d.buyer.id) : null, name: d.buyer.name }
+        : null,
+      caps: {
+        day: d.caps?.day ?? null,
+        week: d.caps?.week ?? null,
+        month: d.caps?.month ?? null,
+        total: d.caps?.total ?? null,
+      },
+    }));
+}
+
 export async function getCampaign(id: string, _requester: AuthPayload): Promise<CampaignDetail | null> {
   const [campaigns, typeMap] = await Promise.all([
     leadbyte.getCampaigns(),

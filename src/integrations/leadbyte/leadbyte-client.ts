@@ -1022,6 +1022,27 @@ export async function syncAll(deps: {
 }
 
 /**
+ * Normalise a LeadByte buyer/company name for cross-endpoint matching.
+ * `/buyers` and `/reports/buyer` aren't perfectly consistent — Benson
+ * Goldstein appeared as "Benson Goldstein Ltd" in one and "Benson Goldstein"
+ * in the other, silently breaking the auto-link in `discoverClientCampaignLinks`.
+ * Strips legal-entity suffixes + punctuation + collapses whitespace so the
+ * same buyer compares equal across endpoints.
+ */
+export function normalizeBuyerName(raw: string): string {
+  if (!raw) return '';
+  let s = raw.toLowerCase();
+  // Strip punctuation that varies between endpoints.
+  s = s.replace(/[.,()]/g, ' ');
+  // Collapse whitespace.
+  s = s.replace(/\s+/g, ' ').trim();
+  // Strip a single trailing legal-entity suffix. Order matters: longer
+  // tokens first so "limited" isn't eaten by "ltd"'s prefix check.
+  s = s.replace(/\s+(corporation|limited|llc|plc|ltd|inc|corp|co)$/u, '');
+  return s.trim();
+}
+
+/**
  * Auto-link Sato clients to LeadByte campaigns via client_campaigns. For each
  * local campaign that has NO existing links, fetch LeadByte's /reports/buyer
  * for that campaign, match the buyer name to a LeadByte buyer id, then map
@@ -1068,21 +1089,28 @@ async function discoverClientCampaignLinks(deps: {
       AND NOT EXISTS (SELECT 1 FROM client_campaigns WHERE client_campaigns.campaign_id = ${deps.campaigns.id})`);
   if (candidates.length === 0) return 0;
 
-  // 3) Load buyers once: name (lowercased) → leadbyte buyer id. Used to
+  // 3) Load buyers once: normalised name → leadbyte buyer id. Used to
   // resolve the buyer name returned by /reports/buyer back to a buyer id we
-  // can match against clients.leadbyte_client_id.
+  // can match against clients.leadbyte_client_id. Normalisation handles the
+  // suffix/punctuation drift between /buyers and /reports/buyer (see
+  // `normalizeBuyerName` — Benson Goldstein regression, 2026-05-17).
   const buyers = await getBuyers();
   const nameToBuyerId = new Map<string, string>();
   for (const b of buyers) {
     if (b.company && b.id != null) {
-      nameToBuyerId.set(b.company.trim().toLowerCase(), String(b.id));
+      nameToBuyerId.set(normalizeBuyerName(b.company), String(b.id));
     }
   }
 
   // 4) Per-campaign buyer-report discovery. ytd window so we catch any
   // historical buyer even if last_month is empty. Each call is independent —
   // a per-campaign failure logs + continues.
+  //
+  // unresolvedBuyerNames tracks normalised buyer names that showed up in
+  // /reports/buyer but didn't match any /buyers entry — useful debug signal
+  // when a future client should auto-link but isn't.
   let created = 0;
+  const unresolvedBuyerNames = new Set<string>();
   for (const candidate of candidates) {
     if (!candidate.leadbyteCampaignId) continue;
     let report: LeadByteBuyerReportRow[];
@@ -1101,12 +1129,15 @@ async function discoverClientCampaignLinks(deps: {
 
     const buyerNames = new Set<string>();
     for (const row of report) {
-      if (row.buyer) buyerNames.add(row.buyer.trim().toLowerCase());
+      if (row.buyer) buyerNames.add(normalizeBuyerName(row.buyer));
     }
 
     for (const buyerName of buyerNames) {
       const buyerId = nameToBuyerId.get(buyerName);
-      if (!buyerId) continue;
+      if (!buyerId) {
+        unresolvedBuyerNames.add(buyerName);
+        continue;
+      }
       const satoClient = byLeadbyteBuyerId.get(buyerId);
       if (!satoClient) continue;
 
@@ -1132,6 +1163,13 @@ async function discoverClientCampaignLinks(deps: {
         );
       }
     }
+  }
+
+  if (unresolvedBuyerNames.size > 0) {
+    logger.warn(
+      { unresolvedBuyerNames: Array.from(unresolvedBuyerNames) },
+      'LeadByte buyer names from /reports/buyer that did not match any /buyers entry — check for name drift or missing buyers',
+    );
   }
 
   return created;
