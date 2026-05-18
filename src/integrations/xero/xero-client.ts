@@ -338,14 +338,14 @@ interface XeroCashValidationItem {
  *
  * Precedence per account:
  *   1. Finance API /CashValidation        → statementBalance + asOf date + unreconciledLines
- *   2. Accounting API /Accounts.Balance   → fallback when Finance API isn't enabled
- *                                           (matches Xero's own "Bank Balance" widget)
- *   3. '0' when neither is available
- *
- * Required scopes: accounting.settings.read + finance.statements.read.
- * Finance API enablement (developer.xero.com → app → scopes) is the
- * operational unlock for the most accurate figure plus the reconciliation
- * gap count. Without it we still get a usable number via Account.Balance.
+ *   2. /Reports/BankSummary               → closing balance per account
+ *                                           (works with the standard accounting.reports.read
+ *                                           scope — confirmed 2026-05-18 when Sam reported all
+ *                                           balances showing as £0 because Xero's /Accounts API
+ *                                           silently omits the Balance field for Custom Connection
+ *                                           tokens, and CashValidation 401s without finance scope)
+ *   3. Accounting API /Accounts.Balance   → last-ditch fallback (rarely populated)
+ *   4. '0' when none of the above produce a number
  */
 export async function getBankBalances(): Promise<XeroBankAccount[]> {
   const { accessToken, tenantId } = await getValidToken();
@@ -396,24 +396,71 @@ export async function getBankBalances(): Promise<XeroBankAccount[]> {
     const body = await cvRes.text();
     logger.warn(
       { status: cvRes.status, body },
-      'Xero Finance /CashValidation failed — returning zero balances. Likely cause: Finance API not enabled on the Custom Connection (developer.xero.com → app → scopes).',
+      'Xero Finance /CashValidation failed — falling back to BankSummary. Likely cause: Finance API not enabled on the Custom Connection (developer.xero.com → app → scopes).',
     );
+  }
+
+  // Tier-2 fallback: /Reports/BankSummary. Confirmed working with standard
+  // accounting scopes on 2026-05-18 — fixes the all-zeros bug Sam reported
+  // when both CashValidation 401s AND /Accounts omits the Balance field.
+  // The report is keyed by AccountID in the row's Cells[0] attribute, so we
+  // index it by id and pluck closing balance per bank account.
+  const bankSummaryByAccountId = new Map<string, { value: string; date: string | null }>();
+  if (statementByAccountId.size === 0) {
+    try {
+      const bsRes = await fetch(
+        `${API_HOST}/api.xro/2.0/Reports/BankSummary?fromDate=${beginDate}&toDate=${balanceDate}`,
+        { headers, signal: AbortSignal.timeout(15_000) },
+      );
+      if (bsRes.ok) {
+        const bsData = (await bsRes.json()) as XeroTaxSummaryResponse;
+        for (const section of bsData.Reports?.[0]?.Rows ?? []) {
+          if (section.RowType !== 'Section') continue;
+          for (const row of section.Rows ?? []) {
+            if (!row.Cells || row.Cells.length < 5) continue;
+            // Xero attribute Id is "accountID" (camelCase) on Cells[0] in the
+            // BankSummary response — confirmed against the live shape on
+            // 2026-05-18. Other Cells carry "account" (lowercase) attribute
+            // but those are spend/receipt drill-throughs, not the account
+            // identity we want.
+            const accountIdAttr = row.Cells[0]?.Attributes?.find((a) => a.Id === 'accountID');
+            const accountId = accountIdAttr?.Value;
+            // BankSummary columns: [Name, Opening, Cash Received, Cash Spent, Closing]
+            // Closing balance lives in Cells[4]. Strip commas + handle "(123.45)" negative format.
+            const closingRaw = row.Cells[4]?.Value ?? '0';
+            const cleaned = closingRaw.replace(/,/g, '').replace(/^\((.*)\)$/, '-$1');
+            const closingValue = Number.parseFloat(cleaned);
+            if (accountId && Number.isFinite(closingValue)) {
+              bankSummaryByAccountId.set(accountId, { value: closingValue.toFixed(2), date: balanceDate });
+            }
+          }
+        }
+      } else {
+        const body = await bsRes.text();
+        logger.warn({ status: bsRes.status, body: body.slice(0, 300) }, 'Xero /Reports/BankSummary failed');
+      }
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'Xero /Reports/BankSummary threw');
+    }
   }
 
   return bankAccounts.map((a) => {
     const stmt = statementByAccountId.get(a.AccountID);
-    // Precedence: CashValidation > Account.Balance > '0'. CashValidation gives
-    // the true statement balance plus the as-of date and unreconciled-line
-    // count; Account.Balance is a usable fallback for orgs that haven't yet
-    // enabled the Finance API on their Custom Connection.
+    const bsRow = bankSummaryByAccountId.get(a.AccountID);
+    // Precedence: CashValidation > BankSummary > Account.Balance > '0'.
+    // CashValidation gives the true statement balance plus the as-of date and
+    // unreconciled-line count; BankSummary gives a usable closing balance via
+    // the accounting.reports.read scope when CashValidation isn't reachable;
+    // Account.Balance is rarely populated for Custom Connections but kept as
+    // a last fallback for orgs where Xero does include it.
     const fallbackBalance = typeof a.Balance === 'number' ? a.Balance.toFixed(2) : null;
     return {
       accountId: a.AccountID,
       name: a.Name,
       code: a.Code ?? null,
       currency: a.CurrencyCode ?? 'GBP',
-      balance: stmt?.value ?? fallbackBalance ?? '0',
-      balanceDate: stmt?.date ?? null,
+      balance: stmt?.value ?? bsRow?.value ?? fallbackBalance ?? '0',
+      balanceDate: stmt?.date ?? bsRow?.date ?? null,
       unreconciledLines: stmt?.unreconciledLines ?? null,
     };
   });

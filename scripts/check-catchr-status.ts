@@ -9,19 +9,12 @@ for (const p of platforms) {
   console.log(`  ${p.connected ? 'OK' : 'XX'}  ${p.name}`);
 }
 
-console.log('\n=== Sources by status ===');
+console.log('\n=== Sources (top-level only — Catchr source shape varies by platform) ===');
 const { sources } = await listSources({});
-const byStatus = sources.reduce<Record<string, number>>((acc, s) => {
-  const key = String(s.status ?? 'unknown');
-  acc[key] = (acc[key] ?? 0) + 1;
-  return acc;
-}, {});
-console.log(byStatus);
-
-console.log('\n=== Sources with non-ok status ===');
-for (const s of sources) {
-  if (String(s.status ?? '').toLowerCase() !== 'ok') {
-    console.log(`  ${s.status ?? '?'}  ${s.platform ?? '?'}  ${s.name ?? '?'}`);
-  }
+// Cast to any since the discriminated-union shape doesn't expose `status` at
+// the top level — this script just wants a flat dump for diagnostic use.
+const flat = sources as unknown as Array<Record<string, unknown>>;
+for (const s of flat.slice(0, 20)) {
+  console.log(`  platform=${s.platform ?? '?'}  name=${s.name ?? '?'}  status=${s.status ?? '?'}`);
 }
 process.exit(0);
