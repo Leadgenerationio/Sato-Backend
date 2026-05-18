@@ -15,7 +15,10 @@ portalRoutes.get('/invoices', portalController.invoices);
 portalRoutes.get('/compliance', portalController.compliance);
 portalRoutes.get('/agreement', portalController.agreement);
 
-// Asset approval (Roadmap C). Append-only: each call adds a new audit row,
-// never updates the prior one — the chronology IS the legal evidence.
+// Creative review v2 (Sam #9/#11 — 2026-05-17). Buyer-facing review tab
+// at /portal/creatives. Returns assets split into 2 sections (media vs
+// copy_lp). Append-only audit log; each decision is a new row.
+portalRoutes.get('/creatives', portalController.creatives);
 portalRoutes.post('/creatives/:creativeId/approve', portalController.approveCreative);
 portalRoutes.post('/creatives/:creativeId/reject', portalController.rejectCreative);
+portalRoutes.post('/creatives/:creativeId/request-changes', portalController.requestChangesCreative);

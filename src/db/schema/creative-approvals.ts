@@ -10,9 +10,14 @@ import { users } from './users.js';
 // did or did not approve a given advert at a given moment — IP + UA +
 // timestamp + user are all captured at decision time.
 
+// 'changes_requested' added in migration 0029 (creative review v2 — Sam
+// #9/#11). The buyer flow is approve / reject / request-changes; the third
+// state lets the buyer leave feedback without finalising a rejection so the
+// asset can be revised + re-uploaded.
 export const creativeApprovalActionEnum = pgEnum('creative_approval_action', [
   'approved',
   'rejected',
+  'changes_requested',
 ]);
 
 export const creativeApprovals = pgTable('creative_approvals', {

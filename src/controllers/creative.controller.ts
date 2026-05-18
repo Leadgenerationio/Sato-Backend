@@ -15,6 +15,10 @@ export async function listForCampaign(req: Request, res: Response) {
 // layer resolves it via resolveSatoCampaignId. Was uuidShape() previously,
 // which 400'd every upload from the campaign detail page since that page
 // keys campaigns by LeadByte's numeric id.
+//
+// section drives which card the asset shows up in on the buyer's review
+// tab (`media` = image/video card, `copy_lp` = copy + landing-page card).
+// Defaults to 'media' for legacy uploaders that don't send it.
 const createSchema = z.object({
   campaignId: z.string().min(1).max(64),
   name: z.string().min(1).max(255),
@@ -23,6 +27,7 @@ const createSchema = z.object({
   fileUrl: z.string().url(),
   sizeBytes: z.number().int().nonnegative(),
   contentType: z.string().min(1),
+  section: z.enum(['media', 'copy_lp']).optional(),
 });
 
 export async function create(req: Request, res: Response) {

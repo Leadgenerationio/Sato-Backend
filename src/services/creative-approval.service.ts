@@ -6,11 +6,15 @@ import { campaigns } from '../db/schema/campaigns.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { users } from '../db/schema/users.js';
 
-export type CreativeApprovalStatus = 'pending' | 'approved' | 'rejected';
+// 'changes_requested' is the third decision state in the v2 buyer-review
+// flow (Sam #9/#11 — 2026-05-17). Buyer signals "needs work" without
+// finalising a rejection so the asset can be revised + re-uploaded by staff.
+export type CreativeApprovalAction = 'approved' | 'rejected' | 'changes_requested';
+export type CreativeApprovalStatus = 'pending' | CreativeApprovalAction;
 
 export interface CreativeApprovalEvent {
   id: string;
-  action: 'approved' | 'rejected';
+  action: CreativeApprovalAction;
   decidedByUserId: string;
   decidedByName: string | null;
   decidedByEmail: string | null;
@@ -48,7 +52,7 @@ export async function getApprovalStatesForCreatives(
   // created_at within each partition.
   const rows = await db.execute<{
     creative_id: string;
-    action: 'approved' | 'rejected';
+    action: CreativeApprovalAction;
     feedback: string | null;
     created_at: Date;
     decided_by_name: string | null;
@@ -88,17 +92,20 @@ export async function getApprovalStatesForCreatives(
 export async function recordDecision(params: {
   creativeId: string;
   decidedByUserId: string;
-  action: 'approved' | 'rejected';
+  action: CreativeApprovalAction;
   ipAddress: string | null;
   userAgent: string | null;
   feedback: string | null;
 }): Promise<CreativeApprovalEvent> {
   const { creativeId, decidedByUserId, action, ipAddress, userAgent, feedback } = params;
 
-  if (action === 'rejected' && (!feedback || feedback.trim().length === 0)) {
+  // Feedback is mandatory for both 'rejected' and 'changes_requested' — the
+  // buyer needs to tell the team WHAT to fix. 'approved' is a no-feedback
+  // happy path.
+  if (action !== 'approved' && (!feedback || feedback.trim().length === 0)) {
     throw new CreativeApprovalError(
       'FEEDBACK_REQUIRED',
-      'Reject feedback is required so the team can address the issue',
+      'Feedback is required so the team knows what to address',
     );
   }
 

@@ -15,9 +15,17 @@ export const creatives = pgTable('creatives', {
   contentType: varchar('content_type', { length: 120 }),
   uploadedBy: uuid('uploaded_by').references(() => users.id),
   isDeleted: boolean('is_deleted').notNull().default(false),
+  // Migration 0029 (creative review v2). Splits the portal review tab into
+  // two cards — `media` for image/video, `copy_lp` for ad copy + landing
+  // page URLs. The buyer signs off each card independently. Default 'media'
+  // because legacy rows + most uploads are image/video.
+  section: varchar('section', { length: 16 }).notNull().default('media'),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 }, (table) => [
   index('creatives_campaign_idx').on(table.campaignId),
   index('creatives_is_deleted_idx').on(table.isDeleted),
+  index('creatives_section_idx').on(table.section),
 ]);
+
+export type CreativeSection = 'media' | 'copy_lp';

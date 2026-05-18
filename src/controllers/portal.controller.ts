@@ -93,7 +93,7 @@ async function handleDecision(
   req: Request,
   res: Response,
   next: NextFunction,
-  action: 'approved' | 'rejected',
+  action: 'approved' | 'rejected' | 'changes_requested',
 ) {
   try {
     const requester = req.user!;
@@ -133,4 +133,23 @@ export async function approveCreative(req: Request, res: Response, next: NextFun
 
 export async function rejectCreative(req: Request, res: Response, next: NextFunction) {
   return handleDecision(req, res, next, 'rejected');
+}
+
+export async function requestChangesCreative(req: Request, res: Response, next: NextFunction) {
+  return handleDecision(req, res, next, 'changes_requested');
+}
+
+/**
+ * Creative review v2 list endpoint — returns the buyer's pending + decided
+ * creatives split into 2 cards (`media` vs `copy_lp`). The portal /creatives
+ * tab renders these side-by-side and the buyer signs off each card
+ * independently.
+ */
+export async function creatives(req: Request, res: Response, next: NextFunction) {
+  try {
+    const data = await portalService.getCreativesBySection(req.user!);
+    res.json({ status: 'success', data });
+  } catch (err) {
+    handlePortalError(err, res, next);
+  }
 }

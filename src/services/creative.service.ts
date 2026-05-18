@@ -54,6 +54,7 @@ export interface CreativeDto {
   contentType: string | null;
   version: number;
   uploadedAt: string;
+  section: 'media' | 'copy_lp';
 }
 
 type CreativeRow = typeof creatives.$inferSelect;
@@ -70,6 +71,7 @@ function toDto(row: CreativeRow): CreativeDto {
     contentType: row.contentType ?? null,
     version: row.version ?? 1,
     uploadedAt: (row.createdAt ?? new Date()).toISOString(),
+    section: (row.section as 'media' | 'copy_lp') ?? 'media',
   };
 }
 
@@ -106,6 +108,10 @@ export interface CreateCreativeInput {
   fileUrl: string;
   sizeBytes: number;
   contentType: string;
+  // Buyer-review section (Sam #9/#11). Defaults to 'media' server-side
+  // if the caller omits — preserves backwards compat with the upload
+  // flow before the v2 review feature shipped.
+  section?: 'media' | 'copy_lp';
 }
 
 export async function createCreative(
@@ -131,11 +137,12 @@ export async function createCreative(
       r2Key: input.r2Key,
       sizeBytes: input.sizeBytes,
       contentType: input.contentType,
+      section: input.section ?? 'media',
       uploadedBy: uuidOrNull(requester.userId),
     })
     .returning();
 
-  logger.info({ creativeId: row.id, campaignId: satoId }, 'Creative uploaded');
+  logger.info({ creativeId: row.id, campaignId: satoId, section: row.section }, 'Creative uploaded');
   return toDto(row);
 }
 

@@ -82,7 +82,7 @@ export interface PortalCompliance {
     uploadedAt: string;
     fileUrl: string;
     approval: {
-      status: 'pending' | 'approved' | 'rejected';
+      status: 'pending' | 'approved' | 'rejected' | 'changes_requested';
       decidedAt: string | null;
       decidedByName: string | null;
       feedback: string | null;
@@ -433,6 +433,90 @@ export async function getCompliance(requester: AuthPayload): Promise<PortalCompl
         lastChecked: (lp.updatedAt ?? lp.createdAt ?? new Date()).toISOString(),
       })),
   }));
+}
+
+// ─── Creative review v2 (Sam #9/#11) — buyer-facing split list ─────────────
+
+export interface PortalCreative {
+  id: string;
+  campaignId: string;
+  campaignName: string;
+  name: string;
+  type: string;
+  fileUrl: string;
+  uploadedAt: string;
+  section: 'media' | 'copy_lp';
+  approval: {
+    status: 'pending' | 'approved' | 'rejected' | 'changes_requested';
+    decidedAt: string | null;
+    decidedByName: string | null;
+    feedback: string | null;
+  };
+}
+
+export interface PortalCreativesBySection {
+  media: PortalCreative[];
+  copyLp: PortalCreative[];
+}
+
+/**
+ * List every creative across every campaign the buyer is linked to, split
+ * by section. The portal review tab renders Media + Copy/LP as separate
+ * cards and the buyer signs off each independently.
+ */
+export async function getCreativesBySection(requester: AuthPayload): Promise<PortalCreativesBySection> {
+  const clientId = requireClientId(requester);
+
+  const linkedCampaignIds = await campaignIdsForClient(clientId);
+  if (linkedCampaignIds.length === 0) return { media: [], copyLp: [] };
+
+  const rows = await db
+    .select({
+      id: creatives.id,
+      campaignId: creatives.campaignId,
+      campaignName: campaigns.name,
+      name: creatives.name,
+      type: creatives.type,
+      fileUrl: creatives.fileUrl,
+      section: creatives.section,
+      createdAt: creatives.createdAt,
+    })
+    .from(creatives)
+    .innerJoin(campaigns, eq(campaigns.id, creatives.campaignId))
+    .where(and(
+      inArray(creatives.campaignId, linkedCampaignIds),
+      eq(creatives.isDeleted, false),
+    ))
+    .orderBy(desc(creatives.createdAt));
+
+  if (rows.length === 0) return { media: [], copyLp: [] };
+
+  const approvalStates = await getApprovalStatesForCreatives(rows.map((r) => r.id));
+
+  const items: PortalCreative[] = rows.map((r) => {
+    const state = approvalStates.get(r.id);
+    return {
+      id: r.id,
+      campaignId: r.campaignId,
+      campaignName: r.campaignName,
+      name: r.name,
+      type: r.type ?? 'unknown',
+      fileUrl: r.fileUrl,
+      uploadedAt: (r.createdAt ?? new Date()).toISOString(),
+      section: (r.section as 'media' | 'copy_lp') ?? 'media',
+      approval: {
+        status: state?.status ?? 'pending',
+        decidedAt: state?.decidedAt ?? null,
+        decidedByName: state?.decidedByName ?? null,
+        feedback: state?.feedback ?? null,
+      },
+    };
+  });
+
+  return {
+    media: items.filter((i) => i.section === 'media'),
+    copyLp: items.filter((i) => i.section === 'copy_lp'),
+  };
 }
 
 export async function getAgreement(requester: AuthPayload): Promise<PortalAgreement | null> {
