@@ -767,21 +767,9 @@ export async function getInvoicesForContact(contactId: string): Promise<XeroInvo
   return out;
 }
 
-/**
- * Find a Xero Contact by exact name. Used when a Stato client has no
- * `xeroContactId` yet but Sam's seen the same company already exists in
- * Xero — we try to auto-link before giving up.
- *
- * Returns null if no exact-name match is found.
- *
- * Required scope: accounting.contacts (already in SCOPES).
- */
-export async function findContactByName(name: string): Promise<XeroContact | null> {
+async function searchContacts(whereExpr: string): Promise<XeroContact[]> {
   const { accessToken, tenantId } = await getValidToken();
-  // Xero filter expressions need the value double-quoted; escape any double
-  // quotes inside the name to keep the filter parseable.
-  const safeName = name.replace(/"/g, '\\"');
-  const where = encodeURIComponent(`Name=="${safeName}"`);
+  const where = encodeURIComponent(whereExpr);
   const res = await fetch(
     `${API_HOST}/api.xro/2.0/Contacts?where=${where}`,
     {
@@ -795,11 +783,80 @@ export async function findContactByName(name: string): Promise<XeroContact | nul
   );
   if (!res.ok) {
     const body = await res.text();
-    logger.error({ status: res.status, body, name }, 'Xero /Contacts search failed');
+    logger.error({ status: res.status, body, whereExpr }, 'Xero /Contacts search failed');
     throw new Error(`Xero contact search failed: ${res.status}`);
   }
   const data = (await res.json()) as XeroContactsResponse;
-  const first = data.Contacts?.[0];
-  if (!first) return null;
-  return { contactId: first.ContactID, name: first.Name };
+  return (data.Contacts ?? []).map((c) => ({ contactId: c.ContactID, name: c.Name }));
+}
+
+/**
+ * Find a Xero Contact by exact name. Used when a Stato client has no
+ * `xeroContactId` yet but Sam's seen the same company already exists in
+ * Xero — we try to auto-link before giving up.
+ *
+ * Returns null if no exact-name match is found.
+ *
+ * Required scope: accounting.contacts (already in SCOPES).
+ */
+export async function findContactByName(name: string): Promise<XeroContact | null> {
+  // Xero filter expressions need the value double-quoted; escape any double
+  // quotes inside the name to keep the filter parseable.
+  const safeName = name.replace(/"/g, '\\"');
+  const contacts = await searchContacts(`Name=="${safeName}"`);
+  return contacts[0] ?? null;
+}
+
+/**
+ * Find a Xero Contact by UK Companies House number. More reliable than
+ * name-matching because company numbers are unique and immune to legal-
+ * entity suffix drift ("Acme Ltd" vs "Acme Limited" vs "Acme").
+ *
+ * Returns null if no match. Returns the first row if Xero somehow has
+ * duplicates with the same number (shouldn't happen but defensive).
+ */
+export async function findContactByCompanyNumber(companyNumber: string): Promise<XeroContact | null> {
+  const safe = companyNumber.replace(/"/g, '\\"');
+  const contacts = await searchContacts(`CompanyNumber=="${safe}"`);
+  return contacts[0] ?? null;
+}
+
+/**
+ * Best-effort multi-strategy contact lookup. Tries the strongest signal
+ * first (UK Companies House number — unique), then exact name, then a
+ * case-insensitive substring match. Returns the first hit or null.
+ *
+ * Used by client-create bootstrap so a fresh client gets its Xero contact
+ * auto-bound even when the name in Stato doesn't perfectly match Xero
+ * (e.g. "Acme" vs "Acme Ltd").
+ */
+export async function findContactBestMatch(
+  name: string | null | undefined,
+  companyNumber: string | null | undefined,
+): Promise<XeroContact | null> {
+  if (companyNumber) {
+    const byNumber = await findContactByCompanyNumber(companyNumber).catch((err) => {
+      logger.warn({ err: err instanceof Error ? err.message : String(err), companyNumber }, 'Xero number search failed — falling back');
+      return null;
+    });
+    if (byNumber) return byNumber;
+  }
+  if (!name) return null;
+  const byExact = await findContactByName(name).catch((err) => {
+    logger.warn({ err: err instanceof Error ? err.message : String(err), name }, 'Xero exact-name search failed — falling back');
+    return null;
+  });
+  if (byExact) return byExact;
+  // Substring fallback — Xero supports .ToLower().Contains() in filter
+  // expressions. Strip the trailing Ltd/Limited/etc. so we can still find
+  // a match when Stato has the bare name and Xero has the suffix or vice
+  // versa.
+  const base = name.replace(/\s+(corporation|limited|llc|plc|ltd|inc|corp|co)\.?$/i, '').trim();
+  if (!base) return null;
+  const safe = base.replace(/"/g, '\\"').toLowerCase();
+  const contacts = await searchContacts(`Name.ToLower().Contains("${safe}")`).catch((err) => {
+    logger.warn({ err: err instanceof Error ? err.message : String(err), base }, 'Xero substring search failed');
+    return [];
+  });
+  return contacts[0] ?? null;
 }

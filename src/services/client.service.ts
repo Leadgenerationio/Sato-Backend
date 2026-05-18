@@ -483,13 +483,15 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
  * helper) — kept separate to preserve its existing notification flow.
  */
 async function bootstrapClientThirdPartyData(row: ClientRow): Promise<void> {
-  // 1) Xero contact auto-bind — only when no contact is already set and we
-  //    have a company name to search by.
-  if (!row.xeroContactId && row.companyName) {
-    xero.findContactByName(row.companyName)
+  // 1) Xero contact auto-bind — multi-strategy lookup. Company number is
+  //    the strongest signal (unique per UK company) so it's tried first.
+  //    Exact name and substring matches are fallbacks for cases where Stato
+  //    has a different name spelling than Xero.
+  if (!row.xeroContactId && (row.companyName || row.companyNumber)) {
+    xero.findContactBestMatch(row.companyName, row.companyNumber)
       .then(async (contact) => {
         if (!contact) {
-          logger.info({ clientId: row.id, companyName: row.companyName }, 'No matching Xero contact found');
+          logger.info({ clientId: row.id, companyName: row.companyName, companyNumber: row.companyNumber }, 'No matching Xero contact found');
           return;
         }
         await db
@@ -497,7 +499,7 @@ async function bootstrapClientThirdPartyData(row: ClientRow): Promise<void> {
           .set({ xeroContactId: contact.contactId, updatedAt: new Date() })
           .where(eq(clients.id, row.id));
         logger.info(
-          { clientId: row.id, xeroContactId: contact.contactId },
+          { clientId: row.id, xeroContactId: contact.contactId, matchedName: contact.name },
           'Xero contact auto-linked on client create',
         );
       })
