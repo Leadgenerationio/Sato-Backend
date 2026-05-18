@@ -2,6 +2,7 @@ import { and, desc, eq, sql, inArray } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { clients } from '../db/schema/clients.js';
 import { clientContacts } from '../db/schema/client-contacts.js';
+import { clientDocuments } from '../db/schema/client-documents.js';
 import { campaigns } from '../db/schema/campaigns.js';
 import { creditChecks } from '../db/schema/credit-checks.js';
 import { invoices } from '../db/schema/invoices.js';
@@ -23,6 +24,12 @@ export interface ClientSummary {
   activeCampaigns: number;
   totalRevenue: number;
   createdAt: string;
+  // Reality-check fields for the "Active Client" badge on the list page —
+  // matches the same gate the detail-page badge + stage indicator use.
+  // Without these, the list shows status='active' even for clients with
+  // zero docs and an unsigned agreement, disagreeing with the detail view.
+  agreementSigned: boolean;
+  documentsCount: number;
 }
 
 export type ContactType = 'primary' | 'billing' | 'compliance' | 'other';
@@ -104,7 +111,12 @@ async function loadContactsForClient(clientId: string): Promise<ClientContact[]>
   return rows.map(toContact);
 }
 
-function toSummary(row: ClientRow, activeCampaigns: number, totalRevenue: number): ClientSummary {
+function toSummary(
+  row: ClientRow,
+  activeCampaigns: number,
+  totalRevenue: number,
+  documentsCount: number,
+): ClientSummary {
   return {
     id: row.id,
     companyName: row.companyName,
@@ -120,12 +132,14 @@ function toSummary(row: ClientRow, activeCampaigns: number, totalRevenue: number
     activeCampaigns,
     totalRevenue,
     createdAt: (row.createdAt ?? new Date()).toISOString(),
+    agreementSigned: row.agreementSigned ?? false,
+    documentsCount,
   };
 }
 
 function toDetail(row: ClientRow, activeCampaigns: number, totalRevenue: number, contacts: ClientContact[] = []): ClientDetail {
   return {
-    ...toSummary(row, activeCampaigns, totalRevenue),
+    ...toSummary(row, activeCampaigns, totalRevenue, 0),
     contacts,
     companyNumber: row.companyNumber ?? '',
     contactPhone: row.contactPhone ?? '',
@@ -175,6 +189,28 @@ async function loadActiveCampaignCounts(businessId: string): Promise<Map<string,
   for (const r of rows) {
     if (r.clientId) map.set(r.clientId, r.count);
   }
+  return map;
+}
+
+/**
+ * Count uploaded documents per client in a single query. Used by the list
+ * endpoint to power the same reality-check the detail page badge does —
+ * status='active' should only display as "Active Client" when there's at
+ * least one document AND a signed agreement (see FE resolveDisplayedStatus).
+ */
+async function loadDocumentsCountByClient(businessId: string): Promise<Map<string, number>> {
+  const rows = await db
+    .select({
+      clientId: clientDocuments.clientId,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(clientDocuments)
+    .innerJoin(clients, eq(clients.id, clientDocuments.clientId))
+    .where(eq(clients.businessId, businessId))
+    .groupBy(clientDocuments.clientId);
+
+  const map = new Map<string, number>();
+  for (const r of rows) map.set(r.clientId, r.count);
   return map;
 }
 
@@ -258,7 +294,7 @@ export async function listClients(
   // to this page — at typical sizes the full per-client maps stay in
   // single-digit kB and feed cheap Map.get() lookups for the slice we
   // return.
-  const [rows, countResult, countMap, revenueMap] = await Promise.all([
+  const [rows, countResult, countMap, revenueMap, docsMap] = await Promise.all([
     db
       .select()
       .from(clients)
@@ -272,10 +308,11 @@ export async function listClients(
       .where(whereClause),
     loadActiveCampaignCounts(businessId),
     loadRevenueByClient(businessId),
+    loadDocumentsCountByClient(businessId),
   ]);
 
   return {
-    items: rows.map((r) => toSummary(r, countMap.get(r.id) ?? 0, revenueMap.get(r.id) ?? 0)),
+    items: rows.map((r) => toSummary(r, countMap.get(r.id) ?? 0, revenueMap.get(r.id) ?? 0, docsMap.get(r.id) ?? 0)),
     total: countResult[0]?.n ?? 0,
     page,
     pageSize,
