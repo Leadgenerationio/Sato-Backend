@@ -8,6 +8,8 @@ import { creditChecks } from '../db/schema/credit-checks.js';
 import { invoices } from '../db/schema/invoices.js';
 import * as creditCheck from '../integrations/credit-check/index.js';
 import { scoreToRiskRating } from '../integrations/credit-check/types.js';
+import * as xero from '../integrations/xero/xero-client.js';
+import { syncQueue } from '../jobs/queue.js';
 import { createNotification } from './notification.service.js';
 import { logClientActivity } from './client-activity.service.js';
 import { logger } from '../utils/logger.js';
@@ -447,6 +449,16 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
       });
   }
 
+  // ─── Bootstrap 3rd-party data on create ─────────────────────────────────
+  //
+  // Sam (18 May): "when client create than suddenly data will be load". On
+  // top of the credit check above, fire two more best-effort lookups so the
+  // detail page populates within a minute instead of waiting for the hourly
+  // crons. Each call is fire-and-forget so the API response stays fast.
+  bootstrapClientThirdPartyData(row).catch((err) => {
+    logger.error({ err, clientId: row.id }, 'Client bootstrap failed (non-blocking)');
+  });
+
   const contacts = await loadContactsForClient(row.id);
   // L #38 — surface creation in the activity feed.
   await logClientActivity(row.id, requester.userId ?? null, 'client_created', {
@@ -454,6 +466,69 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
     companyNumber: row.companyNumber,
   });
   return toDetail(row, 0, 0, contacts);
+}
+
+/**
+ * Kick off 3rd-party data lookups when a client is created. Runs in the
+ * background — caller does not await. Each step is independent; one failure
+ * doesn't block the others.
+ *
+ *   1. Xero contact auto-bind by exact name match (unblocks invoice
+ *      attribution + revenue display on the detail page).
+ *   2. Trigger an immediate LeadByte sync (the hourly job runs server-wide;
+ *      enqueueing now means the new client's leads land within ~30s instead
+ *      of waiting up to 60 min).
+ *
+ * The credit check is fired inline in createClient (it pre-existed this
+ * helper) — kept separate to preserve its existing notification flow.
+ */
+async function bootstrapClientThirdPartyData(row: ClientRow): Promise<void> {
+  // 1) Xero contact auto-bind — only when no contact is already set and we
+  //    have a company name to search by.
+  if (!row.xeroContactId && row.companyName) {
+    xero.findContactByName(row.companyName)
+      .then(async (contact) => {
+        if (!contact) {
+          logger.info({ clientId: row.id, companyName: row.companyName }, 'No matching Xero contact found');
+          return;
+        }
+        await db
+          .update(clients)
+          .set({ xeroContactId: contact.contactId, updatedAt: new Date() })
+          .where(eq(clients.id, row.id));
+        logger.info(
+          { clientId: row.id, xeroContactId: contact.contactId },
+          'Xero contact auto-linked on client create',
+        );
+      })
+      .catch((err) => {
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err), clientId: row.id },
+          'Xero contact auto-bind failed (non-blocking)',
+        );
+      });
+  }
+
+  // 2) Trigger an immediate LeadByte sync. The hourly cron does the same
+  //    work; this just runs it now so the new client's campaigns + lead
+  //    deliveries appear without delay. ON CONFLICT DO NOTHING patterns
+  //    in syncAll make re-runs safe.
+  if (row.leadbyteClientId && syncQueue) {
+    syncQueue
+      .add('leadbyte-hourly-sync', { triggeredBy: 'client-create', clientId: row.id })
+      .then((job) => {
+        logger.info(
+          { clientId: row.id, jobId: job.id },
+          'LeadByte sync enqueued for new client',
+        );
+      })
+      .catch((err) => {
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err), clientId: row.id },
+          'LeadByte sync enqueue failed (non-blocking)',
+        );
+      });
+  }
 }
 
 export interface UpdateClientInput extends Omit<Partial<ClientDetail>, 'contacts'> {
