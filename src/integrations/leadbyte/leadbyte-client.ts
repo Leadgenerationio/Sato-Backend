@@ -1057,7 +1057,7 @@ async function discoverClientCampaignLinks(deps: {
   clients: typeof import('../../db/schema/clients.js').clients;
   clientCampaigns: typeof import('../../db/schema/client-campaigns.js').clientCampaigns;
 }): Promise<number> {
-  const { sql, isNotNull } = await import('drizzle-orm');
+  const { isNotNull } = await import('drizzle-orm');
 
   // 1) Load Sato clients that have a LeadByte buyer id. If none, nothing to link.
   const satoClientsRaw = await deps.db
@@ -1077,16 +1077,22 @@ async function discoverClientCampaignLinks(deps: {
     }
   }
 
-  // 2) Find campaigns that need linking: have a leadbyte_campaign_id AND no
-  // existing client_campaigns rows yet. One LEFT JOIN + WHERE NULL pattern.
+  // 2) Find campaigns that could need linking: any campaign with a
+  // leadbyte_campaign_id. The previous filter excluded campaigns that
+  // already had ANY client_campaigns row — which silently broke
+  // multi-buyer campaigns. Once UKESN was linked to INSULATION, Benson
+  // Goldstein (who also buys INSULATION leads) could never auto-link
+  // because INSULATION was no longer a "candidate". The (client_id,
+  // campaign_id) unique index + ON CONFLICT DO NOTHING below makes
+  // re-checking already-linked campaigns safe — no duplicates inserted,
+  // just an extra buyer-report fetch per hourly run, which is fine.
   const candidates = await deps.db
     .select({
       campaignId: deps.campaigns.id,
       leadbyteCampaignId: deps.campaigns.leadbyteCampaignId,
     })
     .from(deps.campaigns)
-    .where(sql`${deps.campaigns.leadbyteCampaignId} IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM client_campaigns WHERE client_campaigns.campaign_id = ${deps.campaigns.id})`);
+    .where(isNotNull(deps.campaigns.leadbyteCampaignId));
   if (candidates.length === 0) return 0;
 
   // 3) Load buyers once: normalised name → leadbyte buyer id. Used to

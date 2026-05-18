@@ -182,7 +182,14 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
       .orderBy(leadDeliveries.deliveryDate),
   ]);
 
-  const pendingInvoices = invoiceRows.filter((i) => i.status === 'sent' || i.status === 'draft').length;
+  // Pending = anything unpaid that isn't already flagged overdue. Includes
+  // Xero's 'authorised' state (invoice finalised + sent to customer,
+  // awaiting payment) — previously omitted, which made the count tile
+  // (e.g. "3 pending") disagree with the £ outstanding tile (which sums
+  // everything not paid). Now both line up.
+  const pendingInvoices = invoiceRows.filter(
+    (i) => i.status === 'sent' || i.status === 'draft' || i.status === 'authorised' || i.status === 'submitted',
+  ).length;
   const overdueInvoices = invoiceRows.filter((i) => i.status === 'overdue').length;
   const totalOutstanding = invoiceRows
     .filter((i) => i.status !== 'paid')

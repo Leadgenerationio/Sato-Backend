@@ -352,9 +352,20 @@ export async function getSupplierPerformance(
 }
 
 export async function getFinancialOverview(_requester: AuthPayload): Promise<FinancialOverviewRow[]> {
-  // Real query: last 12 months of revenue (paid invoices), expenses (lead-
-  // delivery costs), and invoice status counts per month. This drives the
-  // dashboard's revenue-vs-expenses chart.
+  // Real query: last 12 months of revenue (paid invoices), expenses (ad
+  // spend from Catchr), and invoice status counts per month. This drives
+  // the dashboard's revenue-vs-expenses chart.
+  //
+  // Buckets by `invoices.dueDate` rather than `createdAt`: every paid
+  // invoice's created_at equals its Xero sync time (~May 2026), which
+  // collapsed the whole 12-month chart into a single bar. `due_date`
+  // carries the actual invoice period from Xero, so historical revenue
+  // back to mid-2025 renders correctly.
+  //
+  // Expenses now come from `ad_spend.spend` (live Catchr feed) rather
+  // than `lead_deliveries.cost`, which is never populated (every row
+  // is £0). The same bug zeroed-out the Expenses series on the chart.
+  //
   // Falls back to demo numbers only if BOTH tables are empty.
   const twelveMonthsAgo = new Date();
   twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 11);
@@ -364,30 +375,30 @@ export async function getFinancialOverview(_requester: AuthPayload): Promise<Fin
   const [revenueRows, expenseRows, invoiceCountRows] = await Promise.all([
     db
       .select({
-        month: sql<string>`to_char(${invoices.createdAt}, 'YYYY-MM')`,
+        month: sql<string>`to_char(${invoices.dueDate}, 'YYYY-MM')`,
         revenue: sql<string>`coalesce(sum(${invoices.total}), 0)`,
         vat: sql<string>`coalesce(sum(${invoices.vatAmount}), 0)`,
       })
       .from(invoices)
-      .where(and(eq(invoices.status, 'paid'), gte(invoices.createdAt, twelveMonthsAgo)))
-      .groupBy(sql`to_char(${invoices.createdAt}, 'YYYY-MM')`),
+      .where(and(eq(invoices.status, 'paid'), gte(invoices.dueDate, twelveMonthsAgo)))
+      .groupBy(sql`to_char(${invoices.dueDate}, 'YYYY-MM')`),
     db
       .select({
-        month: sql<string>`to_char(${leadDeliveries.deliveryDate}, 'YYYY-MM')`,
-        expenses: sql<string>`coalesce(sum(${leadDeliveries.cost}), 0)`,
+        month: sql<string>`to_char(${adSpend.date}, 'YYYY-MM')`,
+        expenses: sql<string>`coalesce(sum(${adSpend.spend}), 0)`,
       })
-      .from(leadDeliveries)
-      .where(gte(leadDeliveries.deliveryDate, twelveMonthsAgoIso))
-      .groupBy(sql`to_char(${leadDeliveries.deliveryDate}, 'YYYY-MM')`),
+      .from(adSpend)
+      .where(gte(adSpend.date, twelveMonthsAgoIso))
+      .groupBy(sql`to_char(${adSpend.date}, 'YYYY-MM')`),
     db
       .select({
-        month: sql<string>`to_char(${invoices.createdAt}, 'YYYY-MM')`,
+        month: sql<string>`to_char(${invoices.dueDate}, 'YYYY-MM')`,
         status: invoices.status,
         count: sql<number>`count(*)::int`,
       })
       .from(invoices)
-      .where(gte(invoices.createdAt, twelveMonthsAgo))
-      .groupBy(sql`to_char(${invoices.createdAt}, 'YYYY-MM')`, invoices.status),
+      .where(gte(invoices.dueDate, twelveMonthsAgo))
+      .groupBy(sql`to_char(${invoices.dueDate}, 'YYYY-MM')`, invoices.status),
   ]);
 
   // No real data → return empty. UI charts fall back to a flat-zero

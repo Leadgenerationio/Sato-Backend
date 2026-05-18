@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { campaigns } from '../db/schema/campaigns.js';
@@ -6,6 +6,7 @@ import { clients } from '../db/schema/clients.js';
 import { invoices } from '../db/schema/invoices.js';
 import { agreements } from '../db/schema/agreements.js';
 import { creditChecks } from '../db/schema/credit-checks.js';
+import { adSpend } from '../db/schema/ad-spend.js';
 import type { AuthPayload } from '../types/index.js';
 
 export interface LeadsByDayPoint {
@@ -223,15 +224,22 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
       .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
       .from(invoices)
       .where(eq(invoices.status, 'paid')),
-    // Cost: sum of lead-delivery cost, all-time.
+    // Cost: sum of Catchr ad-spend rows, all-time. Was reading
+    // `lead_deliveries.cost` which is never populated — every row was £0
+    // so Net Profit always equalled Revenue (100% margin, which Sam called
+    // out as wrong). `ad_spend.spend` is the live Catchr feed (TikTok +
+    // Facebook + Google) and gives the real cost-of-leads number.
     db
-      .select({ cost: sql<string>`coalesce(sum(${leadDeliveries.cost}), 0)::text` })
-      .from(leadDeliveries),
-    // Active clients: status='active' (excludes prospects/paused/churned).
+      .select({ cost: sql<string>`coalesce(sum(${adSpend.spend}), 0)::text` })
+      .from(adSpend),
+    // Active clients: status IN ('active', 'onboarding'). 'onboarding'
+    // clients (e.g. UKESN, Benson Goldstein) are real clients being set
+    // up — they ship leads and have signed/sent agreements. Excluding
+    // them under-counted the widget at "1" when both should appear.
     db
       .select({ n: sql<number>`count(*)::int` })
       .from(clients)
-      .where(eq(clients.status, 'active')),
+      .where(inArray(clients.status, ['active', 'onboarding'])),
     // Active campaigns: status='active'.
     db
       .select({ n: sql<number>`count(*)::int` })
@@ -242,11 +250,14 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
       .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
       .from(leadDeliveries)
       .where(gte(leadDeliveries.deliveryDate, monthStart)),
-    // Last month revenue: paid invoices created in last calendar month.
+    // Last month revenue: paid invoices with due_date in last calendar
+    // month. Was filtering by `createdAt` but every paid invoice's
+    // created_at = Xero sync time (May 2026), so the last-month bucket
+    // was always empty. `due_date` carries the real Xero invoice period.
     db
       .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
       .from(invoices)
-      .where(sql`${invoices.status} = 'paid' AND ${invoices.createdAt} >= ${lastMonthStart}::date AND ${invoices.createdAt} < ${lastMonthEnd}::date`),
+      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= ${lastMonthStart}::date AND ${invoices.dueDate} < ${lastMonthEnd}::date`),
     // Last month leads: deliveries in last calendar month.
     db
       .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
