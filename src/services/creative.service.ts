@@ -7,6 +7,7 @@ import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { logger } from '../utils/logger.js';
 import { uuidOrNull } from '../utils/zod-helpers.js';
 import { resolveSatoCampaignId } from '../utils/resolve-campaign-id.js';
+import { notifyBuyersOfNewCreative } from './creative-review-email.service.js';
 import type { AuthPayload } from '../types/index.js';
 
 /**
@@ -143,6 +144,23 @@ export async function createCreative(
     .returning();
 
   logger.info({ creativeId: row.id, campaignId: satoId, section: row.section }, 'Creative uploaded');
+
+  // Day 3 — notify every linked buyer their portal has a new asset to
+  // review. Fire-and-forget so Resend failures don't break upload. The
+  // service rate-limits to 1 email per buyer per hour internally.
+  const [campaignRow] = await db.select({ name: campaigns.name }).from(campaigns).where(eq(campaigns.id, satoId));
+  notifyBuyersOfNewCreative({
+    campaignId: satoId,
+    campaignName: campaignRow?.name ?? 'your campaign',
+    creativeName: row.name,
+    section: (row.section as 'media' | 'copy_lp') ?? 'media',
+  }).catch((err) => {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), creativeId: row.id },
+      'Creative-review email notification failed (non-blocking)',
+    );
+  });
+
   return toDto(row);
 }
 
