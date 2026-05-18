@@ -3,19 +3,44 @@ import { db } from '../config/database.js';
 import { creatives } from '../db/schema/creatives.js';
 import { campaigns } from '../db/schema/campaigns.js';
 import { clients } from '../db/schema/clients.js';
+import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { logger } from '../utils/logger.js';
 import { uuidOrNull } from '../utils/zod-helpers.js';
 import { resolveSatoCampaignId } from '../utils/resolve-campaign-id.js';
 import type { AuthPayload } from '../types/index.js';
 
-/** Verify a campaign belongs to a client owned by the requester's business. */
+/**
+ * Verify a campaign belongs to a client owned by the requester's business.
+ *
+ * Two ownership paths:
+ *   1. Legacy direct link — campaigns.client_id points to a client in
+ *      the requester's business. This was the only path before Slice 2.
+ *   2. Slice 2 junction — at least one client_campaigns row links this
+ *      campaign to a client in the requester's business. LeadByte-auto-
+ *      inserted campaigns (Piece 1) have campaigns.client_id = NULL, so
+ *      they're ONLY reachable via path #2.
+ *
+ * Without path #2, creative upload + listing returned "Campaign not
+ * found" for every vertical-level campaign (INSULATION, etc.) — Sam
+ * couldn't upload assets against any LeadByte-synced campaign.
+ */
 async function campaignBelongsToBusiness(campaignId: string, businessId: string): Promise<boolean> {
-  const [row] = await db
+  // Path 1: direct client_id.
+  const [direct] = await db
     .select({ businessId: clients.businessId })
     .from(campaigns)
     .innerJoin(clients, eq(campaigns.clientId, clients.id))
     .where(eq(campaigns.id, campaignId));
-  return !!row && row.businessId === businessId;
+  if (direct?.businessId === businessId) return true;
+
+  // Path 2: any linked buyer via client_campaigns is in the requester's business.
+  const [linked] = await db
+    .select({ businessId: clients.businessId })
+    .from(clientCampaigns)
+    .innerJoin(clients, eq(clientCampaigns.clientId, clients.id))
+    .where(and(eq(clientCampaigns.campaignId, campaignId), eq(clients.businessId, businessId)))
+    .limit(1);
+  return Boolean(linked);
 }
 
 export interface CreativeDto {
