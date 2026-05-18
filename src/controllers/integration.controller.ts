@@ -67,6 +67,119 @@ export async function xeroDisconnect(_req: Request, res: Response) {
 }
 
 /**
+ * Diagnostic endpoint for the client-create Xero auto-bind. Runs each
+ * lookup strategy independently and returns what each one returns, so we
+ * can debug why a given client isn't getting auto-bound.
+ *
+ * Either pass `clientId` (preferred — uses the client's existing fields)
+ * OR pass `name` and/or `companyNumber` directly.
+ *
+ * Also fetches the FULL Xero contact record if the client already has an
+ * xero_contact_id — exposes the exact Name + CompanyNumber + EmailAddress
+ * Xero has stored, so we can see why our search isn't matching.
+ *
+ * Owner-only (already gated in the route).
+ */
+export async function xeroDiagnoseContact(req: Request, res: Response) {
+  if (!xeroClient.isXeroConfigured()) {
+    res.status(503).json({ status: 'error', message: 'Xero not configured' });
+    return;
+  }
+
+  let name: string | null = (req.query.name as string | undefined) ?? null;
+  let companyNumber: string | null = (req.query.companyNumber as string | undefined) ?? null;
+  let boundContactId: string | null = null;
+  let clientRow: { id: string; companyName: string; companyNumber: string | null; xeroContactId: string | null } | null = null;
+
+  const clientIdParam = req.query.clientId as string | undefined;
+  if (clientIdParam) {
+    const { clients } = await import('../db/schema/clients.js');
+    const { eq } = await import('drizzle-orm');
+    const [row] = await db
+      .select({
+        id: clients.id,
+        companyName: clients.companyName,
+        companyNumber: clients.companyNumber,
+        xeroContactId: clients.xeroContactId,
+      })
+      .from(clients)
+      .where(eq(clients.id, clientIdParam));
+    if (!row) {
+      res.status(404).json({ status: 'error', message: 'Client not found' });
+      return;
+    }
+    clientRow = row;
+    name = name ?? row.companyName;
+    companyNumber = companyNumber ?? row.companyNumber;
+    boundContactId = row.xeroContactId;
+  }
+
+  // Run all 3 strategies independently — capture per-strategy success / null / error.
+  const strategies: Record<string, { query: string; ok: boolean; match: { contactId: string; name: string } | null; error: string | null }> = {};
+
+  if (companyNumber) {
+    strategies.byCompanyNumber = { query: `CompanyNumber=="${companyNumber}"`, ok: false, match: null, error: null };
+    try {
+      const match = await xeroClient.findContactByCompanyNumber(companyNumber);
+      strategies.byCompanyNumber.ok = true;
+      strategies.byCompanyNumber.match = match;
+    } catch (err) {
+      strategies.byCompanyNumber.error = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  if (name) {
+    strategies.byExactName = { query: `Name=="${name}"`, ok: false, match: null, error: null };
+    try {
+      const match = await xeroClient.findContactByName(name);
+      strategies.byExactName.ok = true;
+      strategies.byExactName.match = match;
+    } catch (err) {
+      strategies.byExactName.error = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  // Substring search uses the same base-name normalisation findContactBestMatch does.
+  if (name) {
+    const base = name.replace(/\s+(corporation|limited|llc|plc|ltd|inc|corp|co)\.?$/i, '').trim();
+    strategies.bySubstring = { query: `Name.ToLower().Contains("${base.toLowerCase()}")`, ok: false, match: null, error: null };
+    try {
+      const match = await xeroClient.findContactBestMatch(name, null);
+      strategies.bySubstring.ok = true;
+      // bestMatch tries exact name first — only report a substring match if exact-name failed.
+      const isSubstringHit = match && strategies.byExactName?.match?.contactId !== match.contactId;
+      strategies.bySubstring.match = isSubstringHit ? match : null;
+    } catch (err) {
+      strategies.bySubstring.error = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  // If a contact is already bound, dump its full Xero record so we can see
+  // exactly what fields Xero has — and whether our searches should have
+  // matched in the first place.
+  let boundContact: Awaited<ReturnType<typeof xeroClient.getContactById>> | null = null;
+  let boundContactError: string | null = null;
+  if (boundContactId) {
+    try {
+      boundContact = await xeroClient.getContactById(boundContactId);
+    } catch (err) {
+      boundContactError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  res.json({
+    status: 'success',
+    data: {
+      input: { name, companyNumber, clientId: clientIdParam ?? null },
+      client: clientRow,
+      strategies,
+      boundContact,
+      boundContactError,
+    },
+  });
+}
+
+/**
  * VAT liability for the most-recently-closed HMRC quarter (owed to HMRC)
  * AND the current open quarter (live accrual) — Sam Loom #7-12.
  *

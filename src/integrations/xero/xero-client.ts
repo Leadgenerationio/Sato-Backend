@@ -767,6 +767,62 @@ export async function getInvoicesForContact(contactId: string): Promise<XeroInvo
   return out;
 }
 
+export interface XeroContactDetail {
+  contactId: string;
+  name: string;
+  companyNumber: string | null;
+  emailAddress: string | null;
+  contactStatus: string | null;
+  accountsReceivableTaxType: string | null;
+}
+
+/**
+ * Fetch the full contact record from Xero by ID. Used by the diagnostic
+ * endpoint to compare what Stato searches for vs what Xero actually has,
+ * so we can debug auto-bind name/number mismatches.
+ *
+ * Required scope: accounting.contacts.
+ */
+export async function getContactById(contactId: string): Promise<XeroContactDetail | null> {
+  const { accessToken, tenantId } = await getValidToken();
+  const res = await fetch(
+    `${API_HOST}/api.xro/2.0/Contacts/${encodeURIComponent(contactId)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'xero-tenant-id': tenantId,
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(15_000),
+    },
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = await res.text();
+    logger.error({ status: res.status, body, contactId }, 'Xero /Contacts/:id failed');
+    throw new Error(`Xero contact fetch failed: ${res.status}`);
+  }
+  type FullContact = {
+    ContactID: string;
+    Name: string;
+    CompanyNumber?: string;
+    EmailAddress?: string;
+    ContactStatus?: string;
+    AccountsReceivableTaxType?: string;
+  };
+  const data = (await res.json()) as { Contacts?: FullContact[] };
+  const first = data.Contacts?.[0];
+  if (!first) return null;
+  return {
+    contactId: first.ContactID,
+    name: first.Name,
+    companyNumber: first.CompanyNumber ?? null,
+    emailAddress: first.EmailAddress ?? null,
+    contactStatus: first.ContactStatus ?? null,
+    accountsReceivableTaxType: first.AccountsReceivableTaxType ?? null,
+  };
+}
+
 async function searchContacts(whereExpr: string): Promise<XeroContact[]> {
   const { accessToken, tenantId } = await getValidToken();
   const where = encodeURIComponent(whereExpr);

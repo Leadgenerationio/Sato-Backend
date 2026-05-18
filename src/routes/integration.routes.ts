@@ -16,6 +16,10 @@ integrationRoutes.get('/xero/status', integrationController.xeroStatus);
 integrationRoutes.post('/xero/disconnect', integrationController.xeroDisconnect);
 integrationRoutes.get('/xero/bank-accounts', integrationController.xeroBankAccounts);
 integrationRoutes.get('/xero/vat-liability', integrationController.xeroVatLiability);
+// Diagnostic for the client-create auto-bind. Pass ?clientId=<uuid> to
+// inspect a specific client's lookup, or ?name=...&companyNumber=... for
+// an ad-hoc probe.
+integrationRoutes.get('/xero/diagnose-contact', integrationController.xeroDiagnoseContact);
 
 // LeadByte
 integrationRoutes.get('/leadbyte/status', integrationController.leadbyteStatus);
