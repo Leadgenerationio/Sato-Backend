@@ -785,7 +785,7 @@ export interface XeroContactDetail {
  */
 export async function getContactById(contactId: string): Promise<XeroContactDetail | null> {
   const { accessToken, tenantId } = await getValidToken();
-  const res = await fetch(
+  const res = await xeroFetchWithBackoff(
     `${API_HOST}/api.xro/2.0/Contacts/${encodeURIComponent(contactId)}`,
     {
       headers: {
@@ -793,7 +793,7 @@ export async function getContactById(contactId: string): Promise<XeroContactDeta
         'xero-tenant-id': tenantId,
         Accept: 'application/json',
       },
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(45_000),
     },
   );
   if (res.status === 404) return null;
@@ -823,10 +823,40 @@ export async function getContactById(contactId: string): Promise<XeroContactDeta
   };
 }
 
+/**
+ * Fetch wrapper that retries on Xero's 429 rate-limit response. Xero's
+ * standard tier allows ~60 calls/minute per tenant and bursts trigger 429
+ * with a Retry-After header in seconds. We honour Retry-After when set,
+ * otherwise back off 2s → 5s → 10s. Three attempts max.
+ *
+ * Used by every Xero read path so the bootstrap-on-create flow doesn't
+ * silently lose contact lookups when the dashboard + hourly sync happen
+ * to be hitting Xero at the same moment.
+ */
+async function xeroFetchWithBackoff(url: string, init: RequestInit): Promise<Response> {
+  const delays = [2000, 5000, 10000];
+  let lastRes: Response | null = null;
+  for (let attempt = 0; attempt < delays.length + 1; attempt++) {
+    const res = await fetch(url, init);
+    if (res.status !== 429) return res;
+    lastRes = res;
+    if (attempt >= delays.length) break;
+    // Xero sets Retry-After in seconds. Cap at the longest scripted backoff
+    // so we never sleep more than 10s on a single attempt.
+    const retryAfter = Number(res.headers.get('retry-after'));
+    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? Math.min(retryAfter * 1000, delays[attempt])
+      : delays[attempt];
+    logger.warn({ status: 429, attempt, waitMs, url }, 'Xero 429 — backing off');
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+  return lastRes!;
+}
+
 async function searchContacts(whereExpr: string): Promise<XeroContact[]> {
   const { accessToken, tenantId } = await getValidToken();
   const where = encodeURIComponent(whereExpr);
-  const res = await fetch(
+  const res = await xeroFetchWithBackoff(
     `${API_HOST}/api.xro/2.0/Contacts?where=${where}`,
     {
       headers: {
@@ -834,7 +864,7 @@ async function searchContacts(whereExpr: string): Promise<XeroContact[]> {
         'xero-tenant-id': tenantId,
         Accept: 'application/json',
       },
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(45_000),
     },
   );
   if (!res.ok) {
