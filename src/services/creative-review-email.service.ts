@@ -118,6 +118,33 @@ export async function notifyBuyersOfNewCreative(params: {
       `leadgeneration.io`,
     ].join('\n');
 
+    // Log the audit row FIRST so it captures every attempt — even if Resend
+    // throws (common in dev mode where the from-domain isn't verified). The
+    // resendEvent tag = EMAIL_TAG drives the rate-limit lookup above, so the
+    // row needs to land before the network call. Updates messageId in-place
+    // once the send returns.
+    let logRowId: string | null = null;
+    try {
+      const logged = await recordOutboundEmail(buyer.id, {
+        subject,
+        body: text,
+        toAddress: buyer.contactEmail,
+        fromAddress: env.RESEND_FROM_EMAIL,
+      });
+      logRowId = logged?.id ?? null;
+      if (logRowId) {
+        await db
+          .update(clientEmails)
+          .set({ resendEvent: EMAIL_TAG })
+          .where(eq(clientEmails.id, logRowId));
+      }
+    } catch (logErr) {
+      logger.warn(
+        { err: logErr instanceof Error ? logErr.message : String(logErr), clientId: buyer.id },
+        'creative-review: failed to log outbound email row (non-blocking)',
+      );
+    }
+
     try {
       const sendRes = await sendEmail({
         to: buyer.contactEmail,
@@ -126,22 +153,13 @@ export async function notifyBuyersOfNewCreative(params: {
         text,
         tags: [{ name: 'kind', value: EMAIL_TAG }, { name: 'section', value: section }],
       });
-      // Log to client_emails for the thread view — use resendEvent as the tag
-      // so the rate-limit lookup above can find it on the next upload.
-      await recordOutboundEmail(buyer.id, {
-        subject,
-        body: text,
-        toAddress: buyer.contactEmail,
-        fromAddress: env.RESEND_FROM_EMAIL,
-        messageId: sendRes.id,
-      });
-      // Patch the just-inserted row with the tag — recordOutboundEmail doesn't
-      // accept resendEvent yet, so update by messageId. Cheap one-row update.
-      if (sendRes.id) {
+      // Patch the row's messageId now that we have one from Resend (mock or
+      // real). Lets future delivery-event webhooks reconcile.
+      if (logRowId && sendRes.id) {
         await db
           .update(clientEmails)
-          .set({ resendEvent: EMAIL_TAG })
-          .where(eq(clientEmails.messageId, sendRes.id));
+          .set({ messageId: sendRes.id })
+          .where(eq(clientEmails.id, logRowId));
       }
       result.sent++;
       logger.info(
@@ -150,8 +168,8 @@ export async function notifyBuyersOfNewCreative(params: {
       );
     } catch (err) {
       logger.warn(
-        { err: err instanceof Error ? err.message : String(err), clientId: buyer.id },
-        'creative-review email send failed (non-blocking)',
+        { err: err instanceof Error ? err.message : String(err), clientId: buyer.id, logRowId },
+        'creative-review email send failed (non-blocking) — audit row already logged',
       );
       result.skipped++;
     }

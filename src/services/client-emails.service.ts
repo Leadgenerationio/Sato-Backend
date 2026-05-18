@@ -129,6 +129,8 @@ export async function deleteClientEmail(
 // Convenience helper used by the Resend integration to drop an outbound
 // row when an email is sent on behalf of a client. Failure here is
 // non-fatal — we don't want a logging hiccup to break the actual send.
+// Returns the inserted row so callers can patch it post-send (e.g. set
+// resendEvent tag or update messageId once Resend returns).
 export async function recordOutboundEmail(
   clientId: string,
   args: {
@@ -138,14 +140,15 @@ export async function recordOutboundEmail(
     toAddress?: string;
     messageId?: string;
   },
-): Promise<void> {
+): Promise<ClientEmail | null> {
   try {
-    await logClientEmail(clientId, {
+    return await logClientEmail(clientId, {
       direction: 'outbound',
       ...args,
     }, null);
   } catch (err) {
     logger.warn({ err, clientId }, 'Failed to record outbound client email');
+    return null;
   }
 }
 
