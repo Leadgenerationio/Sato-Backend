@@ -2,7 +2,6 @@ import type { Request, Response } from 'express';
 import { z } from 'zod';
 import * as creativeService from '../services/creative.service.js';
 import * as approvalService from '../services/creative-approval.service.js';
-import { uuidShape } from '../utils/zod-helpers.js';
 
 export async function listForCampaign(req: Request, res: Response) {
   const creatives = await creativeService.listCreativesForCampaign(
@@ -12,8 +11,12 @@ export async function listForCampaign(req: Request, res: Response) {
   res.json({ status: 'success', data: { creatives } });
 }
 
+// campaignId accepts either Sato uuid or LeadByte numeric id — the service
+// layer resolves it via resolveSatoCampaignId. Was uuidShape() previously,
+// which 400'd every upload from the campaign detail page since that page
+// keys campaigns by LeadByte's numeric id.
 const createSchema = z.object({
-  campaignId: uuidShape(),
+  campaignId: z.string().min(1).max(64),
   name: z.string().min(1).max(255),
   type: z.enum(['image', 'video', 'text']),
   r2Key: z.string().min(1),
