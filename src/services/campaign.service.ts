@@ -571,9 +571,45 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
     sumWindows(fallbackRows, 'emailCost') +
     sumWindows(fallbackRows, 'smsCost') +
     sumWindows(fallbackRows, 'validationCost');
-  const totalCost = ytdHasData
+  const leadbyteCost = ytdHasData
     ? (ytdRow?.payout ?? 0) + (ytdRow?.emailCost ?? 0) + (ytdRow?.smsCost ?? 0) + (ytdRow?.validationCost ?? 0)
     : fallbackCost;
+
+  // Add the real Catchr ad-spend for every Catchr account linked to this
+  // campaign via traffic_sources (legacy `account_id` + the new
+  // `account_ids[]` array). LeadByte's `payout` field is the supplier
+  // payout, which is zero for direct-traffic campaigns like Solar Panels
+  // (UK) where Sam runs his own ads — without this addition the campaign
+  // shows "100% margin" while £380k of Facebook spend sits in ad_spend.
+  // Window is the last 30 days, which matches what Catchr actually has.
+  let catchrCost = 0;
+  if (satoMeta.satoId) {
+    try {
+      const [{ total }] = (await db.execute(sql`
+        with source_accounts as (
+          select ts.platform, ts.account_id as acc_id
+          from traffic_sources ts
+          where ts.campaign_id = ${satoMeta.satoId}::uuid and ts.account_id is not null
+          union
+          select ts.platform, jsonb_array_elements_text(ts.account_ids) as acc_id
+          from traffic_sources ts
+          where ts.campaign_id = ${satoMeta.satoId}::uuid
+        )
+        select coalesce(sum(a.spend::numeric), 0)::float as total
+        from ad_spend a
+        join source_accounts sa on a.platform = sa.platform and a.account_id = sa.acc_id
+        where a.date >= current_date - interval '30 days'
+      `)) as unknown as Array<{ total: number }>;
+      catchrCost = Number(total ?? 0);
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), campaignId: satoMeta.satoId },
+        'getCampaign: Catchr ad-spend rollup failed — top strip will only reflect LeadByte cost',
+      );
+    }
+  }
+
+  const totalCost = leadbyteCost + catchrCost;
   const cpl = totalLeads > 0 ? totalCost / totalLeads : 0;
   const margin = totalRevenue > 0 ? ((totalRevenue - totalCost) / totalRevenue) * 100 : 0;
 
