@@ -1127,22 +1127,36 @@ export async function getHealth(): Promise<XeroHealth> {
   const scopesGranted = lastTokenInfo?.scopes ?? [];
   const scopesMissing = scopesRequested.filter((s) => !scopesGranted.includes(s));
 
-  // Plain-English next steps based on probe results.
+  // Plain-English next steps based on probe results. Order matters —
+  // surface scope/permission issues first, then real-state things Sam can
+  // fix in Xero, then transient noise. Distinguish 429 (rate limit, will
+  // self-heal) from 401/403 (auth/scope, needs Sam) so we don't tell him
+  // to "check scopes" when the only problem is too many recent probes.
   const recs: string[] = [];
+  const isRateLimit = (err?: string) => typeof err === 'string' && err.includes('429');
+
   if (probes.accountsApi.ok && (probes.accountsApi.bankAccounts ?? 0) === 0) {
     recs.push('Bank Accounts widget is empty because the Xero org has no accounts of Type=BANK with Status=ACTIVE. In Xero → Accounting → Chart of accounts, mark at least one bank account as active.');
   }
   if (probes.accountsApi.ok === false) {
-    recs.push(`Accounting API failed (${probes.accountsApi.error}) — check the Custom Connection has the accounting.contacts + accounting.transactions scopes in developer.xero.com.`);
+    if (isRateLimit(probes.accountsApi.error)) {
+      recs.push('Accounting API rate-limited (HTTP 429) at probe time — Xero will reset within ~60s, then the Bank widget will reload. No action needed.');
+    } else {
+      recs.push(`Accounting API failed (${probes.accountsApi.error}) — check the Custom Connection has the accounting.contacts + accounting.transactions scopes in developer.xero.com.`);
+    }
   }
   if (probes.reportsApi.ok && probes.reportsApi.vatRegistered === false) {
     recs.push('VAT Liability widget will display £0 because the Xero org is not VAT-registered (Xero /Reports/TaxSummary returned 404). This is the actual state, not a bug.');
   }
   if (probes.reportsApi.ok === false) {
-    recs.push(`Reports API failed (${probes.reportsApi.error}) — confirm the Custom Connection has the accounting.reports.read scope.`);
+    if (isRateLimit(probes.reportsApi.error)) {
+      recs.push('Reports API rate-limited (HTTP 429) at probe time — try the health check again in ~60s. The VAT widget itself has its own retry/backoff so end users rarely see this.');
+    } else {
+      recs.push(`Reports API failed (${probes.reportsApi.error}) — confirm the Custom Connection has the accounting.reports.read scope.`);
+    }
   }
-  if (probes.financeApi.ok === false) {
-    recs.push('Finance API (CashValidation) is unavailable — this is EXPECTED for standard Custom Connections (the finance.statements.read scope is intentionally not requested). Bank balances will fall back to /Reports/BankSummary instead.');
+  if (probes.financeApi.ok === false && !isRateLimit(probes.financeApi.error)) {
+    recs.push('Finance API (CashValidation) is unavailable — this is EXPECTED for standard Custom Connections (the finance.statements.read scope is intentionally not requested). Bank balances fall back to /Reports/BankSummary instead.');
   }
   if (scopesMissing.length > 0) {
     recs.push(`Missing granted scopes: ${scopesMissing.join(', ')} — enable in developer.xero.com → app → scopes.`);
