@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import * as reportService from '../services/report.service.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
+import { parseDashboardWindow } from '../utils/dashboard-window.js';
 
 const VALID_WINDOWS: DeliveryWindow[] = ['today', 'yesterday', 'this_week', 'last_week', 'this_month', 'last_month', 'ytd'];
 
@@ -26,7 +27,11 @@ export async function supplierPerformance(req: Request, res: Response) {
 }
 
 export async function financialOverview(req: Request, res: Response) {
-  const data = await reportService.getFinancialOverview(req.user!);
+  // Optional ?window= (dashboard time-range dropdown) — controls how many
+  // monthly buckets the BE returns. Unknown / missing → undefined → BE
+  // default = 12 months, matching the pre-filter chart behaviour.
+  const window = parseDashboardWindow(req.query.window) ?? undefined;
+  const data = await reportService.getFinancialOverview(req.user!, { window });
   res.json({ status: 'success', data: { report: data } });
 }
 

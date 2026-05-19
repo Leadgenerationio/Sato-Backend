@@ -341,7 +341,31 @@ export async function getSupplierPerformance(
   return [...bySupplier.values()].sort((a, b) => b.totalSpend - a.totalSpend);
 }
 
-export async function getFinancialOverview(_requester: AuthPayload): Promise<FinancialOverviewRow[]> {
+/**
+ * Number of monthly buckets to return for each dashboard window. Short
+ * windows still show a small multi-month context (3 months) because a
+ * single-bar chart isn't useful. last_year keeps the original 12-month
+ * series so the no-filter response is byte-identical to the legacy one.
+ */
+function monthsForFinancialOverviewWindow(window: import('../utils/dashboard-window.js').DashboardWindow | undefined): number {
+  switch (window) {
+    case 'this_week':
+    case 'this_month':
+    case 'last_month':
+    case 'last_90d':
+      return 3;
+    case 'last_6m':
+      return 6;
+    case 'last_year':
+    default:
+      return 12;
+  }
+}
+
+export async function getFinancialOverview(
+  _requester: AuthPayload,
+  opts: { window?: import('../utils/dashboard-window.js').DashboardWindow } = {},
+): Promise<FinancialOverviewRow[]> {
   // Real query: last 12 months of revenue (paid invoices), expenses (ad
   // spend from Catchr), and invoice status counts per month. This drives
   // the dashboard's revenue-vs-expenses chart.
@@ -357,10 +381,14 @@ export async function getFinancialOverview(_requester: AuthPayload): Promise<Fin
   // is £0). The same bug zeroed-out the Expenses series on the chart.
   //
   // Falls back to demo numbers only if BOTH tables are empty.
-  const twelveMonthsAgo = new Date();
-  twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 11);
-  twelveMonthsAgo.setDate(1);
-  const twelveMonthsAgoIso = twelveMonthsAgo.toISOString().split('T')[0];
+  //
+  // monthsCount is driven by the dashboard window filter when supplied —
+  // last_year (default / no filter) keeps the legacy 12-month series.
+  const monthsCount = monthsForFinancialOverviewWindow(opts.window);
+  const windowStart = new Date();
+  windowStart.setMonth(windowStart.getMonth() - (monthsCount - 1));
+  windowStart.setDate(1);
+  const windowStartIso = windowStart.toISOString().split('T')[0];
 
   const [revenueRows, expenseRows, invoiceCountRows] = await Promise.all([
     db
@@ -370,7 +398,7 @@ export async function getFinancialOverview(_requester: AuthPayload): Promise<Fin
         vat: sql<string>`coalesce(sum(${invoices.vatAmount}), 0)`,
       })
       .from(invoices)
-      .where(and(eq(invoices.status, 'paid'), gte(invoices.dueDate, twelveMonthsAgo)))
+      .where(and(eq(invoices.status, 'paid'), gte(invoices.dueDate, windowStart)))
       .groupBy(sql`to_char(${invoices.dueDate}, 'YYYY-MM')`),
     db
       .select({
@@ -378,7 +406,7 @@ export async function getFinancialOverview(_requester: AuthPayload): Promise<Fin
         expenses: sql<string>`coalesce(sum(${adSpend.spend}), 0)`,
       })
       .from(adSpend)
-      .where(gte(adSpend.date, twelveMonthsAgoIso))
+      .where(gte(adSpend.date, windowStartIso))
       .groupBy(sql`to_char(${adSpend.date}, 'YYYY-MM')`),
     db
       .select({
@@ -387,7 +415,7 @@ export async function getFinancialOverview(_requester: AuthPayload): Promise<Fin
         count: sql<number>`count(*)::int`,
       })
       .from(invoices)
-      .where(gte(invoices.dueDate, twelveMonthsAgo))
+      .where(gte(invoices.dueDate, windowStart))
       .groupBy(sql`to_char(${invoices.dueDate}, 'YYYY-MM')`, invoices.status),
   ]);
 
@@ -395,10 +423,10 @@ export async function getFinancialOverview(_requester: AuthPayload): Promise<Fin
   // series rather than fabricating numbers.
   if (revenueRows.length === 0 && expenseRows.length === 0) return [];
 
-  // Build the last 12 months as zero-baseline rows so charts always render
-  // a continuous timeline even if some months had no activity.
+  // Build the trailing monthsCount months as zero-baseline rows so charts
+  // always render a continuous timeline even if some months had no activity.
   const months: string[] = [];
-  for (let i = 11; i >= 0; i--) {
+  for (let i = monthsCount - 1; i >= 0; i--) {
     const d = new Date();
     d.setMonth(d.getMonth() - i);
     months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
