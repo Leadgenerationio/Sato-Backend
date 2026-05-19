@@ -182,18 +182,21 @@ export interface DashboardStats {
    */
   totalRevenue: number;
   /**
-   * Last-30-day ad_spend (Catchr). Renamed from "Total Cost" in the FE
-   * because Catchr only has ~2 months of history; comparing lifetime cost
-   * vs lifetime revenue gave a misleading negative Net Profit.
+   * Trailing 90-day ad_spend (Catchr). FE labels this "Ad Spend (90d)".
+   *
+   * Was previously this-month-only, which over-counted Facebook because
+   * spend happens before the corresponding leads convert to paid invoices
+   * (~30-60 day lag). 90 days smooths the spend-billed-paid cycle so the
+   * Net Profit / Margin numbers below aren't dominated by a single heavy
+   * acquisition month.
    */
   totalCost: number;
   /**
-   * Period-coherent profit: thisMonthRevenue − thisMonthCost. Was previously
-   * (lifetime revenue − lifetime cost) which mixed 12 months of revenue with
-   * 2 months of cost and produced a meaningless negative number.
+   * Trailing 90-day revenue − trailing 90-day cost. Period-coherent and
+   * matched to roughly one full ad-spend → invoice → paid cycle.
    */
   netProfit: number;
-  /** thisMonthNetProfit / thisMonthRevenue × 100. Null when no this-month revenue. */
+  /** netProfit / trailing-90d revenue × 100. Null when no revenue in window. */
   profitMargin: number;
   activeClients: number;
   /** Total campaigns with status='active' (regardless of client linkage). */
@@ -246,10 +249,17 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
   const lastMonthDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
   const lastMonthStart = `${lastMonthDate.getUTCFullYear()}-${String(lastMonthDate.getUTCMonth() + 1).padStart(2, '0')}-01`;
   const lastMonthEnd = monthStart; // exclusive end
+  // Trailing 90-day window for Net Profit / Margin. Smooths the ~30-60 day
+  // lag between ad-spend (when Sam pays Facebook) and invoice-paid (when
+  // his clients pay him for the leads those ads generated). Comparing
+  // this-month-vs-this-month over-states spend; 90d covers ~1 full cycle.
+  const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+  const ninetyDayStart = ninetyDaysAgo.toISOString().slice(0, 10);
 
   const [
-    totalRevenueRow, thisMonthCostRow, clientsRow, campaignsRow, linkedCampaignsRow, thisMonthLeadsRow,
+    totalRevenueRow, costNinetyRow, clientsRow, campaignsRow, linkedCampaignsRow, thisMonthLeadsRow,
     thisMonthRevenueRow, lastMonthRevenueRow, lastMonthLeadsRow,
+    revenueNinetyRow,
   ] = await Promise.all([
     // Headline number: sum of paid invoices, all-time. Stays as the lifetime
     // total in the "Total Revenue" card so the headline matches Xero's
@@ -258,15 +268,11 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
       .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
       .from(invoices)
       .where(eq(invoices.status, 'paid')),
-    // Cost shown on the dashboard = THIS MONTH's ad-spend only. Catchr only
-    // has ~2 months of history, so lifetime ad_spend (£762k) compared to
-    // lifetime revenue (£734k from 12 months) gave a meaningless negative
-    // Net Profit. Restricting to current month makes the comparison
-    // period-coherent with thisMonthRevenue.
+    // Cost shown on the dashboard = trailing 90-day ad-spend.
     db
       .select({ cost: sql<string>`coalesce(sum(${adSpend.spend}), 0)::text` })
       .from(adSpend)
-      .where(gte(adSpend.date, monthStart)),
+      .where(gte(adSpend.date, ninetyDayStart)),
     // Active clients: status IN ('active', 'onboarding'). 'onboarding'
     // clients (e.g. UKESN, Benson Goldstein) are real clients being set
     // up — they ship leads and have signed/sent agreements. Excluding
@@ -314,16 +320,26 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
       .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
       .from(leadDeliveries)
       .where(sql`${leadDeliveries.deliveryDate} >= ${lastMonthStart}::date AND ${leadDeliveries.deliveryDate} < ${lastMonthEnd}::date`),
+    // Trailing 90-day revenue (paid invoices with due_date in window).
+    // Pairs with the trailing 90-day ad_spend cost above so Net Profit
+    // and Margin compare like-for-like over the same window.
+    db
+      .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
+      .from(invoices)
+      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= ${ninetyDayStart}::date`),
   ]);
 
   // Headline (all-time) revenue.
   const totalRevenue = Number(totalRevenueRow[0]?.revenue ?? '0');
-  // Period-coherent (this month) numbers used for Net Profit / Margin / trend.
+  // This-month numbers used only for the trend chip on Total Revenue.
   const thisMonthRevenue = Number(thisMonthRevenueRow[0]?.revenue ?? '0');
-  const thisMonthCost = Number(thisMonthCostRow[0]?.cost ?? '0');
-  const netProfit = thisMonthRevenue - thisMonthCost;
-  const profitMargin = thisMonthRevenue > 0
-    ? Math.round((netProfit / thisMonthRevenue) * 1000) / 10
+  // Trailing 90-day numbers used for Net Profit / Margin so the spend →
+  // billed → paid lag (~30-60 days) doesn't dominate a single-month read.
+  const ninetyDayRevenue = Number(revenueNinetyRow[0]?.revenue ?? '0');
+  const ninetyDayCost = Number(costNinetyRow[0]?.cost ?? '0');
+  const netProfit = ninetyDayRevenue - ninetyDayCost;
+  const profitMargin = ninetyDayRevenue > 0
+    ? Math.round((netProfit / ninetyDayRevenue) * 1000) / 10
     : 0;
 
   // Period-over-period deltas. Only compute when last month had a non-zero
@@ -343,7 +359,7 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
 
   return {
     totalRevenue: Math.round(totalRevenue * 100) / 100,
-    totalCost: Math.round(thisMonthCost * 100) / 100,
+    totalCost: Math.round(ninetyDayCost * 100) / 100,
     netProfit: Math.round(netProfit * 100) / 100,
     profitMargin,
     activeClients: clientsRow[0]?.n ?? 0,
