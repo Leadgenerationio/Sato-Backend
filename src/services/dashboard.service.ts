@@ -181,34 +181,29 @@ export async function getRecentActivity(_requester: AuthPayload, limit = 10): Pr
 
 export interface DashboardStats {
   /**
-   * All-time paid-invoice total (Xero). Stays as the lifetime headline so
-   * Sam's mental model "this is what I've billed clients" is unchanged.
+   * Paid-invoice total (Xero) in the selected window. Default window is
+   * 'last_year', so the no-filter response matches the prior 12-month
+   * lifetime headline (~£734k) almost exactly given Xero has ~12 months
+   * of history. Shorter windows scope the tile to that period.
    */
   totalRevenue: number;
   /**
-   * Trailing 90-day ad_spend (Catchr). FE labels this "Ad Spend (90d)".
-   *
-   * Was previously this-month-only, which over-counted Facebook because
-   * spend happens before the corresponding leads convert to paid invoices
-   * (~30-60 day lag). 90 days smooths the spend-billed-paid cycle so the
-   * Net Profit / Margin numbers below aren't dominated by a single heavy
-   * acquisition month.
+   * Ad spend (Catchr) in the selected window. Catchr only has ~50d of
+   * history so windows wider than 90d are bounded by what's available;
+   * the FE labels the tile with the selected window so users know.
    */
   totalCost: number;
   /**
-   * Trailing 365-day revenue − trailing 90-day cost.
+   * Revenue − cost over the selected window — period-coherent.
    *
-   * Windows differ on purpose. Catchr only carries ~50 days of ad_spend
-   * history; revenue lags spend by ~30-60 days (the lead-to-paid cycle).
-   * Pairing 365d of revenue with 90d of cost catches a full annual
-   * revenue baseline while keeping cost at the longest window where we
-   * actually have data. Mismatched windows are the honest call given
-   * what Catchr makes available — matched 90/90 (~£763k cost vs ~£278k
-   * revenue) over-states cost relative to the revenue it generated, and
-   * matched lifetime/lifetime over-states revenue relative to cost.
+   * Both numerator and denominator share the same window, so margins read
+   * intuitively. For short windows (this_week/this_month), the
+   * acquisition-spend → invoice → paid lag (~30-60 days) makes Net Profit
+   * look heavily negative — that's accurate for the period, not a bug.
+   * Use 'last_year' (default) for a smoothed annual view.
    */
   netProfit: number;
-  /** netProfit / trailing-365d revenue × 100. Null when no revenue in window. */
+  /** netProfit / revenue × 100. Null when no revenue in window. */
   profitMargin: number;
   activeClients: number;
   /** Total campaigns with status='active' (regardless of client linkage). */
@@ -266,154 +261,103 @@ export interface DashboardStats {
  */
 export async function getDashboardStats(
   _requester: AuthPayload,
-  opts: { leadsWindow?: DashboardWindow } = {},
+  opts: { window?: DashboardWindow; leadsWindow?: DashboardWindow } = {},
 ): Promise<DashboardStats> {
-  // Default leads window stays 'this_month' so callers that don't pass a
-  // window get exactly the same response shape + numbers they got before
-  // this filter was added. New FE caller passes window from the dropdown.
-  const leadsWindowKey: DashboardWindow = opts.leadsWindow ?? 'this_month';
-  const leadsWindow = resolveDashboardWindow(leadsWindowKey);
-  // Start of current calendar month in YYYY-MM-DD (UTC). Postgres compares
-  // string dates lexicographically when both are ISO-formatted.
+  // Single window now drives Leads + Revenue + Ad Spend + Net Profit +
+  // Margin + their trend chips. Default 'last_year' matches the prior
+  // rolling-365d revenue / 90d-cost behaviour numerically (Catchr only
+  // has ~50d of history, so 90d ≈ 365d for cost) and keeps the response
+  // backwards-compatible: legacy callers without ?window= see Net Profit
+  // ≈ -£29,927 and Margin ≈ -4.1%, same as before this rollout.
+  //
+  // `leadsWindow` accepted as an alias for back-compat with the earlier
+  // commit that only filtered the Leads tile — both keys point at the
+  // same field on the request now.
+  const windowKey: DashboardWindow = opts.window ?? opts.leadsWindow ?? 'last_year';
+  const win = resolveDashboardWindow(windowKey);
   const now = new Date();
-  const monthStart = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`;
-  // Start + end of LAST calendar month for period-over-period deltas.
-  const lastMonthDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-  const lastMonthStart = `${lastMonthDate.getUTCFullYear()}-${String(lastMonthDate.getUTCMonth() + 1).padStart(2, '0')}-01`;
-  const lastMonthEnd = monthStart; // exclusive end
-  // Trailing 90-day window for Ad Spend. Catchr only has ~50 days of
-  // history so this captures essentially all available cost data.
-  const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
-  const ninetyDayStart = ninetyDaysAgo.toISOString().slice(0, 10);
-  // Trailing 365-day window for Revenue. Wider on purpose: paid invoices
-  // lag the spend that generated them by ~30-60 days, so a 12-month
-  // revenue window vs the 90d cost window reflects a full annual revenue
-  // baseline. Catchr's 50-day cost history doesn't support a like-for-like
-  // match; this keeps the comparison honest by using the longest stable
-  // window on each side.
-  const yearAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
-  const yearStart = yearAgo.toISOString().slice(0, 10);
 
   const [
-    totalRevenueRow, costRollingRow, clientsRow, campaignsRow, linkedCampaignsRow, thisMonthLeadsRow,
-    thisMonthRevenueRow, lastMonthRevenueRow, lastMonthLeadsRow,
-    revenueRollingRow,
+    revenueRow, costRow, clientsRow, campaignsRow, linkedCampaignsRow,
+    leadsRow, prevRevenueRow, prevLeadsRow,
   ] = await Promise.all([
-    // Headline number: sum of paid invoices, all-time. Stays as the lifetime
-    // total in the "Total Revenue" card so the headline matches Xero's
-    // running tally exactly.
+    // Revenue in the selected window — paid invoices with due_date in range.
     db
       .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
       .from(invoices)
-      .where(eq(invoices.status, 'paid')),
-    // Cost shown on the dashboard = trailing 90-day ad-spend.
+      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= ${win.startIso}::date AND ${invoices.dueDate} <= ${win.endIso}::date`),
+    // Ad spend in the selected window. Catchr only has ~50d of history;
+    // for windows wider than that the sum is bounded by what's available.
     db
       .select({ cost: sql<string>`coalesce(sum(${adSpend.spend}), 0)::text` })
       .from(adSpend)
-      .where(gte(adSpend.date, ninetyDayStart)),
-    // Active clients: status IN ('active', 'onboarding'). 'onboarding'
-    // clients (e.g. UKESN, Benson Goldstein) are real clients being set
-    // up — they ship leads and have signed/sent agreements. Excluding
-    // them under-counted the widget at "1" when both should appear.
+      .where(sql`${adSpend.date} >= ${win.startIso}::date AND ${adSpend.date} <= ${win.endIso}::date`),
+    // Active clients: status IN ('active', 'onboarding'). Time-window
+    // independent — a client either exists or doesn't right now.
     db
       .select({ n: sql<number>`count(*)::int` })
       .from(clients)
       .where(inArray(clients.status, ['active', 'onboarding'])),
-    // Active campaigns: status='active' (regardless of client linkage).
+    // Active campaigns: status='active', regardless of client linkage.
     db
       .select({ n: sql<number>`count(*)::int` })
       .from(campaigns)
       .where(eq(campaigns.status, 'active')),
-    // Linked campaigns: status='active' AND at least one client_campaigns
-    // row. Surfaces the gap between "campaigns Sam runs on LeadByte" (28)
-    // vs "campaigns whose leads + revenue flow into Stato per-client P&L"
-    // (2) — without this number the dashboard implied "28 campaigns but
-    // only 2,456 leads" looked like an attribution failure.
+    // Linked campaigns: subset of activeCampaigns with >=1 client_campaigns
+    // row. Surfaces the gap between "campaigns Sam runs on LeadByte" and
+    // "campaigns whose leads + revenue flow into Stato per-client P&L".
     db
       .select({ n: sql<number>`count(distinct ${campaigns.id})::int` })
       .from(campaigns)
       .innerJoin(clientCampaigns, eq(clientCampaigns.campaignId, campaigns.id))
       .where(eq(campaigns.status, 'active')),
-    // Leads in selected window (default: current calendar month — same as
-    // the legacy behaviour). Uses the resolved range so the dropdown can
-    // pivot the tile to "Last 7 days", "Last 90 days", etc.
+    // Leads in selected window.
     db
       .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
       .from(leadDeliveries)
-      .where(sql`${leadDeliveries.deliveryDate} >= ${leadsWindow.startIso}::date AND ${leadDeliveries.deliveryDate} <= ${leadsWindow.endIso}::date`),
-    // This-month revenue: paid invoices with due_date in current calendar
-    // month — same shape as last-month, so revenueChange compares like-for-like.
+      .where(sql`${leadDeliveries.deliveryDate} >= ${win.startIso}::date AND ${leadDeliveries.deliveryDate} <= ${win.endIso}::date`),
+    // Prior equivalent window — drives revenueChange.
     db
       .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
       .from(invoices)
-      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= ${monthStart}::date`),
-    // Last month revenue: paid invoices with due_date in last calendar
-    // month. Was filtering by `createdAt` but every paid invoice's
-    // created_at = Xero sync time (May 2026), so the last-month bucket
-    // was always empty. `due_date` carries the real Xero invoice period.
-    db
-      .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
-      .from(invoices)
-      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= ${lastMonthStart}::date AND ${invoices.dueDate} < ${lastMonthEnd}::date`),
-    // Prior equivalent window — used to compute leadsChange. For
-    // 'this_month' that's last month; for 'last_90d' it's the 90 days
-    // immediately preceding the current window; for 'this_week' the
-    // preceding 7 days. resolveDashboardWindow returns both ranges in
-    // one shot so this query just plugs in the prev* fields.
+      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= ${win.prevStartIso}::date AND ${invoices.dueDate} <= ${win.prevEndIso}::date`),
+    // Prior equivalent window for leadsChange.
     db
       .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
       .from(leadDeliveries)
-      .where(sql`${leadDeliveries.deliveryDate} >= ${leadsWindow.prevStartIso}::date AND ${leadDeliveries.deliveryDate} <= ${leadsWindow.prevEndIso}::date`),
-    // Trailing 365-day revenue (paid invoices with due_date in window).
-    // Wider than the 90d ad_spend window so the ad-spend → invoice → paid
-    // lag (~30-60 days) doesn't over-count cost relative to the revenue
-    // those leads will eventually generate. With ~12 months of Xero
-    // history available, 365d effectively captures all paid invoices.
-    db
-      .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
-      .from(invoices)
-      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= ${yearStart}::date`),
+      .where(sql`${leadDeliveries.deliveryDate} >= ${win.prevStartIso}::date AND ${leadDeliveries.deliveryDate} <= ${win.prevEndIso}::date`),
   ]);
 
-  // Headline (all-time) revenue.
-  const totalRevenue = Number(totalRevenueRow[0]?.revenue ?? '0');
-  // This-month numbers used only for the trend chip on Total Revenue.
-  const thisMonthRevenue = Number(thisMonthRevenueRow[0]?.revenue ?? '0');
-  // 365d revenue / 90d cost — see DashboardStats.netProfit jsdoc for
-  // the rationale on the mismatched windows.
-  const rollingRevenue = Number(revenueRollingRow[0]?.revenue ?? '0');
-  const rollingCost = Number(costRollingRow[0]?.cost ?? '0');
-  const netProfit = rollingRevenue - rollingCost;
-  const profitMargin = rollingRevenue > 0
-    ? Math.round((netProfit / rollingRevenue) * 1000) / 10
+  const revenue = Number(revenueRow[0]?.revenue ?? '0');
+  const cost = Number(costRow[0]?.cost ?? '0');
+  const netProfit = revenue - cost;
+  const profitMargin = revenue > 0
+    ? Math.round((netProfit / revenue) * 1000) / 10
     : 0;
 
-  // Period-over-period deltas. Only compute when last month had a non-zero
-  // baseline — avoids dividing by zero and showing nonsensical "+∞%" chips.
-  // Compare LIKE-FOR-LIKE: this-month revenue vs last-month revenue. The
-  // previous formula used totalRevenue (lifetime) which always blew the chip
-  // out to +500-1000%.
-  const lastMonthRevenue = Number(lastMonthRevenueRow[0]?.revenue ?? '0');
-  const lastMonthLeads = lastMonthLeadsRow[0]?.leads ?? 0;
-  const thisMonthLeads = thisMonthLeadsRow[0]?.leads ?? 0;
-  const revenueChange = lastMonthRevenue > 0
-    ? Math.round(((thisMonthRevenue - lastMonthRevenue) / lastMonthRevenue) * 1000) / 10
+  // Trend chips: window vs prior equivalent window. Null when prior was zero
+  // so the FE hides the chip rather than showing "+∞%".
+  const prevRevenue = Number(prevRevenueRow[0]?.revenue ?? '0');
+  const prevLeads = prevLeadsRow[0]?.leads ?? 0;
+  const leads = leadsRow[0]?.leads ?? 0;
+  const revenueChange = prevRevenue > 0
+    ? Math.round(((revenue - prevRevenue) / prevRevenue) * 1000) / 10
     : null;
-  const leadsChange = lastMonthLeads > 0
-    ? Math.round(((thisMonthLeads - lastMonthLeads) / lastMonthLeads) * 1000) / 10
+  const leadsChange = prevLeads > 0
+    ? Math.round(((leads - prevLeads) / prevLeads) * 1000) / 10
     : null;
 
   return {
-    totalRevenue: Math.round(totalRevenue * 100) / 100,
-    totalCost: Math.round(rollingCost * 100) / 100,
+    totalRevenue: Math.round(revenue * 100) / 100,
+    totalCost: Math.round(cost * 100) / 100,
     netProfit: Math.round(netProfit * 100) / 100,
     profitMargin,
     activeClients: clientsRow[0]?.n ?? 0,
     activeCampaigns: campaignsRow[0]?.n ?? 0,
     linkedCampaigns: linkedCampaignsRow[0]?.n ?? 0,
-    leadsThisMonth: thisMonthLeads,
-    leadsWindow: leadsWindowKey,
-    leadsWindowLabel: leadsWindow.label,
+    leadsThisMonth: leads,
+    leadsWindow: windowKey,
+    leadsWindowLabel: win.label,
     revenueChange,
     leadsChange,
     asOf: now.toISOString(),
