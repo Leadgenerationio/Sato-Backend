@@ -6,6 +6,7 @@ import { clients } from '../db/schema/clients.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import { cached } from '../utils/cache.js';
 import { logger } from '../utils/logger.js';
+import { pickVertical } from '../utils/vertical.js';
 import type { AuthPayload } from '../types/index.js';
 
 // LeadByte campaign aggregates change slowly relative to dashboard load
@@ -303,7 +304,12 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
       id: c.id,
       name: c.name,
       clientName: c.clientName,
-      vertical: c.vertical,
+      // LeadByte's /campaigns endpoint doesn't carry a vertical column and
+      // Sam hasn't backfilled the Sato `campaigns.vertical` field — so the
+      // Campaign Sources pie chart was lumping every campaign into "Other".
+      // pickVertical() keeps any real DB value if present, otherwise derives
+      // from the name (Solar, Insulation, Hearing Aids, …).
+      vertical: pickVertical(c.name, c.vertical),
       status: c.status,
       campaignType: resolveCampaignType(c.id, typeMap),
       leadPrice: c.leadPrice,

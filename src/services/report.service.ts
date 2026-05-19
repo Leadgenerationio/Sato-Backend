@@ -130,34 +130,11 @@ export interface FinancialOverviewRow {
  * "Hearing Aids", "Solar", "Insulation", etc. Falls back to 'Other' if no
  * keyword matches. Replaces showing "Unmapped" everywhere.
  */
-function deriveVerticalFromName(name: string): string {
-  const lower = name.toLowerCase();
-  // Order matters — more specific phrases first so they match before generics.
-  const keywords: Array<{ match: string | RegExp; label: string }> = [
-    { match: 'hearing aid', label: 'Hearing Aids' },
-    { match: 'solar', label: 'Solar' },
-    { match: 'insulation', label: 'Insulation' },
-    { match: 'lasting power of attorney', label: 'Legal — LPA' },
-    { match: 'pcp claim', label: 'PCP Claims' },
-    { match: 'tax claim', label: 'Tax Claims' },
-    { match: 'will writ', label: 'Will Writing' },
-    { match: 'mortgage', label: 'Mortgage' },
-    { match: 'life insurance', label: 'Life Insurance' },
-    { match: 'home insurance', label: 'Home Insurance' },
-    { match: 'pmi', label: 'Private Medical Insurance' },
-    { match: 'house sale', label: 'Property Sales' },
-    { match: 'property sale', label: 'Property Sales' },
-    { match: 'boiler', label: 'Boiler' },
-    { match: 'debt', label: 'Debt Management' },
-    { match: 'personal injury', label: 'Personal Injury' },
-  ];
-  for (const k of keywords) {
-    if (typeof k.match === 'string' ? lower.includes(k.match) : k.match.test(lower)) {
-      return k.label;
-    }
-  }
-  return 'Other';
-}
+// Vertical derivation now lives in src/utils/vertical.ts so the same
+// keyword map drives both the reports' campaign-meta lookup and the
+// dashboard's Campaign Sources pie chart (which was rendering 100%
+// "Other" because campaigns.vertical is uniformly null in prod).
+import { deriveVerticalFromName } from '../utils/vertical.js';
 
 async function loadCampaignMetaByName(): Promise<Map<string, { clientName: string; vertical: string }>> {
   const rows = await db
