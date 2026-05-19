@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { eq } from 'drizzle-orm';
 import request from 'supertest';
 import app from '../index.js';
@@ -7,6 +7,9 @@ import { clients } from '../db/schema/clients.js';
 import { campaigns } from '../db/schema/campaigns.js';
 import { creatives } from '../db/schema/creatives.js';
 import { creativeApprovals } from '../db/schema/creative-approvals.js';
+import { invoices } from '../db/schema/invoices.js';
+import { agreements } from '../db/schema/agreements.js';
+import { clientCampaigns } from '../db/schema/client-campaigns.js';
 
 let clientToken: string;
 let ownerToken: string;
@@ -122,6 +125,179 @@ describe('Portal API', () => {
     const res = await request(app).get('/api/v1/portal/invoices').set('Authorization', `Bearer ${clientToken}`);
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.data.invoices)).toBe(true);
+  });
+
+  // Drafts are internal pre-authorisation state. They must NEVER appear in
+  // the buyer-facing list or contribute to the outstanding/pending tiles —
+  // otherwise the buyer is chased for invoices we haven't actually issued.
+  describe('Invoice visibility — draft / voided filter', () => {
+    const DRAFT_INV_ID = '00000000-0000-0000-0000-0000000d0001';
+    const VOIDED_INV_ID = '00000000-0000-0000-0000-0000000d0002';
+    const AUTHORISED_INV_ID = '00000000-0000-0000-0000-0000000d0003';
+
+    beforeAll(async () => {
+      await db
+        .insert(invoices)
+        .values([
+          {
+            id: DRAFT_INV_ID,
+            clientId: DEMO_CLIENT_ID,
+            invoiceNumber: 'INV-DRAFT',
+            status: 'draft',
+            total: '999.99',
+            currency: 'GBP',
+            dueDate: new Date('2026-12-01'),
+          },
+          {
+            id: VOIDED_INV_ID,
+            clientId: DEMO_CLIENT_ID,
+            invoiceNumber: 'INV-VOIDED',
+            status: 'voided',
+            total: '555.55',
+            currency: 'GBP',
+            dueDate: new Date('2026-12-01'),
+          },
+          {
+            id: AUTHORISED_INV_ID,
+            clientId: DEMO_CLIENT_ID,
+            invoiceNumber: 'INV-OK',
+            status: 'authorised',
+            total: '111.11',
+            currency: 'GBP',
+            dueDate: new Date('2026-12-01'),
+          },
+        ])
+        .onConflictDoNothing();
+    });
+
+    afterAll(async () => {
+      await db.delete(invoices).where(eq(invoices.id, DRAFT_INV_ID));
+      await db.delete(invoices).where(eq(invoices.id, VOIDED_INV_ID));
+      await db.delete(invoices).where(eq(invoices.id, AUTHORISED_INV_ID));
+    });
+
+    it('portal /invoices excludes draft and voided rows', async () => {
+      const res = await request(app).get('/api/v1/portal/invoices').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+      const numbers = res.body.data.invoices.map((i: { invoiceNumber: string }) => i.invoiceNumber);
+      expect(numbers).toContain('INV-OK');
+      expect(numbers).not.toContain('INV-DRAFT');
+      expect(numbers).not.toContain('INV-VOIDED');
+    });
+
+    it('portal /dashboard outstanding tile excludes the £999 draft + £555 voided', async () => {
+      const res = await request(app).get('/api/v1/portal/dashboard').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+      // Outstanding includes the £111.11 authorised row but neither hidden
+      // status, so the sum must be < 999 + 555 + anything-else-prior. We
+      // assert specifically that £999.99 (draft) is NOT in the total.
+      const outstanding = res.body.data.totalOutstanding as number;
+      expect(outstanding).toBeGreaterThanOrEqual(111.11);
+      expect(outstanding).toBeLessThan(999.99);
+    });
+  });
+
+  // Campaigns in admin-only workflow states (draft/archived/deleted) must
+  // not appear on the portal Campaigns tab — but paused/ended/churned
+  // remain visible so historical leads have a parent campaign in the UI.
+  describe('Campaign visibility — admin-only states hidden', () => {
+    const ACTIVE_CAMP_ID = '00000000-0000-0000-0000-0000000c4001';
+    const DRAFT_CAMP_ID = '00000000-0000-0000-0000-0000000c4002';
+    const ARCHIVED_CAMP_ID = '00000000-0000-0000-0000-0000000c4003';
+    const PAUSED_CAMP_ID = '00000000-0000-0000-0000-0000000c4004';
+
+    const allIds = [ACTIVE_CAMP_ID, DRAFT_CAMP_ID, ARCHIVED_CAMP_ID, PAUSED_CAMP_ID];
+
+    beforeAll(async () => {
+      await db
+        .insert(campaigns)
+        .values([
+          { id: ACTIVE_CAMP_ID, clientId: DEMO_CLIENT_ID, name: 'Active Camp', status: 'active' },
+          { id: DRAFT_CAMP_ID, clientId: DEMO_CLIENT_ID, name: 'Draft Camp', status: 'draft' },
+          { id: ARCHIVED_CAMP_ID, clientId: DEMO_CLIENT_ID, name: 'Archived Camp', status: 'archived' },
+          { id: PAUSED_CAMP_ID, clientId: DEMO_CLIENT_ID, name: 'Paused Camp', status: 'paused' },
+        ])
+        .onConflictDoNothing();
+      // getCampaigns resolves linkage via the client_campaigns junction
+      // (not the legacy campaigns.client_id column) — must seed both for
+      // the rows to show up.
+      await db
+        .insert(clientCampaigns)
+        .values(allIds.map((campaignId) => ({ clientId: DEMO_CLIENT_ID, campaignId })))
+        .onConflictDoNothing();
+    });
+
+    afterAll(async () => {
+      for (const id of allIds) {
+        await db.delete(clientCampaigns).where(eq(clientCampaigns.campaignId, id));
+        await db.delete(campaigns).where(eq(campaigns.id, id));
+      }
+    });
+
+    it('portal /campaigns hides draft + archived but keeps paused', async () => {
+      const res = await request(app).get('/api/v1/portal/campaigns').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+      const names = res.body.data.campaigns.map((c: { name: string }) => c.name);
+      expect(names).toContain('Active Camp');
+      expect(names).toContain('Paused Camp');
+      expect(names).not.toContain('Draft Camp');
+      expect(names).not.toContain('Archived Camp');
+    });
+  });
+
+  // The agreement returned to the portal must be the latest meaningful one —
+  // never a draft, never a cancelled row, and a signed agreement must beat
+  // a more-recently-created draft / pending row.
+  describe('Agreement selection — prefer signed/sent, hide drafts', () => {
+    const SIGNED_AG_ID = '00000000-0000-0000-0000-0000000a5001';
+    const DRAFT_AG_ID = '00000000-0000-0000-0000-0000000a5002';
+    const CANCELLED_AG_ID = '00000000-0000-0000-0000-0000000a5003';
+
+    beforeAll(async () => {
+      // Create a signed row first (older), then a draft (newer) — without
+      // the fix the draft would win on createdAt desc and shadow the signed.
+      const olderDate = new Date(Date.now() - 7 * 86_400_000);
+      const newerDate = new Date();
+      await db
+        .insert(agreements)
+        .values([
+          {
+            id: SIGNED_AG_ID,
+            clientId: DEMO_CLIENT_ID,
+            status: 'signed',
+            signedAt: olderDate,
+            sentAt: olderDate,
+            createdAt: olderDate,
+          },
+          {
+            id: DRAFT_AG_ID,
+            clientId: DEMO_CLIENT_ID,
+            status: 'draft',
+            createdAt: newerDate,
+          },
+          {
+            id: CANCELLED_AG_ID,
+            clientId: DEMO_CLIENT_ID,
+            status: 'cancelled',
+            createdAt: newerDate,
+          },
+        ])
+        .onConflictDoNothing();
+    });
+
+    afterAll(async () => {
+      for (const id of [SIGNED_AG_ID, DRAFT_AG_ID, CANCELLED_AG_ID]) {
+        await db.delete(agreements).where(eq(agreements.id, id));
+      }
+    });
+
+    it('portal /agreement returns the older signed row, not the newer draft', async () => {
+      const res = await request(app).get('/api/v1/portal/agreement').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.agreement).not.toBeNull();
+      expect(res.body.data.agreement.id).toBe(SIGNED_AG_ID);
+      expect(res.body.data.agreement.status).toBe('signed');
+    });
   });
 
   it('client can view portal compliance', async () => {

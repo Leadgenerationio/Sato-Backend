@@ -107,6 +107,23 @@ class PortalAccessError extends Error {
   }
 }
 
+// Statuses that represent internal pre-issue / post-cancel states. The
+// client portal must NEVER see invoices in these states — drafts are
+// pre-authorisation work in progress; voided/deleted are post-cancel
+// records that exist for auditing only. Used by both getDashboard
+// (counts/sums) and getInvoices (table rows).
+const PORTAL_INVOICE_HIDDEN_STATUSES = new Set(['draft', 'voided', 'deleted']);
+
+// Campaigns in these states are admin-only — drafts pre-launch, archived
+// after teardown, deleted soft-deletes. Active/paused/ended/churned all
+// remain visible so the buyer has historical context for past leads.
+const PORTAL_CAMPAIGN_HIDDEN_STATUSES = new Set(['draft', 'archived', 'deleted']);
+
+// Agreements in these states are admin-only workflow rows (drafts being
+// edited, cancelled before send, voided after) — the portal should never
+// surface them as "your agreement".
+const PORTAL_AGREEMENT_HIDDEN_STATUSES = new Set(['draft', 'cancelled', 'voided', 'deleted']);
+
 function requireClientId(requester: AuthPayload): string {
   if (!requester.clientId) {
     throw new PortalAccessError('Portal access requires an authenticated client user');
@@ -182,16 +199,20 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
       .orderBy(leadDeliveries.deliveryDate),
   ]);
 
-  // Pending = anything unpaid that isn't already flagged overdue. Includes
+  // Pending = anything unpaid that the client should be aware of. Includes
   // Xero's 'authorised' state (invoice finalised + sent to customer,
-  // awaiting payment) — previously omitted, which made the count tile
-  // (e.g. "3 pending") disagree with the £ outstanding tile (which sums
-  // everything not paid). Now both line up.
-  const pendingInvoices = invoiceRows.filter(
-    (i) => i.status === 'sent' || i.status === 'draft' || i.status === 'authorised' || i.status === 'submitted',
+  // awaiting payment). Explicitly EXCLUDES 'draft' and 'voided' — those
+  // are internal Stato/Xero workflow states that must never count toward
+  // numbers the client sees (otherwise they'd be chased for something we
+  // haven't actually issued yet).
+  const clientVisibleInvoices = invoiceRows.filter(
+    (i) => !PORTAL_INVOICE_HIDDEN_STATUSES.has((i.status ?? '').toLowerCase()),
+  );
+  const pendingInvoices = clientVisibleInvoices.filter(
+    (i) => i.status === 'sent' || i.status === 'authorised' || i.status === 'submitted',
   ).length;
-  const overdueInvoices = invoiceRows.filter((i) => i.status === 'overdue').length;
-  const totalOutstanding = invoiceRows
+  const overdueInvoices = clientVisibleInvoices.filter((i) => i.status === 'overdue').length;
+  const totalOutstanding = clientVisibleInvoices
     .filter((i) => i.status !== 'paid')
     .reduce((sum, i) => sum + Number(i.total ?? 0), 0);
 
@@ -231,10 +252,18 @@ export async function getCampaigns(requester: AuthPayload): Promise<PortalCampai
   const linkedCampaignIds = await campaignIdsForClient(clientId);
   if (linkedCampaignIds.length === 0) return [];
 
-  const rows = await db
+  const rawRows = await db
     .select()
     .from(campaigns)
     .where(inArray(campaigns.id, linkedCampaignIds));
+
+  // Hide admin-only workflow rows (draft/archived/deleted). The dashboard
+  // already filters its "Active Campaigns" count to status='active' only;
+  // here we keep paused/ended/churned visible so historical leads in the
+  // Leads tab don't appear to come from a campaign that doesn't exist.
+  const rows = rawRows.filter(
+    (r) => !PORTAL_CAMPAIGN_HIDDEN_STATUSES.has((r.status ?? 'active').toLowerCase()),
+  );
 
   if (rows.length === 0) return [];
 
@@ -364,16 +393,18 @@ export async function getInvoices(requester: AuthPayload): Promise<PortalInvoice
     .where(eq(invoices.clientId, clientId))
     .orderBy(desc(invoices.createdAt));
 
-  return rows.map((r) => ({
-    id: r.id,
-    invoiceNumber: r.invoiceNumber ?? '',
-    status: r.status ?? 'draft',
-    total: Number(r.total ?? 0),
-    currency: r.currency ?? 'GBP',
-    dueDate: (r.dueDate ?? new Date()).toISOString(),
-    paidDate: r.paidDate ? r.paidDate.toISOString() : null,
-    daysOverdue: r.daysOverdue ?? 0,
-  }));
+  return rows
+    .filter((r) => !PORTAL_INVOICE_HIDDEN_STATUSES.has((r.status ?? 'draft').toLowerCase()))
+    .map((r) => ({
+      id: r.id,
+      invoiceNumber: r.invoiceNumber ?? '',
+      status: r.status ?? 'authorised',
+      total: Number(r.total ?? 0),
+      currency: r.currency ?? 'GBP',
+      dueDate: (r.dueDate ?? new Date()).toISOString(),
+      paidDate: r.paidDate ? r.paidDate.toISOString() : null,
+      daysOverdue: r.daysOverdue ?? 0,
+    }));
 }
 
 export async function getCompliance(requester: AuthPayload): Promise<PortalCompliance[]> {
@@ -394,7 +425,10 @@ export async function getCompliance(requester: AuthPayload): Promise<PortalCompl
     db
       .select()
       .from(creatives)
-      .where(sql`${creatives.campaignId} IN (${sql.join(campaignIds.map((id) => sql`${id}::uuid`), sql`, `)})`),
+      .where(and(
+        sql`${creatives.campaignId} IN (${sql.join(campaignIds.map((id) => sql`${id}::uuid`), sql`, `)})`,
+        eq(creatives.isDeleted, false),
+      )),
     db
       .select()
       .from(landingPages)
@@ -523,14 +557,32 @@ export async function getAgreement(requester: AuthPayload): Promise<PortalAgreem
   const clientId = requireClientId(requester);
   const client = await loadClientOrThrow(clientId);
 
-  const [row] = await db
+  const rawRows = await db
     .select()
     .from(agreements)
     .where(eq(agreements.clientId, clientId))
-    .orderBy(desc(agreements.createdAt))
-    .limit(1);
+    .orderBy(desc(agreements.createdAt));
 
-  if (!row) return null;
+  // Hide internal workflow rows (draft/cancelled/voided/deleted) — the
+  // client should never see "draft" presented as their agreement. Among
+  // what remains we prefer most-progressed (signed → sent → pending) so a
+  // newer draft can never shadow a previously-sent or previously-signed
+  // agreement once the draft filter is in place.
+  const visibleRows = rawRows.filter(
+    (r) => !PORTAL_AGREEMENT_HIDDEN_STATUSES.has((r.status ?? 'pending').toLowerCase()),
+  );
+  if (visibleRows.length === 0) return null;
+
+  const progressRank = (r: typeof visibleRows[number]): number =>
+    r.signedAt ? 2 : r.sentAt ? 1 : 0;
+  visibleRows.sort((a, b) => {
+    const rankDiff = progressRank(b) - progressRank(a);
+    if (rankDiff !== 0) return rankDiff;
+    const aCreated = a.createdAt?.getTime() ?? 0;
+    const bCreated = b.createdAt?.getTime() ?? 0;
+    return bCreated - aCreated;
+  });
+  const row = visibleRows[0];
 
   const status: PortalAgreement['status'] =
     row.signedAt ? 'signed' : row.sentAt ? 'sent' : 'pending';
