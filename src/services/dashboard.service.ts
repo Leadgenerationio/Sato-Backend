@@ -2,6 +2,7 @@ import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { campaigns } from '../db/schema/campaigns.js';
+import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { clients } from '../db/schema/clients.js';
 import { invoices } from '../db/schema/invoices.js';
 import { agreements } from '../db/schema/agreements.js';
@@ -175,16 +176,47 @@ export async function getRecentActivity(_requester: AuthPayload, limit = 10): Pr
 }
 
 export interface DashboardStats {
+  /**
+   * All-time paid-invoice total (Xero). Stays as the lifetime headline so
+   * Sam's mental model "this is what I've billed clients" is unchanged.
+   */
   totalRevenue: number;
+  /**
+   * Last-30-day ad_spend (Catchr). Renamed from "Total Cost" in the FE
+   * because Catchr only has ~2 months of history; comparing lifetime cost
+   * vs lifetime revenue gave a misleading negative Net Profit.
+   */
   totalCost: number;
+  /**
+   * Period-coherent profit: thisMonthRevenue − thisMonthCost. Was previously
+   * (lifetime revenue − lifetime cost) which mixed 12 months of revenue with
+   * 2 months of cost and produced a meaningless negative number.
+   */
   netProfit: number;
+  /** thisMonthNetProfit / thisMonthRevenue × 100. Null when no this-month revenue. */
   profitMargin: number;
   activeClients: number;
+  /** Total campaigns with status='active' (regardless of client linkage). */
   activeCampaigns: number;
+  /**
+   * Campaigns that have at least one client_campaigns row — i.e. the ones
+   * whose daily leads/revenue land in lead_deliveries and contribute to the
+   * "Leads This Month" / per-client P&L numbers. Was previously absent;
+   * "28 active campaigns" alongside "2,456 tracked leads" was confusing
+   * because 26 of those campaigns are orphan LeadByte imports.
+   */
+  linkedCampaigns: number;
+  /** sum(lead_count) for lead_deliveries in current month — tracked-to-Stato-client only. */
   leadsThisMonth: number;
   // Period-over-period deltas. Null when there's no prior-period baseline
   // to compare against (e.g. brand-new account, or last month had zero).
   // Frontend hides the trend chip when null.
+  /**
+   * (thisMonthRevenue − lastMonthRevenue) / lastMonthRevenue × 100.
+   * Was previously (totalRevenue − lastMonthRevenue) / lastMonthRevenue which
+   * compared 12-month total against 1-month figure and produced bogus +500%+
+   * deltas.
+   */
   revenueChange: number | null;
   leadsChange: number | null;
   /** ISO timestamp the stats were computed. Useful for "as of" labelling on the FE. */
@@ -216,22 +248,25 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
   const lastMonthEnd = monthStart; // exclusive end
 
   const [
-    revenueRow, costRow, clientsRow, campaignsRow, leadsRow,
-    lastMonthRevenueRow, lastMonthLeadsRow,
+    totalRevenueRow, thisMonthCostRow, clientsRow, campaignsRow, linkedCampaignsRow, thisMonthLeadsRow,
+    thisMonthRevenueRow, lastMonthRevenueRow, lastMonthLeadsRow,
   ] = await Promise.all([
-    // Revenue: sum of paid invoices, all-time.
+    // Headline number: sum of paid invoices, all-time. Stays as the lifetime
+    // total in the "Total Revenue" card so the headline matches Xero's
+    // running tally exactly.
     db
       .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
       .from(invoices)
       .where(eq(invoices.status, 'paid')),
-    // Cost: sum of Catchr ad-spend rows, all-time. Was reading
-    // `lead_deliveries.cost` which is never populated — every row was £0
-    // so Net Profit always equalled Revenue (100% margin, which Sam called
-    // out as wrong). `ad_spend.spend` is the live Catchr feed (TikTok +
-    // Facebook + Google) and gives the real cost-of-leads number.
+    // Cost shown on the dashboard = THIS MONTH's ad-spend only. Catchr only
+    // has ~2 months of history, so lifetime ad_spend (£762k) compared to
+    // lifetime revenue (£734k from 12 months) gave a meaningless negative
+    // Net Profit. Restricting to current month makes the comparison
+    // period-coherent with thisMonthRevenue.
     db
       .select({ cost: sql<string>`coalesce(sum(${adSpend.spend}), 0)::text` })
-      .from(adSpend),
+      .from(adSpend)
+      .where(gte(adSpend.date, monthStart)),
     // Active clients: status IN ('active', 'onboarding'). 'onboarding'
     // clients (e.g. UKESN, Benson Goldstein) are real clients being set
     // up — they ship leads and have signed/sent agreements. Excluding
@@ -240,16 +275,32 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
       .select({ n: sql<number>`count(*)::int` })
       .from(clients)
       .where(inArray(clients.status, ['active', 'onboarding'])),
-    // Active campaigns: status='active'.
+    // Active campaigns: status='active' (regardless of client linkage).
     db
       .select({ n: sql<number>`count(*)::int` })
       .from(campaigns)
+      .where(eq(campaigns.status, 'active')),
+    // Linked campaigns: status='active' AND at least one client_campaigns
+    // row. Surfaces the gap between "campaigns Sam runs on LeadByte" (28)
+    // vs "campaigns whose leads + revenue flow into Stato per-client P&L"
+    // (2) — without this number the dashboard implied "28 campaigns but
+    // only 2,456 leads" looked like an attribution failure.
+    db
+      .select({ n: sql<number>`count(distinct ${campaigns.id})::int` })
+      .from(campaigns)
+      .innerJoin(clientCampaigns, eq(clientCampaigns.campaignId, campaigns.id))
       .where(eq(campaigns.status, 'active')),
     // Leads this month: sum of leadCount on deliveries from start of month.
     db
       .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
       .from(leadDeliveries)
       .where(gte(leadDeliveries.deliveryDate, monthStart)),
+    // This-month revenue: paid invoices with due_date in current calendar
+    // month — same shape as last-month, so revenueChange compares like-for-like.
+    db
+      .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
+      .from(invoices)
+      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= ${monthStart}::date`),
     // Last month revenue: paid invoices with due_date in last calendar
     // month. Was filtering by `createdAt` but every paid invoice's
     // created_at = Xero sync time (May 2026), so the last-month bucket
@@ -265,20 +316,26 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
       .where(sql`${leadDeliveries.deliveryDate} >= ${lastMonthStart}::date AND ${leadDeliveries.deliveryDate} < ${lastMonthEnd}::date`),
   ]);
 
-  const totalRevenue = Number(revenueRow[0]?.revenue ?? '0');
-  const totalCost = Number(costRow[0]?.cost ?? '0');
-  const netProfit = totalRevenue - totalCost;
-  const profitMargin = totalRevenue > 0
-    ? Math.round((netProfit / totalRevenue) * 1000) / 10
+  // Headline (all-time) revenue.
+  const totalRevenue = Number(totalRevenueRow[0]?.revenue ?? '0');
+  // Period-coherent (this month) numbers used for Net Profit / Margin / trend.
+  const thisMonthRevenue = Number(thisMonthRevenueRow[0]?.revenue ?? '0');
+  const thisMonthCost = Number(thisMonthCostRow[0]?.cost ?? '0');
+  const netProfit = thisMonthRevenue - thisMonthCost;
+  const profitMargin = thisMonthRevenue > 0
+    ? Math.round((netProfit / thisMonthRevenue) * 1000) / 10
     : 0;
 
   // Period-over-period deltas. Only compute when last month had a non-zero
   // baseline — avoids dividing by zero and showing nonsensical "+∞%" chips.
+  // Compare LIKE-FOR-LIKE: this-month revenue vs last-month revenue. The
+  // previous formula used totalRevenue (lifetime) which always blew the chip
+  // out to +500-1000%.
   const lastMonthRevenue = Number(lastMonthRevenueRow[0]?.revenue ?? '0');
   const lastMonthLeads = lastMonthLeadsRow[0]?.leads ?? 0;
-  const thisMonthLeads = leadsRow[0]?.leads ?? 0;
+  const thisMonthLeads = thisMonthLeadsRow[0]?.leads ?? 0;
   const revenueChange = lastMonthRevenue > 0
-    ? Math.round(((totalRevenue - lastMonthRevenue) / lastMonthRevenue) * 1000) / 10
+    ? Math.round(((thisMonthRevenue - lastMonthRevenue) / lastMonthRevenue) * 1000) / 10
     : null;
   const leadsChange = lastMonthLeads > 0
     ? Math.round(((thisMonthLeads - lastMonthLeads) / lastMonthLeads) * 1000) / 10
@@ -286,11 +343,12 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
 
   return {
     totalRevenue: Math.round(totalRevenue * 100) / 100,
-    totalCost: Math.round(totalCost * 100) / 100,
+    totalCost: Math.round(thisMonthCost * 100) / 100,
     netProfit: Math.round(netProfit * 100) / 100,
     profitMargin,
     activeClients: clientsRow[0]?.n ?? 0,
     activeCampaigns: campaignsRow[0]?.n ?? 0,
+    linkedCampaigns: linkedCampaignsRow[0]?.n ?? 0,
     leadsThisMonth: thisMonthLeads,
     revenueChange,
     leadsChange,
