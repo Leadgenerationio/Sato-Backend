@@ -203,6 +203,8 @@ async function buildClientDetail(
           to: rollup.contactEmail,
           subject: `Invoice ${invoice.invoiceNumber} — week of ${ctx.periodFrom}`,
           html: `<p>Hi ${rollup.clientName},</p><p>Your weekly invoice is ready: <strong>${invoice.invoiceNumber}</strong> for ${rollup.validLeadCount} leads delivered ${ctx.periodFrom}–${ctx.periodTo}. Total: ${rollup.currency} ${amount.toFixed(2)}.</p>`,
+          // Have the worker log this outbound to client_emails + activity feed.
+          clientId: rollup.clientId,
         } satisfies ResendSendRequest);
       } catch (err) {
         logger.warn({ err, invoiceId: invoice.id }, 'Auto-invoice email enqueue failed (invoice still created)');

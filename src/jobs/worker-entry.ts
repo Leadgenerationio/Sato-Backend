@@ -19,6 +19,7 @@ import { pollOnce as pollAlertSms } from '../services/alert-sms.service.js';
 import { syncAllClientsAcrossBusinesses } from '../services/global-invoice-sync.service.js';
 import { sendEmail } from '../integrations/resend/resend-client.js';
 import type { ResendSendRequest } from '../integrations/resend/resend-types.js';
+import * as clientEmailsService from '../services/client-emails.service.js';
 import { emailQueue } from './queue.js';
 import * as invoiceService from '../services/invoice.service.js';
 import { runAutoInvoiceAllBusinesses } from '../services/auto-invoice.service.js';
@@ -70,7 +71,21 @@ new Worker('email', async (job) => {
   switch (job.name) {
     case 'send-email': {
       const req = job.data as ResendSendRequest;
-      return sendEmail(req);
+      const result = await sendEmail(req);
+      // L #33 — log outbound to client_emails + activity feed so the
+      // client's email thread isn't empty after agreement / invoice /
+      // chase emails go out. Best-effort: a logging failure must not
+      // bubble up and break the worker job (which would retry the send).
+      if (req.clientId) {
+        const toStr = Array.isArray(req.to) ? req.to.join(', ') : req.to;
+        await clientEmailsService.recordOutboundEmail(req.clientId, {
+          subject: req.subject,
+          body: req.text ?? req.html,
+          toAddress: toStr,
+          messageId: result?.id,
+        });
+      }
+      return result;
     }
     default:
       logger.warn({ jobId: job.id, name: job.name }, 'Unknown email job — ignoring');
@@ -92,6 +107,7 @@ new Worker('invoice', async (job) => {
           to: `billing+${inv.clientId}@stato.local`,
           subject: `Invoice ${inv.invoiceNumber} overdue`,
           html: `<p>Invoice ${inv.invoiceNumber} for ${inv.clientName} is ${inv.daysOverdue} days overdue (${inv.currency} ${inv.total}).</p>`,
+          clientId: inv.clientId,
         } satisfies ResendSendRequest);
         enqueued++;
       }

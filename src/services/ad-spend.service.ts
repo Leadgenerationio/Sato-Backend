@@ -18,8 +18,45 @@ export interface AdSpendSyncResult {
   accountsSynced: number;
   rowsWritten: number;
   skippedPlatforms: string[];
+  skippedDeadAccounts: number;
   errors: Array<{ platform: string; accountId: string; message: string }>;
   error?: string;
+}
+
+/**
+ * In-process cache of accounts that returned permanent-failure errors
+ * (CUSTOMER_NOT_ENABLED, INVALID_CUSTOMER_ID, etc.) on a prior account-sync
+ * attempt this process. We skip them for the rest of the worker lifetime
+ * so 69 disabled GAds customers don't keep wasting ~140s/sync and flooding
+ * the log. The cache resets on every Railway deploy, so newly-re-enabled
+ * accounts re-attempt within a few hours.
+ */
+const KNOWN_DEAD_ACCOUNTS = new Set<string>();
+
+/**
+ * Catchr surfaces underlying provider errors verbatim in the `err.message`.
+ * These patterns are permanent on a per-account basis — retrying just wastes
+ * a round-trip. Detect them so we can demote the log + memoize the account.
+ */
+const DEAD_ACCOUNT_PATTERNS: ReadonlyArray<RegExp> = [
+  /CUSTOMER_NOT_ENABLED/,
+  /INVALID_CUSTOMER_ID/,
+  /USER_PERMISSION_DENIED/,
+  /AUTHENTICATION_ERROR/,
+  /AUTHORIZATION_ERROR/,
+];
+
+function isDeadAccountError(message: string): boolean {
+  return DEAD_ACCOUNT_PATTERNS.some((re) => re.test(message));
+}
+
+function deadAccountKey(platform: string, accountId: string): string {
+  return `${platform}|${accountId}`;
+}
+
+/** Test-only hook — clears the in-process dead-account cache between tests. */
+export function __resetDeadAccountCacheForTests(): void {
+  KNOWN_DEAD_ACCOUNTS.clear();
 }
 
 export interface AdSpendFilters {
@@ -73,6 +110,7 @@ export async function syncAll(deps?: { db?: typeof db }): Promise<AdSpendSyncRes
     accountsSynced: 0,
     rowsWritten: 0,
     skippedPlatforms: [],
+    skippedDeadAccounts: 0,
     errors: [],
   };
 
@@ -120,6 +158,12 @@ export async function syncAll(deps?: { db?: typeof db }): Promise<AdSpendSyncRes
 
     const accounts = source.available_accounts ?? [];
     for (const acc of accounts) {
+      // Skip accounts we already know are dead-on-arrival (CUSTOMER_NOT_ENABLED
+      // etc) this process. Saves ~2s per skipped account and de-noises logs.
+      if (KNOWN_DEAD_ACCOUNTS.has(deadAccountKey(source.platform, acc.id))) {
+        result.skippedDeadAccounts++;
+        continue;
+      }
       try {
         const resp = await runApiRequest({
           platform: source.platform,
@@ -189,12 +233,24 @@ export async function syncAll(deps?: { db?: typeof db }): Promise<AdSpendSyncRes
           result.rowsWritten += inserts.length;
         }
       } catch (err) {
+        const message = (err as Error).message ?? String(err);
         result.errors.push({
           platform: source.platform,
           accountId: acc.id,
-          message: (err as Error).message,
+          message,
         });
-        logger.error({ platform: source.platform, accountId: acc.id, err }, 'Catchr: account sync failed');
+        if (isDeadAccountError(message)) {
+          // Memoize so we don't waste another ~2s/sync hitting this account
+          // until the worker restarts. Demote to a single info-level log per
+          // account per process so the error stream stays usable.
+          KNOWN_DEAD_ACCOUNTS.add(deadAccountKey(source.platform, acc.id));
+          logger.info(
+            { platform: source.platform, accountId: acc.id, accountName: acc.name },
+            'Catchr: account permanently disabled (CUSTOMER_NOT_ENABLED / auth error) — adding to in-process skip list',
+          );
+        } else {
+          logger.error({ platform: source.platform, accountId: acc.id, err }, 'Catchr: account sync failed');
+        }
       }
     }
   }
