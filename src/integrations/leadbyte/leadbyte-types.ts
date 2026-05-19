@@ -59,6 +59,12 @@ export interface LeadByteLeadActivityRow {
 /** One row from `GET /reports/campaign`. */
 export interface LeadByteCampaignReportRow {
   campaign: string;
+  /**
+   * Preserved from the raw `{id, name}` ref so callers that need to match
+   * by LeadByte campaign id (e.g. the daily lead_deliveries pro-rater)
+   * don't have to rely on name equality.
+   */
+  campaignId?: string;
   leads: number;
   valid: number;
   invalid: number;

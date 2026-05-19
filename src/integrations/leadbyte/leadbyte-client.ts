@@ -506,12 +506,58 @@ export async function getCampaignReport(window: DeliveryWindow): Promise<LeadByt
     ...windowToQuery(window),
   });
   return unwrapReport<LeadByteCampaignReportRow & { campaign: unknown }>(res).map(
-    (r): LeadByteCampaignReportRow => ({
-      ...r,
-      campaign: flatRef(r.campaign),
-      currency: toIsoCurrency(r.currency as string | undefined),
-    }),
+    (r): LeadByteCampaignReportRow => {
+      // Only emit campaignId when the raw ref was an object with an id —
+      // refId() would otherwise return the string itself for flat-string
+      // refs ("Solar Panels"), which is not a LeadByte numeric id.
+      const rawCampaign = r.campaign;
+      const campaignId =
+        typeof rawCampaign === 'object' &&
+        rawCampaign !== null &&
+        'id' in rawCampaign &&
+        (typeof (rawCampaign as { id: unknown }).id === 'string' ||
+          typeof (rawCampaign as { id: unknown }).id === 'number')
+          ? String((rawCampaign as { id: string | number }).id)
+          : undefined;
+      return {
+        ...r,
+        campaign: flatRef(rawCampaign),
+        campaignId,
+        currency: toIsoCurrency(r.currency as string | undefined),
+      };
+    },
   );
+}
+
+/**
+ * Pro-rate windowed campaign totals (revenue + payout/cost) across daily
+ * lead counts. LeadByte's `/reports/leadactivity` only returns per-day
+ * COUNTS, while `/reports/campaign` returns aggregated REVENUE + PAYOUT
+ * for the whole window. To get per-day money we spread the aggregate
+ * proportionally by leadCount.
+ *
+ * Returns `{ revenue: 0, cost: 0 }` when totals.leads is zero (or NaN)
+ * to avoid divide-by-zero — the day will still be written with its lead
+ * count, just without money attribution.
+ *
+ * Exported for unit testing.
+ */
+export function proRateDailyMoney(args: {
+  leadCount: number;
+  totalLeads: number;
+  totalRevenue: number;
+  totalPayout: number;
+}): { revenue: number; cost: number } {
+  const { leadCount, totalLeads, totalRevenue, totalPayout } = args;
+  if (!Number.isFinite(totalLeads) || totalLeads <= 0 || leadCount <= 0) {
+    return { revenue: 0, cost: 0 };
+  }
+  const revPerLead = (Number.isFinite(totalRevenue) ? totalRevenue : 0) / totalLeads;
+  const costPerLead = (Number.isFinite(totalPayout) ? totalPayout : 0) / totalLeads;
+  return {
+    revenue: Math.round(leadCount * revPerLead * 100) / 100,
+    cost: Math.round(leadCount * costPerLead * 100) / 100,
+  };
 }
 
 function windowFactor(win: DeliveryWindow): number {
@@ -1229,6 +1275,38 @@ async function populateLeadDeliveries(deps: {
     byCampaign.set(l.campaignId, entry);
   }
 
+  // Fetch campaign totals (revenue + payout) per window ONCE for all campaigns.
+  // /reports/leadactivity gives daily lead counts but no money; /reports/campaign
+  // gives windowed money totals. We pro-rate the windowed money by daily lead
+  // count below. Cached at the report level via the prewarm worker.
+  type CampaignTotals = { revenue: number; payout: number; leads: number };
+  const buildTotalsMap = (rows: LeadByteCampaignReportRow[]): Map<string, CampaignTotals> => {
+    const m = new Map<string, CampaignTotals>();
+    for (const r of rows) {
+      if (!r.campaignId) continue;
+      m.set(r.campaignId, { revenue: r.revenue ?? 0, payout: r.payout ?? 0, leads: r.leads ?? 0 });
+    }
+    return m;
+  };
+  const [lastMonthReport, thisMonthReport] = await Promise.all([
+    getCampaignReport('last_month').catch((err) => {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'lead_deliveries: getCampaignReport(last_month) failed — money fields will be 0',
+      );
+      return [] as LeadByteCampaignReportRow[];
+    }),
+    getCampaignReport('this_month').catch((err) => {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'lead_deliveries: getCampaignReport(this_month) failed — money fields will be 0',
+      );
+      return [] as LeadByteCampaignReportRow[];
+    }),
+  ]);
+  const lastMonthTotals = buildTotalsMap(lastMonthReport);
+  const thisMonthTotals = buildTotalsMap(thisMonthReport);
+
   let rowsUpserted = 0;
   let campaignsSkipped = 0;
 
@@ -1250,18 +1328,23 @@ async function populateLeadDeliveries(deps: {
     }
 
     const clientId = entry.clientIds[0];
-    let dailyRows: LeadByteDeliveryReport[];
+    type DailyRowWithWindow = LeadByteDeliveryReport & { window: 'last_month' | 'this_month' };
+    let dailyRows: DailyRowWithWindow[];
     try {
       // /reports/leadactivity silently returns 0 rows when fed an arbitrary
       // from/to range (the number-of-days overload); only named windows
       // actually pull data. Pull last_month + this_month so we cover the
       // dashboard's "leads this month" + "leads last month" KPIs in full.
-      // Idempotent upsert below dedupes overlap.
+      // Idempotent upsert below dedupes overlap. Tag each row with its
+      // source window so we pick the right totals map for pro-ration.
       const [lastMonth, thisMonth] = await Promise.all([
         getDeliveryReports(entry.leadbyteCampaignId, 'last_month'),
         getDeliveryReports(entry.leadbyteCampaignId, 'this_month'),
       ]);
-      dailyRows = [...lastMonth, ...thisMonth];
+      dailyRows = [
+        ...lastMonth.map((r): DailyRowWithWindow => ({ ...r, window: 'last_month' })),
+        ...thisMonth.map((r): DailyRowWithWindow => ({ ...r, window: 'this_month' })),
+      ];
     } catch (err) {
       logger.warn(
         { campaignId: entry.campaignId, err: err instanceof Error ? err.message : String(err) },
@@ -1270,8 +1353,34 @@ async function populateLeadDeliveries(deps: {
       continue;
     }
 
+    // Per-window leadCount totals from the daily activity report. We pro-rate
+    // money against *these* (the same source that produces our daily rows)
+    // rather than the /reports/campaign `leads` field — the two can drift
+    // for invalid/rejected splits and we want £ to add up to the windowed
+    // total when summed across days.
+    const dailyLeadSumByWindow: Record<'last_month' | 'this_month', number> = {
+      last_month: dailyRows
+        .filter((r) => r.window === 'last_month')
+        .reduce((s, r) => s + (r.leadCount ?? 0), 0),
+      this_month: dailyRows
+        .filter((r) => r.window === 'this_month')
+        .reduce((s, r) => s + (r.leadCount ?? 0), 0),
+    };
+
     for (const row of dailyRows) {
       if (!row.date || row.leadCount <= 0) continue;
+      const windowTotals =
+        row.window === 'last_month'
+          ? lastMonthTotals.get(entry.leadbyteCampaignId)
+          : thisMonthTotals.get(entry.leadbyteCampaignId);
+      const dailyLeadSum = dailyLeadSumByWindow[row.window];
+      const { revenue, cost } = proRateDailyMoney({
+        leadCount: row.leadCount,
+        totalLeads: dailyLeadSum,
+        totalRevenue: windowTotals?.revenue ?? 0,
+        totalPayout: windowTotals?.payout ?? 0,
+      });
+
       const upserted = await deps.db
         .insert(deps.leadDeliveries)
         .values({
@@ -1281,6 +1390,8 @@ async function populateLeadDeliveries(deps: {
           leadCount: row.leadCount,
           validLeadCount: row.validLeads,
           invalidLeadCount: row.invalidLeads,
+          revenue: revenue.toFixed(2),
+          cost: cost.toFixed(2),
           leadbyteReportId: row.reportId,
           source: 'leadbyte',
         })
@@ -1290,6 +1401,8 @@ async function populateLeadDeliveries(deps: {
             leadCount: row.leadCount,
             validLeadCount: row.validLeads,
             invalidLeadCount: row.invalidLeads,
+            revenue: revenue.toFixed(2),
+            cost: cost.toFixed(2),
             leadbyteReportId: row.reportId,
           },
         })

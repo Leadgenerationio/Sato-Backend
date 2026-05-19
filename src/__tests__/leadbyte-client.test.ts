@@ -457,6 +457,37 @@ describe('LeadByte client — API calls (fetch mocked)', () => {
     expect(rows[0].currency).toBe('GBP');
     expect(rows[0].leads).toBe(23);
     expect(rows[0].revenue).toBe(105);
+    // Preserves the raw `{id}` ref so the daily lead_deliveries pro-rater
+    // can match by LeadByte campaign id without relying on name equality.
+    expect(rows[0].campaignId).toBe('85');
+  });
+
+  it('getCampaignReport leaves campaignId undefined when the raw ref has no id', async () => {
+    fetchMock.mockResolvedValue(
+      mockJsonResponse({
+        status: 'Success',
+        data: [
+          {
+            campaign: 'Conservatory Upgrades',
+            leads: 10,
+            valid: 10,
+            invalid: 0,
+            pending: 0,
+            rejections: 0,
+            payable: 10,
+            sold: 10,
+            returns: 0,
+            payout: 0,
+            revenue: 50,
+            profit: 50,
+            currency: 'GBP',
+          },
+        ],
+      }),
+    );
+    const rows = await lb.getCampaignReport('last_month');
+    expect(rows[0].campaign).toBe('Conservatory Upgrades');
+    expect(rows[0].campaignId).toBeUndefined();
   });
 
   it('getSupplierSpend handles `data` shape with object campaign+supplier refs', async () => {
@@ -815,7 +846,51 @@ describe('LeadByte client — syncAll()', () => {
           ],
         }),
       )
-      // Piece 3 now fetches BOTH last_month and this_month per campaign.
+      // Piece 3 money fix: /reports/campaign for last_month + this_month
+      // (windowed revenue/payout totals to pro-rate across daily lead counts).
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          data: [
+            {
+              campaign: { id: 'lb-camp-1', name: 'Solar Panels' },
+              leads: 5,
+              valid: 5,
+              invalid: 0,
+              pending: 0,
+              rejections: 0,
+              payable: 5,
+              sold: 5,
+              returns: 0,
+              payout: 40,
+              revenue: 100,
+              profit: 60,
+              currency: 'GBP',
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          data: [
+            {
+              campaign: { id: 'lb-camp-1', name: 'Solar Panels' },
+              leads: 20,
+              valid: 20,
+              invalid: 0,
+              pending: 0,
+              rejections: 0,
+              payable: 20,
+              sold: 20,
+              returns: 0,
+              payout: 80,
+              revenue: 200,
+              profit: 120,
+              currency: 'GBP',
+            },
+          ],
+        }),
+      )
+      // Piece 3 fetches BOTH last_month and this_month per campaign.
       .mockResolvedValueOnce(
         mockJsonResponse({
           report: [{ date: '2026-04-15', count: 5 }],
@@ -899,24 +974,36 @@ describe('LeadByte client — syncAll()', () => {
 
     expect(result.deliveriesUpserted).toBe(3);
     expect(result.deliveryCampaignsSkipped).toBe(0);
+    // Money fix: revenue + cost are pro-rated from /reports/campaign totals.
+    //   last_month  → 5 leads in the window, £100 revenue / £40 payout → all
+    //                 attributed to the single day (5/5 of each): £100 / £40
+    //   this_month  → 20 leads, £200 revenue / £80 payout
+    //                 day 5/15 (8 leads): 8/20 × £200 = £80; 8/20 × £80 = £32
+    //                 day 5/16 (12 leads): 12/20 × £200 = £120; 12/20 × £80 = £48
     expect(upsertedDeliveries).toEqual([
       expect.objectContaining({
         campaignId: 'stato-camp-1',
         clientId: 'sato-client-1',
         deliveryDate: '2026-04-15',
         leadCount: 5,
+        revenue: '100.00',
+        cost: '40.00',
       }),
       expect.objectContaining({
         campaignId: 'stato-camp-1',
         clientId: 'sato-client-1',
         deliveryDate: '2026-05-15',
         leadCount: 8,
+        revenue: '80.00',
+        cost: '32.00',
       }),
       expect.objectContaining({
         campaignId: 'stato-camp-1',
         clientId: 'sato-client-1',
         deliveryDate: '2026-05-16',
         leadCount: 12,
+        revenue: '120.00',
+        cost: '48.00',
       }),
     ]);
   });
@@ -1194,5 +1281,54 @@ describe('LeadByte client — discoverClientCampaignLinks name-suffix tolerance'
 
     expect(result.campaignLinksCreated).toBe(1);
     expect(insertedLinks).toEqual([{ clientId: 'sato-client-1', campaignId: 'stato-camp-1' }]);
+  });
+});
+
+// ─── Pro-ration math for lead_deliveries.revenue/cost (Piece 3 money fix) ─────
+
+describe('LeadByte client — proRateDailyMoney', () => {
+  it('spreads windowed revenue/payout proportionally across daily lead counts', () => {
+    // 100 leads over the window → £1000 revenue / £400 payout.
+    // A day with 25 leads gets 25/100 of each.
+    expect(
+      lb.proRateDailyMoney({ leadCount: 25, totalLeads: 100, totalRevenue: 1000, totalPayout: 400 }),
+    ).toEqual({ revenue: 250, cost: 100 });
+  });
+
+  it('rounds to 2 decimal places (banker-free, half-away-from-zero via Math.round)', () => {
+    // 33 leads × (100 / 100) → 33, but 1 lead × (100 / 3) → 33.333… → 33.33
+    expect(
+      lb.proRateDailyMoney({ leadCount: 1, totalLeads: 3, totalRevenue: 100, totalPayout: 50 }),
+    ).toEqual({ revenue: 33.33, cost: 16.67 });
+  });
+
+  it('returns zeros when totalLeads is 0 (avoid divide-by-zero)', () => {
+    expect(
+      lb.proRateDailyMoney({ leadCount: 5, totalLeads: 0, totalRevenue: 999, totalPayout: 999 }),
+    ).toEqual({ revenue: 0, cost: 0 });
+  });
+
+  it('returns zeros when leadCount is 0 (no attribution for blank day)', () => {
+    expect(
+      lb.proRateDailyMoney({ leadCount: 0, totalLeads: 100, totalRevenue: 1000, totalPayout: 400 }),
+    ).toEqual({ revenue: 0, cost: 0 });
+  });
+
+  it('survives NaN/Infinity in totals without producing garbage rows', () => {
+    expect(
+      lb.proRateDailyMoney({
+        leadCount: 10,
+        totalLeads: 50,
+        totalRevenue: Number.NaN,
+        totalPayout: Number.POSITIVE_INFINITY,
+      }),
+    ).toEqual({ revenue: 0, cost: 0 });
+  });
+
+  it('preserves cost when revenue is missing (and vice versa)', () => {
+    // Some windows have payout populated but no buyer revenue logged yet.
+    expect(
+      lb.proRateDailyMoney({ leadCount: 10, totalLeads: 100, totalRevenue: 0, totalPayout: 250 }),
+    ).toEqual({ revenue: 0, cost: 25 });
   });
 });
