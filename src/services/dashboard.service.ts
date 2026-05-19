@@ -9,6 +9,10 @@ import { agreements } from '../db/schema/agreements.js';
 import { creditChecks } from '../db/schema/credit-checks.js';
 import { adSpend } from '../db/schema/ad-spend.js';
 import type { AuthPayload } from '../types/index.js';
+import {
+  resolveDashboardWindow,
+  type DashboardWindow,
+} from '../utils/dashboard-window.js';
 
 export interface LeadsByDayPoint {
   /** Short weekday label, e.g. "Mon". */
@@ -217,8 +221,20 @@ export interface DashboardStats {
    * because 26 of those campaigns are orphan LeadByte imports.
    */
   linkedCampaigns: number;
-  /** sum(lead_count) for lead_deliveries in current month — tracked-to-Stato-client only. */
+  /**
+   * sum(lead_count) for lead_deliveries in the selected window (default: current
+   * calendar month if no `?window=` param was supplied). Tracked-to-Stato-client
+   * only — orphan campaigns aren't in lead_deliveries.
+   */
   leadsThisMonth: number;
+  /**
+   * Echoes the window key the BE used to compute leadsThisMonth + leadsChange,
+   * so the FE can label the tile correctly ("Leads (Last 90 days)" etc.).
+   * Always present even when no `?window=` was passed (defaults to 'this_month').
+   */
+  leadsWindow: DashboardWindow;
+  /** Human-readable label for the selected lead window. */
+  leadsWindowLabel: string;
   // Period-over-period deltas. Null when there's no prior-period baseline
   // to compare against (e.g. brand-new account, or last month had zero).
   // Frontend hides the trend chip when null.
@@ -248,7 +264,15 @@ export interface DashboardStats {
  * leadsThisMonth is summed from `lead_deliveries.deliveryDate >= start of
  * current month`. Active clients / campaigns are simple status filters.
  */
-export async function getDashboardStats(_requester: AuthPayload): Promise<DashboardStats> {
+export async function getDashboardStats(
+  _requester: AuthPayload,
+  opts: { leadsWindow?: DashboardWindow } = {},
+): Promise<DashboardStats> {
+  // Default leads window stays 'this_month' so callers that don't pass a
+  // window get exactly the same response shape + numbers they got before
+  // this filter was added. New FE caller passes window from the dropdown.
+  const leadsWindowKey: DashboardWindow = opts.leadsWindow ?? 'this_month';
+  const leadsWindow = resolveDashboardWindow(leadsWindowKey);
   // Start of current calendar month in YYYY-MM-DD (UTC). Postgres compares
   // string dates lexicographically when both are ISO-formatted.
   const now = new Date();
@@ -310,11 +334,13 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
       .from(campaigns)
       .innerJoin(clientCampaigns, eq(clientCampaigns.campaignId, campaigns.id))
       .where(eq(campaigns.status, 'active')),
-    // Leads this month: sum of leadCount on deliveries from start of month.
+    // Leads in selected window (default: current calendar month — same as
+    // the legacy behaviour). Uses the resolved range so the dropdown can
+    // pivot the tile to "Last 7 days", "Last 90 days", etc.
     db
       .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
       .from(leadDeliveries)
-      .where(gte(leadDeliveries.deliveryDate, monthStart)),
+      .where(sql`${leadDeliveries.deliveryDate} >= ${leadsWindow.startIso}::date AND ${leadDeliveries.deliveryDate} <= ${leadsWindow.endIso}::date`),
     // This-month revenue: paid invoices with due_date in current calendar
     // month — same shape as last-month, so revenueChange compares like-for-like.
     db
@@ -329,11 +355,15 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
       .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
       .from(invoices)
       .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= ${lastMonthStart}::date AND ${invoices.dueDate} < ${lastMonthEnd}::date`),
-    // Last month leads: deliveries in last calendar month.
+    // Prior equivalent window — used to compute leadsChange. For
+    // 'this_month' that's last month; for 'last_90d' it's the 90 days
+    // immediately preceding the current window; for 'this_week' the
+    // preceding 7 days. resolveDashboardWindow returns both ranges in
+    // one shot so this query just plugs in the prev* fields.
     db
       .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
       .from(leadDeliveries)
-      .where(sql`${leadDeliveries.deliveryDate} >= ${lastMonthStart}::date AND ${leadDeliveries.deliveryDate} < ${lastMonthEnd}::date`),
+      .where(sql`${leadDeliveries.deliveryDate} >= ${leadsWindow.prevStartIso}::date AND ${leadDeliveries.deliveryDate} <= ${leadsWindow.prevEndIso}::date`),
     // Trailing 365-day revenue (paid invoices with due_date in window).
     // Wider than the 90d ad_spend window so the ad-spend → invoice → paid
     // lag (~30-60 days) doesn't over-count cost relative to the revenue
@@ -382,6 +412,8 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
     activeCampaigns: campaignsRow[0]?.n ?? 0,
     linkedCampaigns: linkedCampaignsRow[0]?.n ?? 0,
     leadsThisMonth: thisMonthLeads,
+    leadsWindow: leadsWindowKey,
+    leadsWindowLabel: leadsWindow.label,
     revenueChange,
     leadsChange,
     asOf: now.toISOString(),
