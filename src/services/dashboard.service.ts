@@ -192,19 +192,19 @@ export interface DashboardStats {
    */
   totalCost: number;
   /**
-   * Trailing 180-day revenue − trailing 90-day cost.
+   * Trailing 365-day revenue − trailing 90-day cost.
    *
    * Windows differ on purpose. Catchr only carries ~50 days of ad_spend
    * history; revenue lags spend by ~30-60 days (the lead-to-paid cycle).
-   * Pairing 180d of revenue with 90d of cost catches roughly one full
-   * acquisition cycle on the revenue side while keeping cost at the
-   * longest window where we actually have data. Mismatched windows are
-   * the honest call given the data Catchr makes available; the
-   * alternative is matching at 90/90 which over-states cost relative to
-   * the revenue it generated.
+   * Pairing 365d of revenue with 90d of cost catches a full annual
+   * revenue baseline while keeping cost at the longest window where we
+   * actually have data. Mismatched windows are the honest call given
+   * what Catchr makes available — matched 90/90 (~£763k cost vs ~£278k
+   * revenue) over-states cost relative to the revenue it generated, and
+   * matched lifetime/lifetime over-states revenue relative to cost.
    */
   netProfit: number;
-  /** netProfit / trailing-180d revenue × 100. Null when no revenue in window. */
+  /** netProfit / trailing-365d revenue × 100. Null when no revenue in window. */
   profitMargin: number;
   activeClients: number;
   /** Total campaigns with status='active' (regardless of client linkage). */
@@ -261,13 +261,14 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
   // history so this captures essentially all available cost data.
   const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
   const ninetyDayStart = ninetyDaysAgo.toISOString().slice(0, 10);
-  // Trailing 180-day window for Revenue. Wider on purpose: paid invoices
-  // lag the spend that generated them by ~30-60 days, so a 180d revenue
-  // window vs a 90d cost window better reflects the natural cycle. Without
-  // this, a heavy single-month acquisition push would dominate the margin
-  // before the resulting invoices have a chance to bill + clear.
-  const hundredEightyAgo = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000);
-  const hundredEightyStart = hundredEightyAgo.toISOString().slice(0, 10);
+  // Trailing 365-day window for Revenue. Wider on purpose: paid invoices
+  // lag the spend that generated them by ~30-60 days, so a 12-month
+  // revenue window vs the 90d cost window reflects a full annual revenue
+  // baseline. Catchr's 50-day cost history doesn't support a like-for-like
+  // match; this keeps the comparison honest by using the longest stable
+  // window on each side.
+  const yearAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
+  const yearStart = yearAgo.toISOString().slice(0, 10);
 
   const [
     totalRevenueRow, costRollingRow, clientsRow, campaignsRow, linkedCampaignsRow, thisMonthLeadsRow,
@@ -333,21 +334,22 @@ export async function getDashboardStats(_requester: AuthPayload): Promise<Dashbo
       .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
       .from(leadDeliveries)
       .where(sql`${leadDeliveries.deliveryDate} >= ${lastMonthStart}::date AND ${leadDeliveries.deliveryDate} < ${lastMonthEnd}::date`),
-    // Trailing 180-day revenue (paid invoices with due_date in window).
+    // Trailing 365-day revenue (paid invoices with due_date in window).
     // Wider than the 90d ad_spend window so the ad-spend → invoice → paid
     // lag (~30-60 days) doesn't over-count cost relative to the revenue
-    // those leads will eventually generate.
+    // those leads will eventually generate. With ~12 months of Xero
+    // history available, 365d effectively captures all paid invoices.
     db
       .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
       .from(invoices)
-      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= ${hundredEightyStart}::date`),
+      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= ${yearStart}::date`),
   ]);
 
   // Headline (all-time) revenue.
   const totalRevenue = Number(totalRevenueRow[0]?.revenue ?? '0');
   // This-month numbers used only for the trend chip on Total Revenue.
   const thisMonthRevenue = Number(thisMonthRevenueRow[0]?.revenue ?? '0');
-  // 180d revenue / 90d cost — see DashboardStats.netProfit jsdoc for
+  // 365d revenue / 90d cost — see DashboardStats.netProfit jsdoc for
   // the rationale on the mismatched windows.
   const rollingRevenue = Number(revenueRollingRow[0]?.revenue ?? '0');
   const rollingCost = Number(costRollingRow[0]?.cost ?? '0');
