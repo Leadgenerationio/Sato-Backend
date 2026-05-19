@@ -20,7 +20,14 @@ export interface TrafficSource {
   campaignId: string;
   name: string;
   platform: string;
+  /** Legacy "primary" Catchr account id. New code should read `accountIds`
+   *  which carries the full set (primary + additional). Kept on the DTO
+   *  for back-compat with FE callers that still render this column. */
   accountId: string;
+  /** Full set of Catchr account ids whose spend rolls up under this source.
+   *  Includes the legacy `accountId` when set, plus any additional ids
+   *  picked via the multi-select. */
+  accountIds: string[];
   catchrUrl: string | null;
   isActive: boolean;
   totalSpend: number;
@@ -35,6 +42,18 @@ export interface TrafficSource {
 }
 
 type SourceRow = typeof trafficSources.$inferSelect;
+
+/**
+ * Build the de-duplicated set of Catchr account ids associated with a row.
+ * Unions the legacy single `accountId` column with the new `accountIds[]`
+ * jsonb array so callers see one consistent list regardless of which
+ * shape was used when the row was created.
+ */
+function allAccountIds(row: SourceRow): string[] {
+  const extras = Array.isArray(row.accountIds) ? row.accountIds.filter((a): a is string => typeof a === 'string' && a.length > 0) : [];
+  const primary = row.accountId && row.accountId.length > 0 ? [row.accountId] : [];
+  return Array.from(new Set([...primary, ...extras]));
+}
 
 function toDto(
   row: SourceRow,
@@ -51,6 +70,7 @@ function toDto(
     name: row.name,
     platform: row.platform ?? '',
     accountId: row.accountId ?? '',
+    accountIds: allAccountIds(row),
     catchrUrl: row.catchrUrl,
     isActive: row.isActive,
     totalSpend: Math.round(totalSpend * 100) / 100,
@@ -96,25 +116,37 @@ export async function listSourcesForCampaign(
   // Pull traffic source rows + live ad-spend aggregates + lead deliveries
   // total in parallel. Without this join the totalSpend column stays at
   // its 0 default forever (nothing writes to it on the sync path).
+  //
+  // 2026-05-19: Removed the `where campaign_id = lbCampaignId` filter on
+  // the ad_spend lookup. The previous shape worked for campaigns whose
+  // ad_spend rows happened to share the same LeadByte campaign id, but
+  // it silently zeroed any traffic source whose ad accounts are reused
+  // across multiple campaigns (e.g. one Facebook account funding several
+  // Stato campaigns at once). Now we sum spend across ALL ad_spend
+  // rows for the (platform, account_id) pair — campaign attribution is
+  // out of scope for this widget; the goal is "what is this Catchr
+  // account costing in total". The 30-day window keeps the sum honest.
+  const adSpendWindowStart = new Date();
+  adSpendWindowStart.setDate(adSpendWindowStart.getDate() - 30);
+  const adSpendWindowIso = adSpendWindowStart.toISOString().slice(0, 10);
   const [rows, spendRows, leadAgg] = await Promise.all([
     db
       .select()
       .from(trafficSources)
       .where(eq(trafficSources.campaignId, satoId))
       .orderBy(desc(trafficSources.totalSpend)),
-    // SUM ad_spend by (platform, account_id) for this campaign's LB id.
-    // Empty when nothing matches — sources without spend show £0.
-    lbCampaignId
-      ? db
-          .select({
-            platform: adSpend.platform,
-            accountId: adSpend.accountId,
-            spend: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text`,
-          })
-          .from(adSpend)
-          .where(eq(adSpend.campaignId, lbCampaignId))
-          .groupBy(adSpend.platform, adSpend.accountId)
-      : Promise.resolve([] as Array<{ platform: string; accountId: string; spend: string }>),
+    // Sum trailing-30-day ad_spend by (platform, account_id). Empty for
+    // platforms/accounts we don't sync — sources pointing at unsynced or
+    // dormant accounts naturally land at £0.
+    db
+      .select({
+        platform: adSpend.platform,
+        accountId: adSpend.accountId,
+        spend: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text`,
+      })
+      .from(adSpend)
+      .where(sql`${adSpend.date} >= ${adSpendWindowIso}::date`)
+      .groupBy(adSpend.platform, adSpend.accountId),
     // Campaign-level total leads. Per-source attribution isn't possible from
     // the LeadByte aggregate report, so for now every source on the same
     // campaign shows the same lead count (shared denominator).
@@ -123,6 +155,9 @@ export async function listSourcesForCampaign(
       .from(leadDeliveries)
       .where(eq(leadDeliveries.campaignId, satoId)),
   ]);
+  // Suppress unused-var TS warning during transition — lbCampaignId may
+  // still be used by callers reading the export.
+  void lbCampaignId;
 
   const spendByKey = new Map<string, number>();
   for (const s of spendRows) {
@@ -164,8 +199,18 @@ export async function listSourcesForCampaign(
   }
 
   return rows.map((r) => {
-    const key = `${r.platform ?? ''}|${r.accountId ?? ''}`;
-    const liveSpend = spendByKey.get(key);
+    // Sum live spend across every Catchr account id linked to this row
+    // (legacy primary + new accountIds[]). Each (platform, accountId)
+    // pair contributes its 30-day ad_spend total; missing pairs add 0.
+    const ids = allAccountIds(r);
+    const platform = r.platform ?? '';
+    let liveSpend: number | undefined;
+    if (ids.length > 0) {
+      liveSpend = 0;
+      for (const accId of ids) {
+        liveSpend += spendByKey.get(`${platform}|${accId}`) ?? 0;
+      }
+    }
     return toDto(
       r,
       leadPrice,
@@ -202,7 +247,14 @@ export async function countSourcesForCampaign(campaignId: string): Promise<numbe
 export interface CreateTrafficSourceInput {
   name: string;
   platform?: string;
+  /** Primary Catchr account id — legacy single-field. Either set this OR
+   *  pass everything via `accountIds` (or both: it'll be deduped). */
   accountId?: string;
+  /** Optional additional Catchr account ids. Lets one traffic source row
+   *  roll up spend from multiple ad accounts on the same platform
+   *  (e.g. Solar Panels UK pulling from Solar Incentives + TheSolarGeeks +
+   *  Solar Discounts + MYSOLAR all at once). */
+  accountIds?: string[];
   catchrUrl?: string;
   isActive?: boolean;
 }
@@ -211,10 +263,26 @@ export interface UpdateTrafficSourceInput {
   name?: string;
   platform?: string;
   accountId?: string;
+  accountIds?: string[];
   catchrUrl?: string | null;
   isActive?: boolean;
   totalSpend?: number;
   totalLeads?: number;
+}
+
+/** Drop blanks + dedupe an input array of account ids. */
+function sanitizeAccountIds(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const v of input) {
+    if (typeof v !== 'string') continue;
+    const trimmed = v.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
 }
 
 export async function createSource(
@@ -224,6 +292,7 @@ export async function createSource(
 ): Promise<TrafficSource | null> {
   const satoId = await resolveSatoCampaignId(campaignId);
   if (!satoId) return null;
+  const sanitized = sanitizeAccountIds(input.accountIds);
   const [row] = await db
     .insert(trafficSources)
     .values({
@@ -231,6 +300,7 @@ export async function createSource(
       name: input.name,
       platform: input.platform || null,
       accountId: input.accountId || null,
+      accountIds: sanitized,
       catchrUrl: input.catchrUrl || null,
       isActive: input.isActive ?? true,
     })
@@ -252,6 +322,7 @@ export async function updateSource(
   if (input.name !== undefined) patch.name = input.name;
   if (input.platform !== undefined) patch.platform = input.platform || null;
   if (input.accountId !== undefined) patch.accountId = input.accountId || null;
+  if (input.accountIds !== undefined) patch.accountIds = sanitizeAccountIds(input.accountIds);
   if (input.catchrUrl !== undefined) patch.catchrUrl = input.catchrUrl || null;
   if (input.isActive !== undefined) patch.isActive = input.isActive;
   if (input.totalSpend !== undefined) patch.totalSpend = String(input.totalSpend);
