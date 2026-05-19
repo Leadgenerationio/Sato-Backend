@@ -1278,7 +1278,10 @@ async function populateLeadDeliveries(deps: {
   // Fetch campaign totals (revenue + payout) per window ONCE for all campaigns.
   // /reports/leadactivity gives daily lead counts but no money; /reports/campaign
   // gives windowed money totals. We pro-rate the windowed money by daily lead
-  // count below. Cached at the report level via the prewarm worker.
+  // count below. If a window fetch fails (or returns no row for the campaign)
+  // the per-row writer below omits the money fields entirely so existing
+  // revenue/cost values are preserved — a transient upstream failure must NOT
+  // overwrite previously computed money with zeros.
   type CampaignTotals = { revenue: number; payout: number; leads: number };
   const buildTotalsMap = (rows: LeadByteCampaignReportRow[]): Map<string, CampaignTotals> => {
     const m = new Map<string, CampaignTotals>();
@@ -1288,21 +1291,20 @@ async function populateLeadDeliveries(deps: {
     }
     return m;
   };
+  const fetchReport = async (window: 'last_month' | 'this_month'): Promise<LeadByteCampaignReportRow[]> => {
+    try {
+      return await getCampaignReport(window);
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), window },
+        'lead_deliveries: getCampaignReport failed — money fields will be left untouched for rows in this window',
+      );
+      return [];
+    }
+  };
   const [lastMonthReport, thisMonthReport] = await Promise.all([
-    getCampaignReport('last_month').catch((err) => {
-      logger.warn(
-        { err: err instanceof Error ? err.message : String(err) },
-        'lead_deliveries: getCampaignReport(last_month) failed — money fields will be 0',
-      );
-      return [] as LeadByteCampaignReportRow[];
-    }),
-    getCampaignReport('this_month').catch((err) => {
-      logger.warn(
-        { err: err instanceof Error ? err.message : String(err) },
-        'lead_deliveries: getCampaignReport(this_month) failed — money fields will be 0',
-      );
-      return [] as LeadByteCampaignReportRow[];
-    }),
+    fetchReport('last_month'),
+    fetchReport('this_month'),
   ]);
   const lastMonthTotals = buildTotalsMap(lastMonthReport);
   const thisMonthTotals = buildTotalsMap(thisMonthReport);
@@ -1374,12 +1376,23 @@ async function populateLeadDeliveries(deps: {
           ? lastMonthTotals.get(entry.leadbyteCampaignId)
           : thisMonthTotals.get(entry.leadbyteCampaignId);
       const dailyLeadSum = dailyLeadSumByWindow[row.window];
-      const { revenue, cost } = proRateDailyMoney({
-        leadCount: row.leadCount,
-        totalLeads: dailyLeadSum,
-        totalRevenue: windowTotals?.revenue ?? 0,
-        totalPayout: windowTotals?.payout ?? 0,
-      });
+      // Only attribute money when we have a campaign-report row AND a
+      // positive daily-leads denominator. Otherwise omit revenue/cost from
+      // the upsert entirely so a transient /reports/campaign failure or
+      // an unmapped-campaign cache result cannot overwrite previously
+      // computed values with zeros.
+      const moneyAvailable = !!windowTotals && dailyLeadSum > 0;
+      const { revenue, cost } = moneyAvailable
+        ? proRateDailyMoney({
+            leadCount: row.leadCount,
+            totalLeads: dailyLeadSum,
+            totalRevenue: windowTotals!.revenue,
+            totalPayout: windowTotals!.payout,
+          })
+        : { revenue: 0, cost: 0 };
+      const moneyValues = moneyAvailable
+        ? { revenue: revenue.toFixed(2), cost: cost.toFixed(2) }
+        : {};
 
       const upserted = await deps.db
         .insert(deps.leadDeliveries)
@@ -1390,8 +1403,7 @@ async function populateLeadDeliveries(deps: {
           leadCount: row.leadCount,
           validLeadCount: row.validLeads,
           invalidLeadCount: row.invalidLeads,
-          revenue: revenue.toFixed(2),
-          cost: cost.toFixed(2),
+          ...moneyValues,
           leadbyteReportId: row.reportId,
           source: 'leadbyte',
         })
@@ -1401,8 +1413,7 @@ async function populateLeadDeliveries(deps: {
             leadCount: row.leadCount,
             validLeadCount: row.validLeads,
             invalidLeadCount: row.invalidLeads,
-            revenue: revenue.toFixed(2),
-            cost: cost.toFixed(2),
+            ...moneyValues,
             leadbyteReportId: row.reportId,
           },
         })

@@ -1061,6 +1061,131 @@ describe('LeadByte client — syncAll()', () => {
     expect(result.deliveryCampaignsSkipped).toBe(1);
   });
 
+  it('omits revenue/cost from upserts when /reports/campaign returns no matching row (preserves existing values)', async () => {
+    // Guards the regression we saw post-deploy: a transient empty
+    // /reports/campaign for last_month had been overwriting good revenue
+    // numbers with £0 on subsequent syncs. Now we only set money fields
+    // when we actually have totals to pro-rate from.
+    process.env.LEADBYTE_API_KEY = 'test-key';
+    process.env.LEADBYTE_BASE_URL = 'https://example.test/restapi/v1.3';
+
+    fetchMock
+      .mockResolvedValueOnce(
+        mockJsonResponse([
+          { id: 'lb-camp-1', name: 'Solar Panels', active: 'Yes', archived: 'No', currency: 'GBP' },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          data: [{ id: 113, company: 'Benson Goldstein Ltd', status: 'Active' }],
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          report: [
+            {
+              campaign: 'Solar Panels',
+              buyer: 'Benson Goldstein Ltd',
+              posted: 50,
+              accepted: 50,
+              sold: 50,
+              rejected: 0,
+              returned: 0,
+              revenue: 1000,
+              currency: 'GBP',
+            },
+          ],
+        }),
+      )
+      // /reports/campaign both windows return NO matching campaign row
+      // (e.g. campaignId mismatch / cache returned negative-cached empty).
+      .mockResolvedValueOnce(mockJsonResponse({ data: [] }))
+      .mockResolvedValueOnce(mockJsonResponse({ data: [] }))
+      // /reports/leadactivity per window still has daily counts.
+      .mockResolvedValueOnce(mockJsonResponse({ report: [{ date: '2026-04-15', count: 5 }] }))
+      .mockResolvedValueOnce(mockJsonResponse({ report: [{ date: '2026-05-15', count: 8 }] }));
+
+    const upsertedDeliveries: Array<Record<string, unknown>> = [];
+    const updatedDeliveries: Array<Record<string, unknown>> = [];
+    const campaignsTableRef = { __ref: 'campaigns' };
+    const clientsTableRef = { __ref: 'clients' };
+    const clientCampaignsTableRef = { __ref: 'clientCampaigns' };
+    const leadDeliveriesTableRef = {
+      campaignId: 'd_campaignId',
+      clientId: 'd_clientId',
+      deliveryDate: 'd_deliveryDate',
+      id: 'd_id',
+      __ref: 'leadDeliveries',
+    };
+
+    const dbMock = {
+      update: () => ({
+        set: () => ({
+          where: () => ({
+            returning: async () => [],
+          }),
+        }),
+      }),
+      insert: (table: unknown) => ({
+        values: (v: unknown) => {
+          if (table === campaignsTableRef) {
+            return { returning: async () => [{ id: 'stato-camp-1' }] };
+          }
+          if (table === clientCampaignsTableRef) {
+            return {
+              onConflictDoNothing: () => ({
+                returning: async () => [{ id: 'cc-1' }],
+              }),
+            };
+          }
+          // leadDeliveries insert
+          upsertedDeliveries.push(v as Record<string, unknown>);
+          return {
+            onConflictDoUpdate: (args: { set: Record<string, unknown> }) => {
+              updatedDeliveries.push(args.set);
+              return { returning: async () => [{ id: 'ld-' + upsertedDeliveries.length }] };
+            },
+          };
+        },
+      }),
+      select: () => ({
+        from: (table: unknown) => ({
+          where: async () => {
+            if (table === clientsTableRef) {
+              return [{ id: 'sato-client-1', companyName: 'Benson Goldstein Ltd', leadbyteClientId: '113' }];
+            }
+            return [{ campaignId: 'stato-camp-1', leadbyteCampaignId: 'lb-camp-1' }];
+          },
+          innerJoin: () => ({
+            where: async () => [
+              { campaignId: 'stato-camp-1', clientId: 'sato-client-1', leadbyteCampaignId: 'lb-camp-1' },
+            ],
+          }),
+        }),
+      }),
+    };
+
+    await lb.syncAll({
+      db: dbMock as never,
+      campaigns: campaignsTableRef as never,
+      clients: clientsTableRef as never,
+      clientCampaigns: clientCampaignsTableRef as never,
+      leadDeliveries: leadDeliveriesTableRef as never,
+    });
+
+    expect(upsertedDeliveries).toHaveLength(2);
+    // Money fields must NOT be in the INSERT values…
+    for (const row of upsertedDeliveries) {
+      expect(row).not.toHaveProperty('revenue');
+      expect(row).not.toHaveProperty('cost');
+    }
+    // …or in the ON CONFLICT SET clause (so existing values are preserved).
+    for (const set of updatedDeliveries) {
+      expect(set).not.toHaveProperty('revenue');
+      expect(set).not.toHaveProperty('cost');
+    }
+  });
+
   it('skips client_campaigns discovery when clients/clientCampaigns deps are omitted (legacy callers)', async () => {
     process.env.LEADBYTE_API_KEY = 'test-key';
     process.env.LEADBYTE_BASE_URL = 'https://example.test/restapi/v1.3';
