@@ -77,9 +77,15 @@ export const FIELD_MAP: Record<CatchrPlatform, PlatformFieldMap | null> = {
   // field for the same reason as Facebook: requesting `date` succeeded but
   // returned rows without a usable date column ('spend' only). The normalized
   // field returns 'YYYYMMDD' strings that coerceDate handles cleanly.
+  //
+  // ALSO 2026-05-19 — campaignId was `campaign_id` which Catchr silently
+  // dropped from the response, causing every row to write with campaign_id=""
+  // → multiple rows-per-account-per-day collapse into within-batch dupes →
+  // PG "ON CONFLICT DO UPDATE cannot affect row a second time" abort. The
+  // correct Taboola field is just `campaign` (the numeric id as a string).
   'taboola': {
     spend: 'spend',
-    campaignId: 'campaign_id',
+    campaignId: 'campaign',
     campaignName: 'campaign_name',
     accountName: 'account_name',
     accountCurrency: 'currency',

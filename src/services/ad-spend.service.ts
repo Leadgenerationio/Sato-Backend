@@ -132,23 +132,44 @@ export async function syncAll(deps?: { db?: typeof db }): Promise<AdSpendSyncRes
         });
         result.accountsSynced++;
 
-        const inserts: AdSpendInsert[] = [];
+        const rowsByKey = new Map<string, AdSpendInsert>();
+        let skippedEmptyCampaign = 0;
         for (const row of resp.rows) {
           const d = coerceDate(row[map.date]);
           if (!d) continue;
+          const campaignId = String(row[map.campaignId] ?? '');
+          if (!campaignId) {
+            skippedEmptyCampaign++;
+            continue;
+          }
           const spendValue = coerceNumber(row[map.spend]);
-          inserts.push({
+          const insertRow: AdSpendInsert = {
             platform: source.platform,
             authorizationId: source.id,
             accountId: acc.id,
             accountName: (row[map.accountName] as string) ?? acc.name,
-            campaignId: String(row[map.campaignId] ?? ''),
+            campaignId,
             campaignName: (row[map.campaignName] as string) ?? null,
             date: d,
             spend: spendValue.toString(),
             currency: (row[map.accountCurrency] as string) ?? 'GBP',
-          });
+          };
+          // Deduplicate within-batch on the same key the unique index uses.
+          // If two response rows collapse to the same (platform, auth, account,
+          // campaign, date) — last-wins. Postgres rejects an INSERT containing
+          // multiple rows that would collide on the ON CONFLICT target with
+          // "command cannot affect row a second time", so we must dedupe in
+          // app code before the batch insert.
+          const key = `${source.platform}|${source.id}|${acc.id}|${campaignId}|${d}`;
+          rowsByKey.set(key, insertRow);
         }
+        if (skippedEmptyCampaign > 0) {
+          logger.warn(
+            { platform: source.platform, accountId: acc.id, skippedEmptyCampaign },
+            'Catchr: dropped rows with empty campaign_id — field map likely needs adjusting',
+          );
+        }
+        const inserts = Array.from(rowsByKey.values());
 
         if (inserts.length > 0) {
           await database

@@ -335,6 +335,15 @@ describe('Catchr field map', () => {
     expect(map!.date).not.toBe('date');
   });
 
+  it('uses `campaign` (not `campaign_id`) for Taboola — `campaign_id` is silently dropped', () => {
+    // Catchr returns Taboola rows with `campaign_id` omitted, so the empty
+    // string would collapse every row of a day into one within-batch dup and
+    // crash the upsert with "ON CONFLICT cannot affect row a second time".
+    const map = fieldMapFor('taboola');
+    expect(map!.campaignId).toBe('campaign');
+    expect(map!.campaignId).not.toBe('campaign_id');
+  });
+
   it('returns null for unknown platforms rather than guessing', () => {
     expect(fieldMapFor('linkedin-ads')).toBeNull();
   });
