@@ -4,6 +4,7 @@ import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { clients } from '../db/schema/clients.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
+import { proRateDailyMoney } from '../integrations/leadbyte/leadbyte-client.js';
 import { cached } from '../utils/cache.js';
 import { logger } from '../utils/logger.js';
 import { pickVertical } from '../utils/vertical.js';
@@ -560,14 +561,50 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
     cpl: Math.round(cpl * 100) / 100,
     margin: Math.round(margin * 10) / 10,
     startDate: campaign.startDate,
-    leadDeliveries: deliveries.map((d) => ({
-      date: d.date,
-      leadCount: d.leadCount,
-      validLeads: d.validLeads,
-      invalidLeads: d.invalidLeads,
-      revenue: d.revenue,
-      cost: d.cost,
-    })),
+    // Pro-rate revenue + cost per day using the same approach as
+    // populateLeadDeliveries: LeadByte's /reports/leadactivity returns
+    // daily lead COUNTS only — money lives in /reports/campaign (already
+    // fetched above as monthRow + lastMonthRow). Spread the windowed
+    // totals across days in proportion to leadCount so each daily bar
+    // sums to the right windowed total. Works for every campaign whether
+    // it's linked to a Stato client or not — the Revenue vs Cost chart
+    // on the detail page no longer renders empty for orphan campaigns
+    // like Solar Panels (UK) that ship leads but aren't yet attributed.
+    leadDeliveries: (() => {
+      // Bucket boundary: first day of the current month. Daily rows on or
+      // after this date are 'this_month'; earlier ones are 'last_month'.
+      const monthStartIso = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1))
+        .toISOString()
+        .slice(0, 10);
+      const thisMonthLeads = deliveries
+        .filter((d) => d.date >= monthStartIso)
+        .reduce((s, d) => s + (d.leadCount ?? 0), 0);
+      const lastMonthLeads = deliveries
+        .filter((d) => d.date < monthStartIso)
+        .reduce((s, d) => s + (d.leadCount ?? 0), 0);
+      return deliveries.map((d) => {
+        const isThisMonth = d.date >= monthStartIso;
+        const totalLeads = isThisMonth ? thisMonthLeads : lastMonthLeads;
+        const totalRevenue = isThisMonth ? (monthRow?.revenue ?? 0) : (lastMonthRow?.revenue ?? 0);
+        const totalPayout = isThisMonth
+          ? ((monthRow?.payout ?? 0) + (monthRow?.emailCost ?? 0) + (monthRow?.smsCost ?? 0) + (monthRow?.validationCost ?? 0))
+          : ((lastMonthRow?.payout ?? 0) + (lastMonthRow?.emailCost ?? 0) + (lastMonthRow?.smsCost ?? 0) + (lastMonthRow?.validationCost ?? 0));
+        const { revenue, cost } = proRateDailyMoney({
+          leadCount: d.leadCount,
+          totalLeads,
+          totalRevenue,
+          totalPayout,
+        });
+        return {
+          date: d.date,
+          leadCount: d.leadCount,
+          validLeads: d.validLeads,
+          invalidLeads: d.invalidLeads,
+          revenue,
+          cost,
+        };
+      });
+    })(),
     windowReports,
     suppliers: suppliers.map((s) => ({
       id: s.id,
