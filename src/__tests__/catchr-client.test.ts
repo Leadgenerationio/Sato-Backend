@@ -322,7 +322,17 @@ describe('Catchr field map', () => {
     const map = fieldMapFor('facebook-ads');
     expect(map).not.toBeNull();
     expect(map!.spend).toBe('spend');
-    expect(map!.date).toBe('date_start');
+    // `date_start` was silently dropped by Catchr's response — switched to
+    // the normalized date dim which actually round-trips.
+    expect(map!.date).toBe('_NORMALIZED_DATE_FIELD_YEAR_MONTH_DAY');
+    expect(map!.date).not.toBe('date_start');
+  });
+
+  it('uses the normalized date field for Taboola (raw `date` is silently dropped)', () => {
+    const map = fieldMapFor('taboola');
+    expect(map).not.toBeNull();
+    expect(map!.date).toBe('_NORMALIZED_DATE_FIELD_YEAR_MONTH_DAY');
+    expect(map!.date).not.toBe('date');
   });
 
   it('returns null for unknown platforms rather than guessing', () => {

@@ -23,14 +23,21 @@ export interface PlatformFieldMap {
 }
 
 export const FIELD_MAP: Record<CatchrPlatform, PlatformFieldMap | null> = {
-  // Confirmed 2026-04-20 via list_fields_by_platform
+  // 2026-05-19 — switched date dim from `date_start` to the Catchr-normalized
+  // date field. Probing Facebook accounts directly showed that Catchr accepts
+  // `date_start` in the request but silently omits it from every row of the
+  // response — so coerceDate(row.date_start) was returning null and the sync
+  // dropped every row (resulting in zero ad_spend writes for Facebook despite
+  // accounts having real spend). `_NORMALIZED_DATE_FIELD_YEAR_MONTH_DAY` is
+  // Catchr's normalized daily date dimension, returned as 'YYYYMMDD' (e.g.
+  // '20260513') which coerceDate's compact-form regex already handles.
   'facebook-ads': {
     spend: 'spend',
     campaignId: 'campaign_id',
     campaignName: 'campaign_name',
     accountName: 'account_name',
     accountCurrency: 'account_currency',
-    date: 'date_start',
+    date: '_NORMALIZED_DATE_FIELD_YEAR_MONTH_DAY',
   },
   // Confirmed 2026-04-20 via list_fields_by_platform
   'google-ads': {
@@ -66,13 +73,17 @@ export const FIELD_MAP: Record<CatchrPlatform, PlatformFieldMap | null> = {
     accountCurrency: 'advertiser/currency',
     date: '_NORMALIZED_DATE_FIELD_YEAR_MONTH_DAY',
   },
+  // 2026-05-19 — switched date dim from `date` to the Catchr-normalized
+  // field for the same reason as Facebook: requesting `date` succeeded but
+  // returned rows without a usable date column ('spend' only). The normalized
+  // field returns 'YYYYMMDD' strings that coerceDate handles cleanly.
   'taboola': {
     spend: 'spend',
     campaignId: 'campaign_id',
     campaignName: 'campaign_name',
     accountName: 'account_name',
     accountCurrency: 'currency',
-    date: 'date',
+    date: '_NORMALIZED_DATE_FIELD_YEAR_MONTH_DAY',
   },
 };
 
