@@ -67,6 +67,18 @@ export async function xeroDisconnect(_req: Request, res: Response) {
 }
 
 /**
+ * Aggregate health report for the Xero integration. Returns scopes, bound
+ * tenant, bank-account count, VAT registration state, Finance API
+ * availability, plus a plain-English next-steps list so the operator can
+ * see exactly which Xero-side change unblocks the empty Bank / VAT widgets
+ * without digging through Railway logs.
+ */
+export async function xeroHealth(_req: Request, res: Response) {
+  const health = await xeroClient.getHealth();
+  res.json({ status: 'success', data: health });
+}
+
+/**
  * Diagnostic endpoint for the client-create Xero auto-bind. Runs each
  * lookup strategy independently and returns what each one returns, so we
  * can debug why a given client isn't getting auto-bound.

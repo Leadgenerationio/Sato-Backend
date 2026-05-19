@@ -280,6 +280,45 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
   const reports = await fetchAllCampaignReports([
     'today', 'this_week', 'this_month', 'last_month', 'ytd',
   ]);
+
+  // Batched Catchr-spend rollup per campaign — one query that groups
+  // ad_spend (last 30d) by Sato campaign_id via the traffic_sources →
+  // (platform, account_id ∪ account_ids[]) join. Without this, the
+  // campaign table's Cost column reads LeadByte payout only (zero for
+  // direct-traffic campaigns), exactly the same "100% margin" lie
+  // getCampaign already fixed on the detail page.
+  // Keyed by LeadByte campaign id so the per-row map step (which has c.id
+  // = the LeadByte id) can look it up directly without resolving uuid each
+  // iteration.
+  const catchrCostByLbId = new Map<string, number>();
+  try {
+    const rows = (await db.execute(sql`
+      with source_accounts as (
+        select ts.campaign_id, ts.platform, ts.account_id as acc_id
+        from traffic_sources ts
+        where ts.account_id is not null
+        union
+        select ts.campaign_id, ts.platform, jsonb_array_elements_text(ts.account_ids) as acc_id
+        from traffic_sources ts
+      )
+      select c.leadbyte_campaign_id as lb_id,
+             coalesce(sum(a.spend::numeric), 0)::float as total
+      from source_accounts sa
+      join campaigns c on c.id = sa.campaign_id
+      join ad_spend a on a.platform = sa.platform and a.account_id = sa.acc_id
+      where a.date >= current_date - interval '30 days'
+        and c.leadbyte_campaign_id is not null
+      group by c.leadbyte_campaign_id
+    `)) as unknown as Array<{ lb_id: string; total: number }>;
+    for (const r of rows) {
+      catchrCostByLbId.set(r.lb_id, Number(r.total ?? 0));
+    }
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      'listCampaigns: Catchr ad-spend rollup failed — table will only show LeadByte cost',
+    );
+  }
   const empty: Awaited<ReturnType<typeof leadbyte.getCampaignReport>> = [];
   const todayReport = reports.get('today') ?? empty;
   const weekReport = reports.get('this_week') ?? empty;
@@ -330,9 +369,15 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
       sumWindows(fallbackRows, 'emailCost') +
       sumWindows(fallbackRows, 'smsCost') +
       sumWindows(fallbackRows, 'validationCost');
-    const totalCost = ytdHasData
+    const leadbyteCost = ytdHasData
       ? (ytd?.payout ?? 0) + (ytd?.emailCost ?? 0) + (ytd?.smsCost ?? 0) + (ytd?.validationCost ?? 0)
       : fallbackCost;
+    // Fold the campaign's last-30d Catchr ad-spend into the displayed cost
+    // (matches what getCampaign does on the detail page). Without this the
+    // table reads £0 cost / "100% margin" for direct-traffic campaigns even
+    // when £100k+/month is sitting in ad_spend.
+    const catchrCost = catchrCostByLbId.get(c.id) ?? 0;
+    const totalCost = leadbyteCost + catchrCost;
     const cpl = totalLeads > 0 ? totalCost / totalLeads : 0;
     const margin = totalRevenue > 0 ? ((totalRevenue - totalCost) / totalRevenue) * 100 : 0;
 

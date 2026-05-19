@@ -16,6 +16,11 @@ integrationRoutes.get('/xero/status', integrationController.xeroStatus);
 integrationRoutes.post('/xero/disconnect', integrationController.xeroDisconnect);
 integrationRoutes.get('/xero/bank-accounts', integrationController.xeroBankAccounts);
 integrationRoutes.get('/xero/vat-liability', integrationController.xeroVatLiability);
+// Full-fat health diagnostic. Returns scopes granted vs requested, bank-
+// account count, VAT registration state, Finance API availability, and a
+// plain-English next-steps list. Used by /integrations page + Bank/VAT
+// widget empty-state troubleshooting.
+integrationRoutes.get('/xero/health', integrationController.xeroHealth);
 // Diagnostic for the client-create auto-bind. Pass ?clientId=<uuid> to
 // inspect a specific client's lookup, or ?name=...&companyNumber=... for
 // an ad-hoc probe.

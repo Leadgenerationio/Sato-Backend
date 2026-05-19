@@ -76,6 +76,18 @@ interface ConnectionInfo {
   tenantName?: string;
 }
 
+/**
+ * Last successful token-exchange details — surfaced by getHealth() so the
+ * diagnostic endpoint can show exactly which scopes Xero granted, when the
+ * token was last refreshed, and how long until it expires. Populated only
+ * after a successful exchangeCredentials() call.
+ */
+let lastTokenInfo: {
+  refreshedAt: number;
+  expiresAt: number;
+  scopes: string[];
+} | null = null;
+
 async function exchangeCredentials(): Promise<{ accessToken: string; expiresAt: number }> {
   const basic = Buffer.from(`${clientId()}:${clientSecret()}`).toString('base64');
   const res = await fetch(`${IDENTITY_HOST}/connect/token`, {
@@ -110,9 +122,18 @@ async function exchangeCredentials(): Promise<{ accessToken: string; expiresAt: 
   }
 
   const data = (await res.json()) as TokenResponse;
+  const expiresAt = Date.now() + data.expires_in * 1000;
+  // Record the granted scopes for the health endpoint. Xero echoes back the
+  // accepted scope list (space-delimited), which may be a subset of what we
+  // requested if the Custom Connection isn't entitled to every scope.
+  lastTokenInfo = {
+    refreshedAt: Date.now(),
+    expiresAt,
+    scopes: (data.scope ?? '').split(/\s+/).filter(Boolean),
+  };
   return {
     accessToken: data.access_token,
-    expiresAt: Date.now() + data.expires_in * 1000,
+    expiresAt,
   };
 }
 
@@ -945,4 +966,203 @@ export async function findContactBestMatch(
     return [];
   });
   return contacts[0] ?? null;
+}
+
+// ─── Health diagnostic ──────────────────────────────────────────────────────
+
+export interface XeroHealth {
+  configured: boolean;
+  /** Tenant the Custom Connection is bound to. */
+  tenantId: string | null;
+  tenantName: string | null;
+  /** Scopes Xero actually granted at last token exchange (may be < requested). */
+  scopesRequested: string[];
+  scopesGranted: string[];
+  /** Scopes we asked for but didn't receive — usually means the Custom
+   *  Connection isn't entitled to them in developer.xero.com. */
+  scopesMissing: string[];
+  /** ISO timestamps + ms-to-expiry on the cached token. */
+  tokenRefreshedAt: string | null;
+  tokenExpiresAt: string | null;
+  tokenSecondsRemaining: number | null;
+  /** Last surfaced auth error (cleared on next successful exchange). */
+  lastAuthError: string | null;
+  /** Quick probes against the Accounting + Reports + Finance APIs so Sam
+   *  can see exactly which surfaces work and which need a scope/data fix. */
+  probes: {
+    accountsApi: { ok: boolean; bankAccounts: number | null; error?: string };
+    reportsApi: { ok: boolean; vatRegistered: boolean | null; error?: string };
+    financeApi: { ok: boolean; cashValidationAvailable: boolean | null; error?: string };
+  };
+  /** Plain-English next-step list for Sam — generated from the probe results. */
+  recommendations: string[];
+}
+
+/**
+ * One-shot health check the diagnostic UI hits to render the integrations
+ * page. Runs three small Xero probes in parallel and aggregates everything
+ * the operator needs to debug "why is my bank/VAT widget empty?" without
+ * having to dig through Railway logs.
+ */
+export async function getHealth(): Promise<XeroHealth> {
+  if (!isXeroConfigured()) {
+    return {
+      configured: false,
+      tenantId: null,
+      tenantName: null,
+      scopesRequested: SCOPES.split(/\s+/).filter(Boolean),
+      scopesGranted: [],
+      scopesMissing: SCOPES.split(/\s+/).filter(Boolean),
+      tokenRefreshedAt: null,
+      tokenExpiresAt: null,
+      tokenSecondsRemaining: null,
+      lastAuthError: null,
+      probes: {
+        accountsApi: { ok: false, bankAccounts: null, error: 'not configured' },
+        reportsApi: { ok: false, vatRegistered: null, error: 'not configured' },
+        financeApi: { ok: false, cashValidationAvailable: null, error: 'not configured' },
+      },
+      recommendations: [
+        'Set XERO_CLIENT_ID and XERO_CLIENT_SECRET on the Sato-Backend Railway service.',
+        'Create a Custom Connection in developer.xero.com and paste the client id/secret.',
+      ],
+    };
+  }
+
+  // Force a token exchange so the scope list reflects the current Custom
+  // Connection state, not whatever was cached on first call this process.
+  let tenantId: string | null = null;
+  let tenantName: string | null = null;
+  let accessToken: string | null = null;
+  try {
+    const tok = await getValidToken();
+    accessToken = tok.accessToken;
+    tenantId = tok.tenantId;
+    tenantName = cache?.tenantName ?? null;
+  } catch (err) {
+    return {
+      configured: true,
+      tenantId: null,
+      tenantName: null,
+      scopesRequested: SCOPES.split(/\s+/).filter(Boolean),
+      scopesGranted: [],
+      scopesMissing: SCOPES.split(/\s+/).filter(Boolean),
+      tokenRefreshedAt: null,
+      tokenExpiresAt: null,
+      tokenSecondsRemaining: null,
+      lastAuthError: lastAuthError ?? (err instanceof Error ? err.message : String(err)),
+      probes: {
+        accountsApi: { ok: false, bankAccounts: null, error: 'no token' },
+        reportsApi: { ok: false, vatRegistered: null, error: 'no token' },
+        financeApi: { ok: false, cashValidationAvailable: null, error: 'no token' },
+      },
+      recommendations: [
+        'Xero token exchange failed — check XERO_CLIENT_ID / XERO_CLIENT_SECRET.',
+        'See lastAuthError above for the Xero-side reason.',
+      ],
+    };
+  }
+
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    'xero-tenant-id': tenantId,
+    Accept: 'application/json',
+  };
+
+  // Probe 1: Accounting /Accounts (bank account count)
+  // Probe 2: Reports /TaxSummary (VAT registration — 404 = not registered)
+  // Probe 3: Finance /CashValidation (Finance API gating)
+  const today = new Date().toISOString().slice(0, 10);
+  const monthAgo = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10);
+  const [accRes, taxRes, cvRes] = await Promise.allSettled([
+    fetch(`${API_HOST}/api.xro/2.0/Accounts?where=${encodeURIComponent('Type=="BANK"&&Status=="ACTIVE"')}`, { headers, signal: AbortSignal.timeout(15_000) }),
+    fetch(`${API_HOST}/api.xro/2.0/Reports/TaxSummary?fromDate=${monthAgo}&toDate=${today}`, { headers, signal: AbortSignal.timeout(15_000) }),
+    fetch(`${API_HOST}/finance.xro/1.0/CashValidation?balanceDate=${today}&beginDate=${monthAgo}`, { headers, signal: AbortSignal.timeout(15_000) }),
+  ]);
+
+  const probes: XeroHealth['probes'] = {
+    accountsApi: { ok: false, bankAccounts: null },
+    reportsApi: { ok: false, vatRegistered: null },
+    financeApi: { ok: false, cashValidationAvailable: null },
+  };
+
+  if (accRes.status === 'fulfilled') {
+    const r = accRes.value;
+    if (r.ok) {
+      const data = await r.json() as XeroAccountsResponse;
+      probes.accountsApi = { ok: true, bankAccounts: (data.Accounts ?? []).length };
+    } else {
+      probes.accountsApi = { ok: false, bankAccounts: null, error: `HTTP ${r.status}` };
+    }
+  } else {
+    probes.accountsApi = { ok: false, bankAccounts: null, error: accRes.reason instanceof Error ? accRes.reason.message : String(accRes.reason) };
+  }
+
+  if (taxRes.status === 'fulfilled') {
+    const r = taxRes.value;
+    if (r.ok) {
+      probes.reportsApi = { ok: true, vatRegistered: true };
+    } else if (r.status === 404) {
+      // Xero returns 404 for orgs that aren't VAT/GST-registered.
+      probes.reportsApi = { ok: true, vatRegistered: false };
+    } else {
+      probes.reportsApi = { ok: false, vatRegistered: null, error: `HTTP ${r.status}` };
+    }
+  } else {
+    probes.reportsApi = { ok: false, vatRegistered: null, error: taxRes.reason instanceof Error ? taxRes.reason.message : String(taxRes.reason) };
+  }
+
+  if (cvRes.status === 'fulfilled') {
+    const r = cvRes.value;
+    if (r.ok) {
+      probes.financeApi = { ok: true, cashValidationAvailable: true };
+    } else {
+      probes.financeApi = { ok: false, cashValidationAvailable: false, error: `HTTP ${r.status}` };
+    }
+  } else {
+    probes.financeApi = { ok: false, cashValidationAvailable: false, error: cvRes.reason instanceof Error ? cvRes.reason.message : String(cvRes.reason) };
+  }
+
+  const scopesRequested = SCOPES.split(/\s+/).filter(Boolean);
+  const scopesGranted = lastTokenInfo?.scopes ?? [];
+  const scopesMissing = scopesRequested.filter((s) => !scopesGranted.includes(s));
+
+  // Plain-English next steps based on probe results.
+  const recs: string[] = [];
+  if (probes.accountsApi.ok && (probes.accountsApi.bankAccounts ?? 0) === 0) {
+    recs.push('Bank Accounts widget is empty because the Xero org has no accounts of Type=BANK with Status=ACTIVE. In Xero → Accounting → Chart of accounts, mark at least one bank account as active.');
+  }
+  if (probes.accountsApi.ok === false) {
+    recs.push(`Accounting API failed (${probes.accountsApi.error}) — check the Custom Connection has the accounting.contacts + accounting.transactions scopes in developer.xero.com.`);
+  }
+  if (probes.reportsApi.ok && probes.reportsApi.vatRegistered === false) {
+    recs.push('VAT Liability widget will display £0 because the Xero org is not VAT-registered (Xero /Reports/TaxSummary returned 404). This is the actual state, not a bug.');
+  }
+  if (probes.reportsApi.ok === false) {
+    recs.push(`Reports API failed (${probes.reportsApi.error}) — confirm the Custom Connection has the accounting.reports.read scope.`);
+  }
+  if (probes.financeApi.ok === false) {
+    recs.push('Finance API (CashValidation) is unavailable — this is EXPECTED for standard Custom Connections (the finance.statements.read scope is intentionally not requested). Bank balances will fall back to /Reports/BankSummary instead.');
+  }
+  if (scopesMissing.length > 0) {
+    recs.push(`Missing granted scopes: ${scopesMissing.join(', ')} — enable in developer.xero.com → app → scopes.`);
+  }
+  if (recs.length === 0) {
+    recs.push('Xero integration is healthy. Bank + VAT widgets are reading real upstream data.');
+  }
+
+  return {
+    configured: true,
+    tenantId,
+    tenantName,
+    scopesRequested,
+    scopesGranted,
+    scopesMissing,
+    tokenRefreshedAt: lastTokenInfo ? new Date(lastTokenInfo.refreshedAt).toISOString() : null,
+    tokenExpiresAt: lastTokenInfo ? new Date(lastTokenInfo.expiresAt).toISOString() : null,
+    tokenSecondsRemaining: lastTokenInfo ? Math.max(0, Math.floor((lastTokenInfo.expiresAt - Date.now()) / 1000)) : null,
+    lastAuthError,
+    probes,
+    recommendations: recs,
+  };
 }
