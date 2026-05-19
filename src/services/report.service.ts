@@ -88,13 +88,26 @@ export interface SupplierReportRow {
 export interface FinancialOverviewRow {
   month: string;
   revenue: number;
-  expenses: number;
+  /**
+   * Sum of ad_spend.spend for the month. `null` (not 0) for months that
+   * predate the Catchr connection — distinguishes "we have no data here"
+   * from "Sam genuinely spent £0". Charts should leave a gap on null
+   * months instead of drawing a flat-zero line that misleads the eye.
+   */
+  expenses: number | null;
+  /** revenue - expenses (or just revenue when expenses is null). */
   profit: number;
   invoicesPaid: number;
   invoicesOverdue: number;
   /** Invoices that are neither paid nor overdue — i.e. drafts + sent + due-but-not-late. */
   invoicesPending: number;
   vatCollected: number;
+  /**
+   * True for the current calendar month (which is always incomplete until
+   * month-end). Charts can dash-stroke / fade it so users don't read the
+   * partial total as a real month-over-month drop.
+   */
+  isPartial: boolean;
 }
 
 // Mock generators removed by policy: no fabricated data anywhere. Each
@@ -413,9 +426,14 @@ export async function getFinancialOverview(_requester: AuthPayload): Promise<Fin
     d.setMonth(d.getMonth() - i);
     months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
   }
+  const currentMonthKey = months[months.length - 1];
 
   const revenueByMonth = new Map(revenueRows.map((r) => [r.month, { revenue: Number(r.revenue), vat: Number(r.vat) }]));
   const expensesByMonth = new Map(expenseRows.map((r) => [r.month, Number(r.expenses)]));
+  // Months that have AT LEAST ONE ad_spend row. Pre-Catchr months land here
+  // as `null` (not 0) so the chart can render a gap rather than implying
+  // Sam ran his business cost-free for 9 months.
+  const monthsWithCostData = new Set(expensesByMonth.keys());
   const paidByMonth = new Map<string, number>();
   const overdueByMonth = new Map<string, number>();
   // Pending = anything that's not 'paid' and not 'overdue' (drafts, sent,
@@ -435,7 +453,7 @@ export async function getFinancialOverview(_requester: AuthPayload): Promise<Fin
 
   return months.map((m): FinancialOverviewRow => {
     const r = revenueByMonth.get(m) ?? { revenue: 0, vat: 0 };
-    const expenses = expensesByMonth.get(m) ?? 0;
+    const expenses = monthsWithCostData.has(m) ? (expensesByMonth.get(m) ?? 0) : null;
     const [year, mm] = m.split('-');
     const monthLabel = new Date(Number(year), Number(mm) - 1, 1).toLocaleDateString('en-GB', {
       month: 'short',
@@ -444,12 +462,15 @@ export async function getFinancialOverview(_requester: AuthPayload): Promise<Fin
     return {
       month: monthLabel,
       revenue: Math.round(r.revenue * 100) / 100,
-      expenses: Math.round(expenses * 100) / 100,
-      profit: Math.round((r.revenue - expenses) * 100) / 100,
+      expenses: expenses === null ? null : Math.round(expenses * 100) / 100,
+      profit: expenses === null
+        ? Math.round(r.revenue * 100) / 100
+        : Math.round((r.revenue - expenses) * 100) / 100,
       invoicesPaid: paidByMonth.get(m) ?? 0,
       invoicesOverdue: overdueByMonth.get(m) ?? 0,
       invoicesPending: pendingByMonth.get(m) ?? 0,
       vatCollected: Math.round(r.vat * 100) / 100,
+      isPartial: m === currentMonthKey,
     };
   });
 }
