@@ -144,6 +144,14 @@ export interface CampaignSummary {
   leadsToday: number;
   leadsThisWeek: number;
   leadsThisMonth: number;
+  /**
+   * Leads in the previous calendar month — exposed so the dashboard's
+   * window-filter dropdown can pivot the Campaign Sources pie chart to
+   * "Last month" without an extra LeadByte round-trip (the BE already
+   * caches /reports/campaign?last_month for the campaign-table view).
+   * Optional for back-compat: older snapshots without it treat as 0.
+   */
+  leadsLastMonth?: number;
   totalRevenue: number;
   totalCost: number;
   cpl: number;
@@ -318,6 +326,7 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
       leadsToday: today?.leads ?? 0,
       leadsThisWeek: week?.leads ?? 0,
       leadsThisMonth: month?.leads ?? 0,
+      leadsLastMonth: lastMonth?.leads ?? 0,
       totalRevenue: Math.round(totalRevenue * 100) / 100,
       totalCost: Math.round(totalCost * 100) / 100,
       cpl: Math.round(cpl * 100) / 100,
