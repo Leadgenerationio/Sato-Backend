@@ -13,3 +13,5 @@ creativeRoutes.post('/creatives', creativeController.create);
 creativeRoutes.delete('/creatives/:id', creativeController.remove);
 // Audit trail of every client approve/reject decision for legal-evidence use.
 creativeRoutes.get('/creatives/:id/approval-history', creativeController.approvalHistory);
+// T2: staff submit-for-approval gate. Drafts only — any other state 409s.
+creativeRoutes.post('/creatives/:id/submit-for-approval', creativeController.submitForApproval);

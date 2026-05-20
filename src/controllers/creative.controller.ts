@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { z } from 'zod';
 import * as creativeService from '../services/creative.service.js';
 import * as approvalService from '../services/creative-approval.service.js';
+import { CreativeApprovalError } from '../services/creative-approval.service.js';
 
 export async function listForCampaign(req: Request, res: Response) {
   const creatives = await creativeService.listCreativesForCampaign(
@@ -61,4 +62,34 @@ export async function remove(req: Request, res: Response) {
 export async function approvalHistory(req: Request, res: Response) {
   const events = await approvalService.getApprovalHistory(req.params.id as string);
   res.json({ status: 'success', data: { events } });
+}
+
+/**
+ * T2 (Sam, 2026-05-20) — staff flips a draft → sent_for_approval. Only
+ * works from 'draft' or 'changes_requested'; any other state returns 409.
+ * Emits an audit row (action='submitted') so the timeline shows who sent
+ * it and when. The buyer only starts seeing the creative on portal pages
+ * once this endpoint has been called.
+ */
+export async function submitForApproval(req: Request, res: Response) {
+  try {
+    const event = await approvalService.submitForApproval({
+      creativeId: req.params.id as string,
+      submittedByUserId: req.user!.userId,
+      ipAddress: req.ip ?? null,
+      userAgent: req.get('user-agent') ?? null,
+    });
+    res.json({ status: 'success', data: { event } });
+  } catch (err) {
+    if (err instanceof CreativeApprovalError) {
+      const httpStatus =
+        err.code === 'NOT_FOUND' ? 404 :
+        err.code === 'INVALID_STATE' ? 409 :
+        err.code === 'ACCESS_DENIED' ? 403 :
+        400;
+      res.status(httpStatus).json({ status: 'error', code: err.code, message: err.message });
+      return;
+    }
+    throw err;
+  }
 }

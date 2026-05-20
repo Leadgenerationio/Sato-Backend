@@ -428,6 +428,9 @@ export async function getCompliance(requester: AuthPayload): Promise<PortalCompl
       .where(and(
         sql`${creatives.campaignId} IN (${sql.join(campaignIds.map((id) => sql`${id}::uuid`), sql`, `)})`,
         eq(creatives.isDeleted, false),
+        // T2 (Sam, 2026-05-20): staff drafts are never visible on the
+        // portal — buyer only sees what's been explicitly submitted.
+        sql`${creatives.status} <> 'draft'`,
       )),
     db
       .select()
@@ -520,6 +523,9 @@ export async function getCreativesBySection(requester: AuthPayload): Promise<Por
     .where(and(
       inArray(creatives.campaignId, linkedCampaignIds),
       eq(creatives.isDeleted, false),
+      // T2 (Sam, 2026-05-20): staff drafts are never visible on the
+      // portal — buyer only sees what's been explicitly submitted.
+      sql`${creatives.status} <> 'draft'`,
     ))
     .orderBy(desc(creatives.createdAt));
 

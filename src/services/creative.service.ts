@@ -56,6 +56,9 @@ export interface CreativeDto {
   version: number;
   uploadedAt: string;
   section: 'media' | 'copy_lp';
+  // T2: lifecycle state + when staff first sent it to the buyer.
+  status: 'draft' | 'sent_for_approval' | 'approved' | 'rejected' | 'changes_requested';
+  submittedAt: string | null;
 }
 
 type CreativeRow = typeof creatives.$inferSelect;
@@ -73,6 +76,8 @@ function toDto(row: CreativeRow): CreativeDto {
     version: row.version ?? 1,
     uploadedAt: (row.createdAt ?? new Date()).toISOString(),
     section: (row.section as 'media' | 'copy_lp') ?? 'media',
+    status: row.status,
+    submittedAt: row.submittedAt ? row.submittedAt.toISOString() : null,
   };
 }
 

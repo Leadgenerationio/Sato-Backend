@@ -14,10 +14,16 @@ import { users } from './users.js';
 // #9/#11). The buyer flow is approve / reject / request-changes; the third
 // state lets the buyer leave feedback without finalising a rejection so the
 // asset can be revised + re-uploaded.
+//
+// 'submitted' added in migration 0031 (T2 — Sam, 2026-05-20). Staff side
+// of the lifecycle: when an admin clicks Submit for approval on a draft,
+// we insert an audit row with action='submitted' so the same timeline
+// shows both staff submit events and buyer decision events.
 export const creativeApprovalActionEnum = pgEnum('creative_approval_action', [
   'approved',
   'rejected',
   'changes_requested',
+  'submitted',
 ]);
 
 export const creativeApprovals = pgTable('creative_approvals', {
