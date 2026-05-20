@@ -639,6 +639,15 @@ async function buildOverview() {
   // the card claimed "Live" while every call silently failed (Sam, 2026-
   // 05-15: "No facebook accounts" with no clue why). Cap the probe at 3s
   // so a slow/unreachable Catchr can't stall the whole Integrations page.
+  //
+  // 2026-05-20 — Sam demo bug: card was flipping to "Mock / partial"
+  // when the probe transiently failed (Catchr MCP timed out / session
+  // expired) even though the hourly sync was firing fine and writing
+  // real ad_spend rows. The probe is a session-stateful MCP handshake;
+  // intermittent failure is normal. Don't punish the connection state
+  // for it: if (a) the most recent ad-spend sync ran within the last
+  // 2 hours AND (b) we have any ad-spend rows in the local table,
+  // the integration is effectively live regardless of probe outcome.
   const catchrConfigured = isCatchrConfigured();
   let catchrConnected = false;
   let catchrPlatformsCount = 0;
@@ -660,6 +669,20 @@ async function buildOverview() {
     } catch (err) {
       catchrError = err instanceof Error ? err.message : 'Catchr fetch failed';
       logger.warn({ err }, 'Catchr probe failed in overview');
+    }
+    // Fallback connectivity signal — sync evidence beats probe response.
+    // If the hourly cron ran recently and we have spend rows, the
+    // integration is healthy even if the probe just hiccuped.
+    if (!catchrConnected) {
+      const lastSync = getLastCatchrSyncAt();
+      const lastSyncMs = lastSync ? new Date(lastSync).getTime() : 0;
+      const recentSync = lastSyncMs && (Date.now() - lastSyncMs) < 2 * 3600 * 1000;
+      const recentSpend = (adSpend30dRow[0]?.total ?? 0) > 0;
+      if (recentSync && recentSpend) {
+        catchrConnected = true;
+        // Don't overwrite catchrError if the probe genuinely errored —
+        // keep it as a soft warning the UI can surface alongside Live.
+      }
     }
   }
 
