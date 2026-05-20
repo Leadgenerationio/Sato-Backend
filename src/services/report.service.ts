@@ -724,15 +724,69 @@ export async function getUnifiedReport(
     return true;
   });
 
-  const rows: UnifiedReportRow[] = filteredSupplierRows.map((r) => {
+  // Pull Catchr ad_spend per platform for the same window — used to override
+  // the LeadByte `payout` field (which is £0 for ad-network suppliers like
+  // Facebook / Google / Taboola). The supplier→Catchr-platform mapper is
+  // the same one used by getSupplierPerformance.
+  const catchrPlatformByRowIdx = new Map<number, string>();
+  filteredSupplierRows.forEach((r, i) => {
+    const plat = supplierNameToCatchrPlatform(r.supplierName);
+    if (plat) catchrPlatformByRowIdx.set(i, plat);
+  });
+  const distinctCatchrPlatforms = [...new Set(catchrPlatformByRowIdx.values())];
+  const catchrSpendByPlatform = new Map<string, number>();
+  if (distinctCatchrPlatforms.length > 0) {
+    const { from, to } = deliveryWindowToRange(window);
+    const catchrRows = await db
+      .select({
+        platform: adSpend.platform,
+        spend: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text`,
+      })
+      .from(adSpend)
+      .where(and(
+        inArray(adSpend.platform, distinctCatchrPlatforms),
+        gte(adSpend.date, from),
+        lte(adSpend.date, to),
+      ))
+      .groupBy(adSpend.platform);
+    for (const r of catchrRows) catchrSpendByPlatform.set(r.platform, Number(r.spend));
+  }
+
+  // Build the row-lead totals per Catchr platform so we can distribute the
+  // platform's Catchr spend across all rows that map to it proportionally
+  // to each row's lead share. Without this, a single Facebook total of
+  // £20k would get assigned in full to every Facebook row, double-counting.
+  const totalLeadsByCatchrPlatform = new Map<string, number>();
+  filteredSupplierRows.forEach((r, i) => {
+    const plat = catchrPlatformByRowIdx.get(i);
+    if (!plat) return;
+    totalLeadsByCatchrPlatform.set(plat, (totalLeadsByCatchrPlatform.get(plat) ?? 0) + r.leads);
+  });
+
+  const rows: UnifiedReportRow[] = filteredSupplierRows.map((r, i) => {
     const meta = campaignMeta.get(r.campaignName) ?? {
       clientName: 'Pending client mapping',
       vertical: deriveVerticalFromName(r.campaignName),
     };
     const revenuePerLead = revenuePerLeadByCampaign.get(r.campaignName) ?? 0;
     const revenue = Math.round(revenuePerLead * r.leads * 100) / 100;
-    const profit = Math.round((revenue - r.spend) * 100) / 100;
-    const margin = revenue > 0 ? Math.round(((revenue - r.spend) / revenue) * 1000) / 10 : 0;
+
+    // Override the LeadByte payout `r.spend` with the row's share of the
+    // Catchr platform total — Catchr is the source of truth for ad-network
+    // spend; LeadByte's payout column is consistently £0 for those rows.
+    const catchrPlat = catchrPlatformByRowIdx.get(i);
+    let spend = r.spend;
+    if (catchrPlat) {
+      const platTotal = catchrSpendByPlatform.get(catchrPlat) ?? 0;
+      const platLeads = totalLeadsByCatchrPlatform.get(catchrPlat) ?? 0;
+      if (platTotal > 0 && platLeads > 0) {
+        spend = (platTotal * r.leads) / platLeads;
+      }
+    }
+    spend = Math.round(spend * 100) / 100;
+
+    const profit = Math.round((revenue - spend) * 100) / 100;
+    const margin = revenue > 0 ? Math.round(((revenue - spend) / revenue) * 1000) / 10 : 0;
     const catchrUrl = catchrByPlatform.get(r.platform.toLowerCase()) ?? null;
 
     return {
@@ -744,10 +798,10 @@ export async function getUnifiedReport(
       supplierPlatform: r.platform,
       catchrUrl,
       leads: r.leads,
-      spend: Math.round(r.spend * 100) / 100,
+      spend,
       revenue,
       profit,
-      cpl: r.leads > 0 ? Math.round((r.spend / r.leads) * 100) / 100 : 0,
+      cpl: r.leads > 0 ? Math.round((spend / r.leads) * 100) / 100 : 0,
       margin,
     };
   }).sort((a, b) => b.revenue - a.revenue);

@@ -15,60 +15,29 @@ const isoOffset = (days: number) => {
   return d.toISOString().split('T')[0];
 };
 
-// Mock leadbyte.getSupplierSpend to return a controlled fixture so the test
-// isn't dependent on what LeadByte returns at runtime (rate-limit risk).
+// Mock the LeadByte client: getSupplierSpend returns controlled supplier
+// fixtures (with £0 spend, as LeadByte does on prod for ad networks);
+// getCampaignReport returns matching campaign-level rows so the unified
+// report's revenue-allocation step has data to work with. Both stubs in
+// ONE vi.mock call — a second vi.mock would clobber the first.
 vi.mock('../integrations/leadbyte/leadbyte-client.js', () => ({
   getSupplierSpend: async () => [
-    {
-      supplierId: 'lb-sup-facebook',
-      supplierName: 'facebook',
-      platform: 'facebook',
-      campaignId: 'camp-1',
-      campaignName: 'Solar UK',
-      window: 'this_month',
-      spend: 0,
-      leads: 1000,
-      cpl: 0,
-    },
-    {
-      supplierId: 'lb-sup-Facebook Ads',
-      supplierName: 'Facebook Ads',
-      platform: 'Facebook Ads',
-      campaignId: 'camp-2',
-      campaignName: 'Insulation UK',
-      window: 'this_month',
-      spend: 0,
-      leads: 200,
-      cpl: 0,
-    },
-    {
-      supplierId: 'lb-sup-Google Ads',
-      supplierName: 'Google Ads',
-      platform: 'Google Ads',
-      campaignId: 'camp-3',
-      campaignName: 'Hearing Aids',
-      window: 'this_month',
-      spend: 0,
-      leads: 500,
-      cpl: 0,
-    },
-    {
-      supplierId: 'lb-sup-direct-1',
-      supplierName: 'Direct',
-      platform: 'Direct',
-      campaignId: 'camp-4',
-      campaignName: 'Will Writing',
-      window: 'this_month',
-      spend: 0,
-      leads: 50,
-      cpl: 0,
-    },
+    { supplierId: 'lb-sup-facebook', supplierName: 'facebook', platform: 'facebook', campaignId: 'camp-1', campaignName: 'Solar UK', window: 'this_month', spend: 0, leads: 1000, cpl: 0 },
+    { supplierId: 'lb-sup-Facebook Ads', supplierName: 'Facebook Ads', platform: 'Facebook Ads', campaignId: 'camp-2', campaignName: 'Insulation UK', window: 'this_month', spend: 0, leads: 200, cpl: 0 },
+    { supplierId: 'lb-sup-Google Ads', supplierName: 'Google Ads', platform: 'Google Ads', campaignId: 'camp-3', campaignName: 'Hearing Aids', window: 'this_month', spend: 0, leads: 500, cpl: 0 },
+    { supplierId: 'lb-sup-direct-1', supplierName: 'Direct', platform: 'Direct', campaignId: 'camp-4', campaignName: 'Will Writing', window: 'this_month', spend: 0, leads: 50, cpl: 0 },
+  ],
+  getCampaignReport: async () => [
+    { campaign: 'Solar UK', leads: 1000, valid: 950, invalid: 50, pending: 0, revenue: 5000, payout: 0, profit: 0, eCPL: 0 },
+    { campaign: 'Insulation UK', leads: 200, valid: 190, invalid: 10, pending: 0, revenue: 1000, payout: 0, profit: 0, eCPL: 0 },
+    { campaign: 'Hearing Aids', leads: 500, valid: 470, invalid: 30, pending: 0, revenue: 3000, payout: 0, profit: 0, eCPL: 0 },
+    { campaign: 'Will Writing', leads: 50, valid: 48, invalid: 2, pending: 0, revenue: 250, payout: 0, profit: 0, eCPL: 0 },
   ],
 }));
 
 // Lazy-import the service AFTER the mock is registered so it picks up the
 // mocked leadbyte client.
-const { getSupplierPerformance } = await import('../services/report.service.js');
+const { getSupplierPerformance, getUnifiedReport } = await import('../services/report.service.js');
 
 describe('Supplier performance — Catchr ad_spend join', () => {
   beforeAll(async () => {
@@ -139,5 +108,23 @@ describe('Supplier performance — Catchr ad_spend join', () => {
     expect(direct).toBeDefined();
     expect(direct!.totalSpend).toBe(0);
     expect(direct!.cpl).toBe(0);
+  });
+
+  it('Unified report rows for ad-platform suppliers get non-zero Catchr spend', async () => {
+    const { rows } = await getUnifiedReport(
+      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      { window: 'this_month' },
+    );
+    const fbRow = rows.find((r) => r.supplier === 'facebook');
+    const gAdsRow = rows.find((r) => r.supplier === 'Google Ads');
+    expect(fbRow).toBeDefined();
+    expect(gAdsRow).toBeDefined();
+    // The key invariant: BEFORE this fix these were £0; now they should be > 0.
+    expect(fbRow!.spend).toBeGreaterThan(0);
+    expect(gAdsRow!.spend).toBeGreaterThan(0);
+    // Direct should still be £0.
+    const directRow = rows.find((r) => r.supplier === 'Direct');
+    expect(directRow).toBeDefined();
+    expect(directRow!.spend).toBe(0);
   });
 });
