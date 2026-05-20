@@ -230,6 +230,66 @@ export async function toggleWorkflowStatus(id: string, requester: AuthPayload): 
 }
 
 /**
+ * T4 (Sam, 2026-05-20) — explicit pause / resume so the FE button is
+ * idempotent. Calling pause on an already-paused workflow returns the
+ * current row with no state change (HTTP 200), same for resume on
+ * already-active. Returns null when the workflow doesn't exist or
+ * isn't reachable by the requester's business scope.
+ *
+ * The previous toggleWorkflowStatus() flipped between active/paused,
+ * which races badly when the FE optimistically updates and a second
+ * tab clicks the button: each toggle ends up in the WRONG state. The
+ * explicit endpoints are immune to that.
+ */
+export async function setWorkflowStatus(
+  id: string,
+  next: 'active' | 'paused',
+  requester: AuthPayload,
+): Promise<WorkflowDetail | null> {
+  const [existing] = await db.select().from(workflows).where(eq(workflows.id, id));
+  if (!existing) return null;
+  if (requester.businessId && existing.businessId !== requester.businessId) return null;
+  // Idempotent: a no-op write is fine because we always return the current
+  // row, but skip the UPDATE to avoid bumping updated_at unnecessarily.
+  if (existing.status === next) {
+    const executions = await loadRecentExecutions(id);
+    return detailFromRow(existing, executions);
+  }
+  const [row] = await db
+    .update(workflows)
+    .set({ status: next, updatedAt: new Date() })
+    .where(eq(workflows.id, id))
+    .returning();
+  if (!row) return null;
+  const executions = await loadRecentExecutions(id);
+  return detailFromRow(row, executions);
+}
+
+/**
+ * Returns true when the workflow with this handler_key exists AND is
+ * paused. Used by the cron workers to short-circuit before invoking an
+ * automation handler when an admin has paused it from the UI.
+ *
+ * Returns false when:
+ *   - no workflow row carries this handler_key (legacy / unbound jobs)
+ *   - the workflow exists and is active / draft
+ *   - the DB lookup itself fails (fail-open: better a cron fires than
+ *     silently stops because of a transient DB blip)
+ */
+export async function isAutomationPaused(handlerKey: string): Promise<boolean> {
+  try {
+    const [row] = await db
+      .select({ status: workflows.status })
+      .from(workflows)
+      .where(eq(workflows.handlerKey, handlerKey))
+      .limit(1);
+    return row?.status === 'paused';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Kick off a workflow run.
  *
  * If Redis is configured we enqueue a BullMQ `workflow.run` job (the worker

@@ -34,4 +34,10 @@ workflowRoutes.post('/', validate(createWorkflowSchema), workflowController.crea
 workflowRoutes.get('/:id', workflowController.getWorkflow);
 workflowRoutes.put('/:id', validate(updateWorkflowSchema), workflowController.updateWorkflow);
 workflowRoutes.post('/:id/toggle-status', workflowController.toggleStatus);
+// T4 (Sam, 2026-05-20): explicit pause / resume so the FE doesn't have to
+// guess state. Idempotent — same call twice returns 200 each time without
+// flipping into the wrong state, which is what the toggle endpoint does
+// under race conditions.
+workflowRoutes.post('/:id/pause', workflowController.pauseWorkflow);
+workflowRoutes.post('/:id/resume', workflowController.resumeWorkflow);
 workflowRoutes.post('/:id/execute', workflowController.executeWorkflow);

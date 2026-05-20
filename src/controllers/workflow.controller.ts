@@ -38,6 +38,29 @@ export async function toggleStatus(req: Request, res: Response) {
   res.json({ status: 'success', data: { workflow } });
 }
 
+/**
+ * T4 (Sam, 2026-05-20) — explicit pause endpoint, idempotent. Calling
+ * pause on an already-paused workflow returns 200 with the current row.
+ */
+export async function pauseWorkflow(req: Request, res: Response) {
+  const workflow = await workflowService.setWorkflowStatus(req.params.id as string, 'paused', req.user!);
+  if (!workflow) {
+    res.status(404).json({ status: 'error', message: 'Workflow not found' });
+    return;
+  }
+  res.json({ status: 'success', data: { workflow } });
+}
+
+/** T4 — explicit resume, idempotent. */
+export async function resumeWorkflow(req: Request, res: Response) {
+  const workflow = await workflowService.setWorkflowStatus(req.params.id as string, 'active', req.user!);
+  if (!workflow) {
+    res.status(404).json({ status: 'error', message: 'Workflow not found' });
+    return;
+  }
+  res.json({ status: 'success', data: { workflow } });
+}
+
 export async function executeWorkflow(req: Request, res: Response) {
   const execution = await workflowService.executeWorkflow(req.params.id as string, req.user!);
   if (!execution) {

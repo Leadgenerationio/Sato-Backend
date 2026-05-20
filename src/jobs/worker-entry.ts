@@ -23,7 +23,7 @@ import * as clientEmailsService from '../services/client-emails.service.js';
 import { emailQueue } from './queue.js';
 import * as invoiceService from '../services/invoice.service.js';
 import { runAutoInvoiceAllBusinesses } from '../services/auto-invoice.service.js';
-import { refreshWorkflowAggregates } from '../services/workflow.service.js';
+import { refreshWorkflowAggregates, isAutomationPaused } from '../services/workflow.service.js';
 import { WORKFLOW_HANDLERS, isRegisteredHandler } from './workflow-handlers.js';
 import type { AuthPayload } from '../types/index.js';
 
@@ -99,6 +99,13 @@ new Worker('invoice', async (job) => {
 
   switch (job.name) {
     case 'chase-overdue-invoices': {
+      // T4 (Sam, 2026-05-20): admin can pause this automation via the
+      // workflows row whose handler_key = 'chase-overdue'. Cron still
+      // fires on schedule but the handler short-circuits.
+      if (await isAutomationPaused('chase-overdue')) {
+        logger.info('chase-overdue-invoices: workflow paused, skipping');
+        return { skipped: 'paused' };
+      }
       const overdue = await invoiceService.getOverdueInvoices(SYSTEM_AUTH);
       let enqueued = 0;
       for (const inv of overdue) {
@@ -118,6 +125,16 @@ new Worker('invoice', async (job) => {
       // Sam Loom #14 — Mondays 09:00 UTC. Iterates every business; per-tenant
       // errors are caught + logged in auto_invoice_runs without aborting the
       // whole sweep.
+      //
+      // T4 (Sam, 2026-05-20): admin can pause this automation via the
+      // workflows row whose handler_key = 'auto-invoice'. The BullMQ
+      // cron still fires on schedule but the handler short-circuits.
+      // This is the path that was creating £17,880 + £21,465 draft
+      // invoices Sam couldn't easily stop.
+      if (await isAutomationPaused('auto-invoice')) {
+        logger.info('auto-invoice-weekly: workflow paused, skipping');
+        return { skipped: 'paused' };
+      }
       const result = await runAutoInvoiceAllBusinesses();
       logger.info(result, 'auto-invoice-weekly complete');
       return result;
@@ -184,6 +201,25 @@ new Worker('workflow', async (job) => {
       .set({ status: 'failed', completedAt: new Date(), error: 'Workflow not found' })
       .where(eq(workflowExecutions.id, executionId));
     return { error: 'workflow_missing' };
+  }
+
+  // T4 (Sam, 2026-05-20): paused workflows short-circuit before invoking
+  // the handler. The execution row is closed out as a 'paused' result so
+  // the timeline shows the call was made + skipped, rather than failed.
+  if (wf.status === 'paused') {
+    logger.info({ workflowId, handlerKey: wf.handlerKey }, 'Workflow paused — skipping run');
+    await db
+      .update(workflowExecutions)
+      .set({
+        status: 'paused',
+        completedAt: new Date(),
+        stepsCompleted: 0,
+        stepsTotal: 1,
+        result: 'Workflow paused — handler not invoked',
+      })
+      .where(eq(workflowExecutions.id, executionId));
+    await refreshWorkflowAggregates(workflowId, wf.lastRunAt ?? new Date());
+    return { status: 'paused', summary: 'paused' };
   }
 
   // Bound handler? Run it instead of the generic step loop.
