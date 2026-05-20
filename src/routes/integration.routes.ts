@@ -43,3 +43,7 @@ integrationRoutes.get('/catchr/status', integrationController.catchrStatus);
 // /catchr/accounts fetch. Both replace the old free-form text paste.
 integrationRoutes.get('/catchr/platforms', integrationController.catchrPlatforms);
 integrationRoutes.get('/catchr/accounts', integrationController.catchrAccounts);
+// Per-platform breakdown of what landed in the local ad_spend table —
+// surfaces TikTok / Bing / Taboola in addition to FB+Google that the
+// supplier-performance report covers. Used to confirm sync is writing.
+integrationRoutes.get('/catchr/spend-by-platform', integrationController.catchrSpendByPlatform);

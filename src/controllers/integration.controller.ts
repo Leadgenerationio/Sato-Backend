@@ -399,6 +399,45 @@ export async function catchrStatus(_req: Request, res: Response) {
   });
 }
 
+/**
+ * Diagnostic: per-platform breakdown of what's in `ad_spend`. Used to
+ * answer "is TikTok / Bing / Taboola actually writing rows?" without
+ * needing prod DB access. Each row = one Catchr platform.
+ */
+export async function catchrSpendByPlatform(_req: Request, res: Response) {
+  const rows = await db
+    .select({
+      platform: adSpend.platform,
+      rowCount: sql<number>`count(*)::int`,
+      accountCount: sql<number>`count(distinct ${adSpend.accountId})::int`,
+      lifetimeSpend: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text`,
+      last30dSpend: sql<string>`coalesce(sum(${adSpend.spend}::numeric) filter (where ${adSpend.date} >= current_date - interval '30 days'), 0)::text`,
+      last90dSpend: sql<string>`coalesce(sum(${adSpend.spend}::numeric) filter (where ${adSpend.date} >= current_date - interval '90 days'), 0)::text`,
+      earliestDate: sql<string>`min(${adSpend.date})::text`,
+      latestDate: sql<string>`max(${adSpend.date})::text`,
+    })
+    .from(adSpend)
+    .groupBy(adSpend.platform)
+    .orderBy(sql`coalesce(sum(${adSpend.spend}::numeric), 0) desc`);
+
+  res.json({
+    status: 'success',
+    data: {
+      platforms: rows.map((r) => ({
+        platform: r.platform,
+        rowCount: r.rowCount,
+        accountCount: r.accountCount,
+        lifetimeSpend: Number(r.lifetimeSpend),
+        last30dSpend: Number(r.last30dSpend),
+        last90dSpend: Number(r.last90dSpend),
+        earliestDate: r.earliestDate,
+        latestDate: r.latestDate,
+      })),
+      asOf: new Date().toISOString(),
+    },
+  });
+}
+
 // Cache list-sources for a few minutes — the account list rarely changes
 // (Sam's connected ad accounts are stable across sessions) and the MCP
 // round-trip is ~600-1200ms because of session handshake overhead.
