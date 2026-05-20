@@ -8,6 +8,7 @@ import { isUuid } from '../utils/zod-helpers.js';
 import { resolveSatoCampaignId } from '../utils/resolve-campaign-id.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import { logger } from '../utils/logger.js';
+import { invalidateCache } from '../utils/cache.js';
 import type { AuthPayload } from '../types/index.js';
 
 /**
@@ -285,6 +286,103 @@ function sanitizeAccountIds(input: unknown): string[] {
   return out;
 }
 
+// ─── T1 mutation side-effects ───────────────────────────────────────────────
+//
+// Every traffic_sources create/update/delete fires two side-effects:
+//
+//   1. Re-attribute ad_spend.stato_campaign_id for the affected
+//      (platform, account_id) pairs in the 90-day window. The stato_
+//      campaign_id column is the canonical "this row belongs to campaign X"
+//      pointer — every dashboard / report rollup that bulk-sums ad_spend
+//      (dashboard.service.ts, report.service.ts) uses it. Re-deriving from
+//      current traffic_sources state on every mutation keeps it true.
+//
+//   2. Invalidate the LeadByte campaign-list + per-campaign caches so the
+//      next /campaigns request reflects the new mapping. Without this the
+//      list view shows stale cost for up to CAMPAIGN_LIST_TTL_SECONDS
+//      (15 min) after Sam adds a mapping.
+
+/** Build the (platform, accountId) pair set carried by one traffic_sources row. */
+function pairsFromRow(row: { platform: string | null; accountId: string | null; accountIds: string[] | null }): Array<{ platform: string; accountId: string }> {
+  if (!row.platform) return [];
+  const ids = new Set<string>();
+  if (row.accountId) ids.add(row.accountId);
+  if (Array.isArray(row.accountIds)) {
+    for (const v of row.accountIds) if (typeof v === 'string' && v) ids.add(v);
+  }
+  return Array.from(ids).map((accountId) => ({ platform: row.platform!, accountId }));
+}
+
+/**
+ * For each `(platform, account_id)` in `pairs`, look up the first active
+ * traffic_sources row that still covers it and write that row's
+ * `campaign_id` into `ad_spend.stato_campaign_id`. If nothing covers the
+ * pair anymore (mapping was just deleted / made inactive), the column
+ * goes back to `NULL` so the row stops being attributed.
+ *
+ * Restricted to the last 90 days per T1 AC#3 — older rows aren't worth
+ * the rewrite cost and the rollups themselves only look back 30d.
+ *
+ * Uses `traffic_sources.account_ids ? account_id` (jsonb ? text → bool)
+ * so both legacy single-account rows and new multi-account rows are
+ * considered as coverage.
+ */
+async function reattributeAdSpend(pairs: Array<{ platform: string; accountId: string }>): Promise<void> {
+  if (pairs.length === 0) return;
+  // One UPDATE per pair. Typical traffic_sources rows carry 1-5 accounts,
+  // so this is small. The alternative (a single UPDATE … FROM unnest($1,$2))
+  // works in raw SQL but Drizzle's array parameter binding doesn't always
+  // produce a Postgres array literal in the way the unnest signature
+  // expects; the per-pair loop avoids that hazard entirely.
+  for (const { platform, accountId } of pairs) {
+    try {
+      await db.execute(sql`
+        update ad_spend
+        set stato_campaign_id = (
+          select ts.campaign_id
+          from traffic_sources ts
+          where ts.is_active = true
+            and ts.platform = ${platform}
+            and (
+              ts.account_id = ${accountId}
+              or ts.account_ids ? ${accountId}
+            )
+          order by ts.created_at asc
+          limit 1
+        )
+        where platform = ${platform}
+          and account_id = ${accountId}
+          and date >= current_date - interval '90 days'
+      `);
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), platform, accountId },
+        'reattributeAdSpend pair failed — stato_campaign_id may be stale',
+      );
+    }
+  }
+}
+
+/**
+ * Resolve `satoId` → `leadbyteCampaignId` and drop the Redis cache entries
+ * that would otherwise serve stale cost numbers to the /campaigns list and
+ * the campaign detail. Safe no-op when Redis is unavailable or the
+ * campaign isn't found.
+ */
+async function invalidateCampaignCaches(satoId: string): Promise<void> {
+  const [row] = await db
+    .select({ lbId: campaignsTable.leadbyteCampaignId })
+    .from(campaignsTable)
+    .where(eq(campaignsTable.id, satoId));
+  const lbId = row?.lbId ?? null;
+  const keys: string[] = ['lb:campaigns'];
+  if (lbId) {
+    keys.push(`lb:deliveries:${lbId}:30d:v2`);
+    keys.push(`lb:suppliers:${lbId}:30d:v1`);
+  }
+  await invalidateCache(...keys);
+}
+
 export async function createSource(
   campaignId: string,
   input: CreateTrafficSourceInput,
@@ -305,6 +403,10 @@ export async function createSource(
       isActive: input.isActive ?? true,
     })
     .returning();
+  // Backfill historical ad_spend rows + bust the campaign-list cache so the
+  // mapping is visible on the next call (T1 AC#3 + #7).
+  await reattributeAdSpend(pairsFromRow(row));
+  await invalidateCampaignCaches(satoId);
   const leadPrice = await leadPriceForCampaign(satoId);
   return toDto(row, leadPrice);
 }
@@ -318,6 +420,20 @@ export async function updateSource(
   if (!isUuid(sourceId)) return null;
   const satoId = await resolveSatoCampaignId(campaignId);
   if (!satoId) return null;
+  // Capture the pre-mutation pair set so we can re-attribute even pairs
+  // that the update DROPS from this row (e.g. removing an account from
+  // account_ids[] should clear its stato_campaign_id if no other row
+  // covers it).
+  const [before] = await db
+    .select({
+      platform: trafficSources.platform,
+      accountId: trafficSources.accountId,
+      accountIds: trafficSources.accountIds,
+    })
+    .from(trafficSources)
+    .where(and(eq(trafficSources.id, sourceId), eq(trafficSources.campaignId, satoId)));
+  const beforePairs = before ? pairsFromRow(before) : [];
+
   const patch: Partial<SourceRow> = { updatedAt: new Date() };
   if (input.name !== undefined) patch.name = input.name;
   if (input.platform !== undefined) patch.platform = input.platform || null;
@@ -334,6 +450,18 @@ export async function updateSource(
     .where(and(eq(trafficSources.id, sourceId), eq(trafficSources.campaignId, satoId)))
     .returning();
   if (!row) return null;
+
+  // Re-attribute the union of before + after pairs. Dropped pairs get re-
+  // checked against the new traffic_sources state and either point at
+  // another row that still covers them or fall back to NULL.
+  const afterPairs = pairsFromRow(row);
+  const merged = new Map<string, { platform: string; accountId: string }>();
+  for (const p of [...beforePairs, ...afterPairs]) {
+    merged.set(`${p.platform}|${p.accountId}`, p);
+  }
+  await reattributeAdSpend(Array.from(merged.values()));
+  await invalidateCampaignCaches(satoId);
+
   const leadPrice = await leadPriceForCampaign(satoId);
   return toDto(row, leadPrice);
 }
@@ -346,6 +474,18 @@ export async function deleteSource(
   if (!isUuid(sourceId)) return false;
   const satoId = await resolveSatoCampaignId(campaignId);
   if (!satoId) return false;
+  // Capture the pair set BEFORE the delete so we know which ad_spend rows
+  // need their stato_campaign_id re-derived. After the delete, those pairs
+  // either re-attribute to another active row (if one still covers them)
+  // or fall back to NULL.
+  const [before] = await db
+    .select({
+      platform: trafficSources.platform,
+      accountId: trafficSources.accountId,
+      accountIds: trafficSources.accountIds,
+    })
+    .from(trafficSources)
+    .where(and(eq(trafficSources.id, sourceId), eq(trafficSources.campaignId, satoId)));
   // Idempotent — return true even if 0 rows deleted (row already gone or
   // never existed for this campaign). REST DELETE convention + avoids the
   // "Source not found" toast spam when the FE double-clicks the trash icon.
@@ -353,6 +493,10 @@ export async function deleteSource(
   await db
     .delete(trafficSources)
     .where(and(eq(trafficSources.id, sourceId), eq(trafficSources.campaignId, satoId)));
+  if (before) {
+    await reattributeAdSpend(pairsFromRow(before));
+  }
+  await invalidateCampaignCaches(satoId);
   return true;
 }
 
