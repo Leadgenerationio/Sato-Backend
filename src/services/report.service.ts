@@ -1,13 +1,74 @@
-import { and, eq, sql, isNull, gte } from 'drizzle-orm';
+import { and, eq, sql, isNull, gte, lte, inArray } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { invoices } from '../db/schema/invoices.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { clients } from '../db/schema/clients.js';
 import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
 import { trafficSources } from '../db/schema/traffic-sources.js';
+import { adSpend } from '../db/schema/ad-spend.js';
 import type { AuthPayload } from '../types/index.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
+
+// LeadByte DeliveryWindow → ISO date range. Mirrors leadbyte-client.windowToRange
+// but lives here so report.service can run its own Catchr ad_spend query.
+function deliveryWindowToRange(win: DeliveryWindow): { from: string; to: string } {
+  const now = new Date();
+  const iso = (d: Date) => d.toISOString().split('T')[0];
+  const startOfDay = (d: Date) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
+  switch (win) {
+    case 'today':       return { from: iso(now), to: iso(now) };
+    case 'yesterday': {
+      const y = new Date(now); y.setDate(y.getDate() - 1);
+      return { from: iso(y), to: iso(y) };
+    }
+    case 'this_week': {
+      const start = startOfDay(now); start.setDate(start.getDate() - start.getDay());
+      return { from: iso(start), to: iso(now) };
+    }
+    case 'last_week': {
+      const end = startOfDay(now); end.setDate(end.getDate() - end.getDay() - 1);
+      const start = new Date(end); start.setDate(start.getDate() - 6);
+      return { from: iso(start), to: iso(end) };
+    }
+    case 'this_month': {
+      const start = new Date(now.getFullYear(), now.getMonth(), 1);
+      return { from: iso(start), to: iso(now) };
+    }
+    case 'last_month': {
+      const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const end   = new Date(now.getFullYear(), now.getMonth(), 0);
+      return { from: iso(start), to: iso(end) };
+    }
+    case 'ytd':
+      return { from: iso(new Date(now.getFullYear(), 0, 1)), to: iso(now) };
+  }
+}
+
+// Map a LeadByte supplier name to the canonical Catchr `ad_spend.platform`
+// identifier. LeadByte's supplier names are freeform / mixed-case (e.g.
+// "Facebook Ads", "facebook", "Google Ads"); Catchr stores platforms as
+// hyphenated lowercase ("facebook", "google-ads", "tik-tok").
+//
+// Returns null when the supplier doesn't have an ad-platform counterpart
+// (e.g. "Direct", "Community Manager", "Trustpilot") — those should keep
+// totalSpend=0 since no ad-network paid for them.
+function supplierNameToCatchrPlatform(supplierName: string): string | null {
+  const n = supplierName.toLowerCase().trim();
+  if (!n) return null;
+  if (n.includes('facebook') || n === 'meta' || n.includes('meta ads')) return 'facebook';
+  if (n.includes('google')) return 'google-ads';
+  if (n.includes('tiktok') || n.includes('tik tok') || n.includes('tik-tok')) return 'tik-tok';
+  if (n.includes('taboola')) return 'taboola';
+  if (n.includes('outbrain')) return 'outbrain';
+  if (n.includes('microsoft') || n === 'bing' || n.includes('bing ads')) return 'microsoft-ads';
+  if (n.includes('linkedin')) return 'linkedin-ads';
+  if (n.includes('snapchat')) return 'snapchat-ads';
+  if (n.includes('reddit')) return 'reddit-ads';
+  if (n.includes('pinterest')) return 'pinterest-ads';
+  if (n.includes('twitter') || n.includes(' x ads')) return 'twitter-ads';
+  return null;
+}
 
 export interface CampaignReportRow {
   campaignId: string;
@@ -314,17 +375,22 @@ export async function getSupplierPerformance(
   // supplier spend.
   if (spendRows.length === 0) return [];
 
-  // Aggregate by supplier (collapse across campaigns)
+  // Step 1 — aggregate LeadByte rows by supplier (collapse across campaigns).
+  // The `spend` LeadByte returns is `payout` — what we owe the supplier
+  // directly — which is £0 for ad-platform suppliers (Facebook, Google
+  // Ads, Taboola, etc.) because the spend lives on Catchr. We'll merge
+  // Catchr's number in next.
   const bySupplier = new Map<string, SupplierReportRow>();
+  // Also collapse mixed-case duplicates ("facebook" + "Facebook Ads") so
+  // the Catchr spend isn't double-shown — track which Catchr platform
+  // each supplier maps to and dedupe on that.
+  const catchrPlatformKey = new Map<string, string>(); // supplierId → catchr platform
   for (const r of spendRows) {
     const existing = bySupplier.get(r.supplierId);
     if (existing) {
       existing.totalSpend += r.spend;
       existing.totalLeads += r.leads;
       existing.campaigns += 1;
-      existing.cpl = existing.totalLeads > 0
-        ? Math.round((existing.totalSpend / existing.totalLeads) * 100) / 100
-        : 0;
     } else {
       bySupplier.set(r.supplierId, {
         supplierId: r.supplierId,
@@ -332,10 +398,72 @@ export async function getSupplierPerformance(
         platform: r.platform,
         totalSpend: r.spend,
         totalLeads: r.leads,
-        cpl: r.cpl,
+        cpl: 0, // computed at the end after Catchr merge
         campaigns: 1,
       });
     }
+    const catchrPlat = supplierNameToCatchrPlatform(r.supplierName);
+    if (catchrPlat) catchrPlatformKey.set(r.supplierId, catchrPlat);
+  }
+
+  // Step 2 — pull Catchr ad_spend per platform for the same window and
+  // merge into the supplier rows. This is what fills in the £0 spend on
+  // every ad-platform supplier row.
+  const platforms = [...new Set(catchrPlatformKey.values())];
+  if (platforms.length > 0) {
+    const { from, to } = deliveryWindowToRange(window);
+    const catchrRows = await db
+      .select({
+        platform: adSpend.platform,
+        spend: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text`,
+      })
+      .from(adSpend)
+      .where(and(
+        inArray(adSpend.platform, platforms),
+        gte(adSpend.date, from),
+        lte(adSpend.date, to),
+      ))
+      .groupBy(adSpend.platform);
+
+    const catchrSpendByPlatform = new Map(
+      catchrRows.map((r) => [r.platform, Number(r.spend)]),
+    );
+
+    // For each supplier row that has a Catchr-platform match, OVERRIDE
+    // totalSpend with Catchr's number (LeadByte's £0 is wrong). Distribute
+    // the platform's total across all suppliers mapped to that platform
+    // (e.g. "facebook" + "Facebook Ads") proportionally to their lead share
+    // so the platform total isn't double-counted in the table sum.
+    const supplierIdsByCatchr = new Map<string, string[]>();
+    for (const [supId, plat] of catchrPlatformKey.entries()) {
+      if (!supplierIdsByCatchr.has(plat)) supplierIdsByCatchr.set(plat, []);
+      supplierIdsByCatchr.get(plat)!.push(supId);
+    }
+
+    for (const [plat, supIds] of supplierIdsByCatchr.entries()) {
+      const platSpend = catchrSpendByPlatform.get(plat) ?? 0;
+      if (platSpend === 0) continue;
+      const totalLeadsAcrossSupIds = supIds.reduce(
+        (acc, id) => acc + (bySupplier.get(id)?.totalLeads ?? 0),
+        0,
+      );
+      for (const supId of supIds) {
+        const row = bySupplier.get(supId);
+        if (!row) continue;
+        const share = totalLeadsAcrossSupIds > 0
+          ? row.totalLeads / totalLeadsAcrossSupIds
+          : 1 / supIds.length;
+        row.totalSpend = Math.round(platSpend * share * 100) / 100;
+      }
+    }
+  }
+
+  // Step 3 — recompute CPL across the merged rows now that totalSpend is
+  // populated from Catchr.
+  for (const row of bySupplier.values()) {
+    row.cpl = row.totalLeads > 0
+      ? Math.round((row.totalSpend / row.totalLeads) * 100) / 100
+      : 0;
   }
 
   return [...bySupplier.values()].sort((a, b) => b.totalSpend - a.totalSpend);
@@ -487,8 +615,6 @@ export async function getFinancialOverview(
 // (bank_transactions joined to cost_categories) for cost buckets.
 
 import { bankTransactions, costCategories } from '../db/schema/bank-feed.js';
-import { adSpend } from '../db/schema/ad-spend.js';
-import { lte } from 'drizzle-orm';
 
 export interface PnlSummary {
   fromDate: string;
