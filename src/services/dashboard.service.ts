@@ -194,17 +194,41 @@ export interface DashboardStats {
    */
   totalCost: number;
   /**
-   * Revenue − cost over the selected window — period-coherent.
+   * Net Profit — always rolling-365d revenue minus rolling-90d cost,
+   * independent of the selected window.
    *
-   * Both numerator and denominator share the same window, so margins read
-   * intuitively. For short windows (this_week/this_month), the
-   * acquisition-spend → invoice → paid lag (~30-60 days) makes Net Profit
-   * look heavily negative — that's accurate for the period, not a bug.
-   * Use 'last_year' (default) for a smoothed annual view.
+   * Why decoupled from the window selector: the ad-spend → lead → invoice →
+   * paid cycle takes ~30-60 days. If we used the same window for both
+   * sides, a "this_week" view would show one week of fresh cost against
+   * zero corresponding revenue and read -2,047% margin. Useless.
+   *
+   * Locking Profit/Margin to a trailing 365d revenue / 90d cost makes the
+   * number stable: the user can change the time-range filter to lens the
+   * Revenue and Cost tiles separately, but Profit/Margin always represent
+   * what the business is *actually* earning at its current run rate.
+   *
+   * Catchr only has ~50d of ad-spend history at present, so the 90d cost
+   * is currently bounded by data availability — once Catchr backfills the
+   * gap this number will smooth out without code changes.
    */
   netProfit: number;
-  /** netProfit / revenue × 100. Null when no revenue in window. */
+  /**
+   * netProfit / rolling-365d-revenue × 100. Same period-coherent definition
+   * as netProfit — independent of the window selector. Null when there's
+   * no rolling-365d revenue at all.
+   */
   profitMargin: number;
+  /**
+   * Period-coherent revenue used for the Profit / Margin computation.
+   * Surfaced so the FE can show "based on £733k trailing 12mo" alongside
+   * the tile when the user hovers / opens the tooltip.
+   */
+  rollingRevenue365d: number;
+  /**
+   * Period-coherent cost used for the Profit / Margin computation.
+   * Trailing 90 days of ad spend.
+   */
+  rollingCost90d: number;
   activeClients: number;
   /** Total campaigns with status='active' (regardless of client linkage). */
   activeCampaigns: number;
@@ -280,6 +304,7 @@ export async function getDashboardStats(
   const [
     revenueRow, costRow, clientsRow, campaignsRow, linkedCampaignsRow,
     leadsRow, prevRevenueRow, prevLeadsRow,
+    rollingRevenueRow, rollingCostRow,
   ] = await Promise.all([
     // Revenue in the selected window — paid invoices with due_date in range.
     db
@@ -326,13 +351,32 @@ export async function getDashboardStats(
       .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
       .from(leadDeliveries)
       .where(sql`${leadDeliveries.deliveryDate} >= ${win.prevStartIso}::date AND ${leadDeliveries.deliveryDate} <= ${win.prevEndIso}::date`),
+    // Rolling-365d revenue — drives the period-coherent Profit / Margin
+    // tiles. Independent of the user's selected window so the margin
+    // number never collapses into the -2,000%+ nonsense that happens when
+    // a one-week cost window is divided by a one-week revenue window
+    // (revenue lags spend by ~30-60 days).
+    db
+      .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
+      .from(invoices)
+      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= (current_date - interval '365 days') AND ${invoices.dueDate} <= current_date`),
+    // Rolling-90d cost — same reasoning. 90d gives the post-acquisition
+    // invoice cycle time to convert spend into the revenue captured above.
+    db
+      .select({ cost: sql<string>`coalesce(sum(${adSpend.spend}), 0)::text` })
+      .from(adSpend)
+      .where(sql`${adSpend.date} >= (current_date - interval '90 days') AND ${adSpend.date} <= current_date`),
   ]);
 
   const revenue = Number(revenueRow[0]?.revenue ?? '0');
   const cost = Number(costRow[0]?.cost ?? '0');
-  const netProfit = revenue - cost;
-  const profitMargin = revenue > 0
-    ? Math.round((netProfit / revenue) * 1000) / 10
+  // Profit + Margin use rolling-365d-revenue / rolling-90d-cost regardless
+  // of the user's window selection — see the field doc comments above.
+  const rollingRevenue365d = Number(rollingRevenueRow[0]?.revenue ?? '0');
+  const rollingCost90d = Number(rollingCostRow[0]?.cost ?? '0');
+  const netProfit = rollingRevenue365d - rollingCost90d;
+  const profitMargin = rollingRevenue365d > 0
+    ? Math.round((netProfit / rollingRevenue365d) * 1000) / 10
     : 0;
 
   // Trend chips: window vs prior equivalent window. Null when prior was zero
@@ -352,6 +396,8 @@ export async function getDashboardStats(
     totalCost: Math.round(cost * 100) / 100,
     netProfit: Math.round(netProfit * 100) / 100,
     profitMargin,
+    rollingRevenue365d: Math.round(rollingRevenue365d * 100) / 100,
+    rollingCost90d: Math.round(rollingCost90d * 100) / 100,
     activeClients: clientsRow[0]?.n ?? 0,
     activeCampaigns: campaignsRow[0]?.n ?? 0,
     linkedCampaigns: linkedCampaignsRow[0]?.n ?? 0,
