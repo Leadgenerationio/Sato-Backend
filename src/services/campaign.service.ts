@@ -8,6 +8,10 @@ import { proRateDailyMoney } from '../integrations/leadbyte/leadbyte-client.js';
 import { cached } from '../utils/cache.js';
 import { logger } from '../utils/logger.js';
 import { pickVertical } from '../utils/vertical.js';
+import {
+  aggregateCatchrSpend,
+  aggregateCatchrSpendByLbId,
+} from './traffic-source-aggregation.service.js';
 import type { AuthPayload } from '../types/index.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
 
@@ -281,38 +285,15 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
     'today', 'this_week', 'this_month', 'last_month', 'ytd',
   ]);
 
-  // Batched Catchr-spend rollup per campaign — one query that groups
-  // ad_spend (last 30d) by Sato campaign_id via the traffic_sources →
-  // (platform, account_id ∪ account_ids[]) join. Without this, the
-  // campaign table's Cost column reads LeadByte payout only (zero for
-  // direct-traffic campaigns), exactly the same "100% margin" lie
-  // getCampaign already fixed on the detail page.
-  // Keyed by LeadByte campaign id so the per-row map step (which has c.id
-  // = the LeadByte id) can look it up directly without resolving uuid each
-  // iteration.
-  const catchrCostByLbId = new Map<string, number>();
+  // Batched Catchr-spend rollup per campaign — one query attributes 30-day
+  // ad_spend to each campaign via the traffic_sources mapping (active rows
+  // only). Campaigns with no mappings get 0, matching T1's rule "no spend
+  // counts against a campaign until you link the ad account". Returned map
+  // is keyed by LeadByte campaign id because the per-row map step below
+  // already has `c.id = leadbyteCampaignId` in hand.
+  let catchrCostByLbId = new Map<string, number>();
   try {
-    const rows = (await db.execute(sql`
-      with source_accounts as (
-        select ts.campaign_id, ts.platform, ts.account_id as acc_id
-        from traffic_sources ts
-        where ts.account_id is not null
-        union
-        select ts.campaign_id, ts.platform, jsonb_array_elements_text(ts.account_ids) as acc_id
-        from traffic_sources ts
-      )
-      select c.leadbyte_campaign_id as lb_id,
-             coalesce(sum(a.spend::numeric), 0)::float as total
-      from source_accounts sa
-      join campaigns c on c.id = sa.campaign_id
-      join ad_spend a on a.platform = sa.platform and a.account_id = sa.acc_id
-      where a.date >= current_date - interval '30 days'
-        and c.leadbyte_campaign_id is not null
-      group by c.leadbyte_campaign_id
-    `)) as unknown as Array<{ lb_id: string; total: number }>;
-    for (const r of rows) {
-      catchrCostByLbId.set(r.lb_id, Number(r.total ?? 0));
-    }
+    catchrCostByLbId = await aggregateCatchrSpendByLbId(30);
   } catch (err) {
     logger.warn(
       { err: err instanceof Error ? err.message : String(err) },
@@ -620,32 +601,17 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
     ? (ytdRow?.payout ?? 0) + (ytdRow?.emailCost ?? 0) + (ytdRow?.smsCost ?? 0) + (ytdRow?.validationCost ?? 0)
     : fallbackCost;
 
-  // Add the real Catchr ad-spend for every Catchr account linked to this
-  // campaign via traffic_sources (legacy `account_id` + the new
-  // `account_ids[]` array). LeadByte's `payout` field is the supplier
-  // payout, which is zero for direct-traffic campaigns like Solar Panels
-  // (UK) where Sam runs his own ads — without this addition the campaign
-  // shows "100% margin" while £380k of Facebook spend sits in ad_spend.
-  // Window is the last 30 days, which matches what Catchr actually has.
+  // Add the real Catchr ad-spend attributed to this campaign via active
+  // traffic_sources mappings. LeadByte's `payout` field is zero for
+  // direct-traffic campaigns like Solar Panels (UK) where Sam runs his
+  // own ads — without this addition the campaign would show "100% margin"
+  // while real Facebook spend sits unattributed in ad_spend. Window is
+  // 30d to match Catchr's sync window; campaigns with no mappings get 0
+  // (T1 rule: nothing is attributed until you link the account).
   let catchrCost = 0;
   if (satoMeta.satoId) {
     try {
-      const [{ total }] = (await db.execute(sql`
-        with source_accounts as (
-          select ts.platform, ts.account_id as acc_id
-          from traffic_sources ts
-          where ts.campaign_id = ${satoMeta.satoId}::uuid and ts.account_id is not null
-          union
-          select ts.platform, jsonb_array_elements_text(ts.account_ids) as acc_id
-          from traffic_sources ts
-          where ts.campaign_id = ${satoMeta.satoId}::uuid
-        )
-        select coalesce(sum(a.spend::numeric), 0)::float as total
-        from ad_spend a
-        join source_accounts sa on a.platform = sa.platform and a.account_id = sa.acc_id
-        where a.date >= current_date - interval '30 days'
-      `)) as unknown as Array<{ total: number }>;
-      catchrCost = Number(total ?? 0);
+      catchrCost = await aggregateCatchrSpend(satoMeta.satoId, 30);
     } catch (err) {
       logger.warn(
         { err: err instanceof Error ? err.message : String(err), campaignId: satoMeta.satoId },

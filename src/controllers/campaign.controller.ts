@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import * as campaignService from '../services/campaign.service.js';
 import * as trafficSourceService from '../services/traffic-source.service.js';
+import { aggregateUnlinkedSpend } from '../services/traffic-source-aggregation.service.js';
 
 export async function listCampaigns(req: Request, res: Response) {
   const campaigns = await campaignService.listCampaigns(req.user!);
@@ -44,6 +45,21 @@ export async function getCampaign(req: Request, res: Response) {
   }
 
   res.json({ status: 'success', data: { campaign } });
+}
+
+// T1 (Sam, 2026-05-20): diagnostic surface for ad_spend rows whose
+// (platform, account_id) is not in any active traffic_sources mapping.
+// Spend never gets attributed to a campaign until Sam links the account,
+// so the unattributed pool needs to be visible — otherwise the difference
+// between Catchr's lifetime total and the sum of per-campaign totals is
+// invisible. Returned rows are NEVER added to any campaign total.
+export async function getUnlinkedSpend(req: Request, res: Response) {
+  const windowDays = Math.min(
+    365,
+    Math.max(1, parseInt(req.query.windowDays as string) || 30),
+  );
+  const summary = await aggregateUnlinkedSpend(windowDays);
+  res.json({ status: 'success', data: summary });
 }
 
 export async function listTrafficSources(req: Request, res: Response) {

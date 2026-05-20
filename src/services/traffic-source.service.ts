@@ -117,15 +117,15 @@ export async function listSourcesForCampaign(
   // total in parallel. Without this join the totalSpend column stays at
   // its 0 default forever (nothing writes to it on the sync path).
   //
-  // 2026-05-19: Removed the `where campaign_id = lbCampaignId` filter on
-  // the ad_spend lookup. The previous shape worked for campaigns whose
-  // ad_spend rows happened to share the same LeadByte campaign id, but
-  // it silently zeroed any traffic source whose ad accounts are reused
-  // across multiple campaigns (e.g. one Facebook account funding several
-  // Stato campaigns at once). Now we sum spend across ALL ad_spend
-  // rows for the (platform, account_id) pair — campaign attribution is
-  // out of scope for this widget; the goal is "what is this Catchr
-  // account costing in total". The 30-day window keeps the sum honest.
+  // Attribution model (T1, 2026-05-20): the outer `where trafficSources
+  // .campaignId = satoId` already pre-filters rows to this campaign, so
+  // summing ad_spend by (platform, account_id) and then mapping back to
+  // each source row attributes correctly without an explicit
+  // ad_spend.campaign_id filter. Cross-campaign account reuse is
+  // intentionally allowed at the source-row level (Sam can link the
+  // same Facebook account to multiple campaigns when needed); double-
+  // counting across campaigns is surfaced via the "Unlinked Spend"
+  // diagnostic on /campaigns rather than hidden by query filters.
   const adSpendWindowStart = new Date();
   adSpendWindowStart.setDate(adSpendWindowStart.getDate() - 30);
   const adSpendWindowIso = adSpendWindowStart.toISOString().slice(0, 10);

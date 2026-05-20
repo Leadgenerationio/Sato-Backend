@@ -58,6 +58,9 @@ campaignRoutes.use(authMiddleware);
 campaignRoutes.use(requireRole('owner', 'ops_manager'));
 
 campaignRoutes.get('/', validate(listCampaignsQuerySchema), campaignController.listCampaigns);
+// Diagnostic — must be declared BEFORE `/:id` so Express doesn't capture
+// "unlinked-spend" as a campaign id and 404.
+campaignRoutes.get('/unlinked-spend', campaignController.getUnlinkedSpend);
 campaignRoutes.get('/:id', campaignController.getCampaign);
 campaignRoutes.patch('/:id', validate(updateCampaignSchema), campaignController.updateCampaign);
 campaignRoutes.get('/:id/sources', campaignController.listTrafficSources);
