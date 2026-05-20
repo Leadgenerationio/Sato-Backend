@@ -48,7 +48,7 @@ describe('Supplier performance — Catchr ad_spend join', () => {
       .insert(adSpend)
       .values([
         {
-          platform: 'facebook',
+          platform: 'facebook-ads',
           authorizationId: 999201,
           accountId: 'cpl-test-acc-fb',
           date: isoOffset(2),

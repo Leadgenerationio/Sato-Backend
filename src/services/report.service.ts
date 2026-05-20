@@ -48,25 +48,25 @@ function deliveryWindowToRange(win: DeliveryWindow): { from: string; to: string 
 // Map a LeadByte supplier name to the canonical Catchr `ad_spend.platform`
 // identifier. LeadByte's supplier names are freeform / mixed-case (e.g.
 // "Facebook Ads", "facebook", "Google Ads"); Catchr stores platforms as
-// hyphenated lowercase ("facebook", "google-ads", "tik-tok").
+// hyphenated lowercase, the exact strings in CatchrPlatform.
+//
+// Canonical values must match the source-of-truth strings in
+// src/integrations/catchr/catchr-types.ts (`CatchrPlatform`):
+//   facebook-ads · google-ads · bing-ads · tik-tok · taboola
 //
 // Returns null when the supplier doesn't have an ad-platform counterpart
 // (e.g. "Direct", "Community Manager", "Trustpilot") — those should keep
-// totalSpend=0 since no ad-network paid for them.
+// totalSpend=0 since no ad-network paid for them. Returns null also for
+// platforms Catchr supports but we haven't wired up (Outbrain, LinkedIn,
+// Snapchat, etc.) so we don't lookup a key that never returns rows.
 function supplierNameToCatchrPlatform(supplierName: string): string | null {
   const n = supplierName.toLowerCase().trim();
   if (!n) return null;
-  if (n.includes('facebook') || n === 'meta' || n.includes('meta ads')) return 'facebook';
+  if (n.includes('facebook') || n === 'meta' || n.includes('meta ads')) return 'facebook-ads';
   if (n.includes('google')) return 'google-ads';
   if (n.includes('tiktok') || n.includes('tik tok') || n.includes('tik-tok')) return 'tik-tok';
   if (n.includes('taboola')) return 'taboola';
-  if (n.includes('outbrain')) return 'outbrain';
-  if (n.includes('microsoft') || n === 'bing' || n.includes('bing ads')) return 'microsoft-ads';
-  if (n.includes('linkedin')) return 'linkedin-ads';
-  if (n.includes('snapchat')) return 'snapchat-ads';
-  if (n.includes('reddit')) return 'reddit-ads';
-  if (n.includes('pinterest')) return 'pinterest-ads';
-  if (n.includes('twitter') || n.includes(' x ads')) return 'twitter-ads';
+  if (n.includes('microsoft') || n === 'bing' || n.includes('bing ads')) return 'bing-ads';
   return null;
 }
 
