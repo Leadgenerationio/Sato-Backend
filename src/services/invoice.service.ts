@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { invoices } from '../db/schema/invoices.js';
 import { clients } from '../db/schema/clients.js';
@@ -82,6 +82,47 @@ export function deriveDisplayStatus(storedStatus: string | null, daysOverdue: nu
   // 'sent' or 'authorised' but past due → present as 'overdue' to the UI.
   if ((s === 'sent' || s === 'authorised') && daysOverdue > 0) return 'overdue';
   return s;
+}
+
+// T5 (Sam, 2026-05-20): structural defense against the 2026-05-20 £44k
+// portal-Outstanding inflation. The root cause: an unpushed draft auto-
+// invoice run had its row written with status='sent' even though it was
+// never actually pushed to Xero (xero_invoice_id was null). The previous
+// outstanding filter checked only `status IN ('sent','authorised',
+// 'overdue')`, so the orphan leaked.
+//
+// Rule: an invoice is "outstanding" only when (a) its status is in the
+// outstanding bucket AND (b) it has actually been pushed to Xero (i.e.
+// xero_invoice_id IS NOT NULL). Rows that exist in Stato but were never
+// pushed to Xero are workflow noise — they show up nowhere in the
+// customer-visible aggregations.
+//
+// `isOutstandingInvoiceWhere()` returns the Drizzle SQL fragment used by
+// every aggregation site. `isOutstandingInvoice(row)` is the JS-side
+// equivalent for portal.service.getDashboard which filters in-memory.
+// Keep them in lock-step — both must change together.
+const OUTSTANDING_STATUSES = ['sent', 'authorised', 'overdue', 'submitted'] as const;
+
+export function isOutstandingInvoiceWhere() {
+  return and(
+    inArray(invoices.status, [...OUTSTANDING_STATUSES]),
+    isNotNull(invoices.xeroInvoiceId),
+  );
+}
+
+/**
+ * JS-side equivalent of `isOutstandingInvoiceWhere()`. Used by callers that
+ * have already loaded rows and need to filter in-memory (portal.service.
+ * getDashboard does this so the same `invoiceRows` lookup feeds several
+ * tiles without an extra round-trip).
+ */
+export function isOutstandingInvoice(row: {
+  status: string | null;
+  xeroInvoiceId: string | null;
+}): boolean {
+  if (!row.xeroInvoiceId) return false;
+  const s = (row.status ?? '').toLowerCase();
+  return (OUTSTANDING_STATUSES as readonly string[]).includes(s);
 }
 
 function invoiceToSummary(row: InvoiceRow, client: ClientRow): InvoiceSummary {
@@ -185,11 +226,18 @@ export async function listInvoices(
           AND ${invoices.dueDate} < now()
         )
       )`);
+      // T5: an unpushed draft must never count toward "overdue" — that's
+      // how chase-overdue emails get sent for invoices that don't actually
+      // exist in Xero. Guard the bucket structurally.
+      filters.push(isNotNull(invoices.xeroInvoiceId));
     } else if (params.status === 'sent' || params.status === 'authorised') {
       filters.push(sql`(
         ${invoices.status} = ${params.status}
         AND (${invoices.dueDate} IS NULL OR ${invoices.dueDate} >= now() OR ${invoices.paidDate} IS NOT NULL)
       )`);
+      // T5: same guard for the due bucket — unpushed sent/authorised rows
+      // are workflow noise, never customer-visible.
+      filters.push(isNotNull(invoices.xeroInvoiceId));
     } else {
       filters.push(eq(invoices.status, params.status));
     }
@@ -466,9 +514,14 @@ export async function getOutstandingInvoices(
         )`
       : inArray(invoices.status, ['sent', 'authorised', 'overdue']);
 
+  // T5 (Sam, 2026-05-20): the structural guard — every bucket excludes
+  // rows that were never pushed to Xero (xero_invoice_id IS NULL). See
+  // isOutstandingInvoiceWhere() docstring for the £44k incident this
+  // protects against.
   const whereClause = and(
     eq(clients.businessId, businessId),
     bucketFilter,
+    isNotNull(invoices.xeroInvoiceId),
   );
 
   const [rows, summaryResult, clientMap] = await Promise.all([

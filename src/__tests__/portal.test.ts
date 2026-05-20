@@ -162,6 +162,10 @@ describe('Portal API', () => {
             clientId: DEMO_CLIENT_ID,
             invoiceNumber: 'INV-OK',
             status: 'authorised',
+            // T5: a "real" outstanding invoice has been pushed to Xero and
+            // therefore has a non-null xero_invoice_id. Without this the
+            // structural guard excludes the row from the outstanding tile.
+            xeroInvoiceId: 'xero-fixture-ok-001',
             total: '111.11',
             currency: 'GBP',
             dueDate: new Date('2026-12-01'),

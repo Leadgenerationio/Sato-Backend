@@ -205,8 +205,15 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
   // are internal Stato/Xero workflow states that must never count toward
   // numbers the client sees (otherwise they'd be chased for something we
   // haven't actually issued yet).
+  //
+  // T5 (Sam, 2026-05-20): also exclude rows without a xero_invoice_id.
+  // An auto-invoice run can write status='sent' on a row that never
+  // actually got pushed to Xero (the £44k incident); the structural
+  // guard keeps that out of every client-facing tile regardless.
   const clientVisibleInvoices = invoiceRows.filter(
-    (i) => !PORTAL_INVOICE_HIDDEN_STATUSES.has((i.status ?? '').toLowerCase()),
+    (i) =>
+      !PORTAL_INVOICE_HIDDEN_STATUSES.has((i.status ?? '').toLowerCase()) &&
+      i.xeroInvoiceId !== null && i.xeroInvoiceId !== undefined,
   );
   const pendingInvoices = clientVisibleInvoices.filter(
     (i) => i.status === 'sent' || i.status === 'authorised' || i.status === 'submitted',
@@ -393,8 +400,16 @@ export async function getInvoices(requester: AuthPayload): Promise<PortalInvoice
     .where(eq(invoices.clientId, clientId))
     .orderBy(desc(invoices.createdAt));
 
+  // T5 (Sam, 2026-05-20): mirror the structural guard from
+  // invoice.service.isOutstandingInvoice — an unpushed row (xero_invoice_id
+  // is null) is never customer-visible regardless of its status. Same
+  // PORTAL_INVOICE_HIDDEN_STATUSES gate stays so the client doesn't see
+  // drafts/voided either.
   return rows
-    .filter((r) => !PORTAL_INVOICE_HIDDEN_STATUSES.has((r.status ?? 'draft').toLowerCase()))
+    .filter((r) =>
+      !PORTAL_INVOICE_HIDDEN_STATUSES.has((r.status ?? 'draft').toLowerCase()) &&
+      r.xeroInvoiceId !== null && r.xeroInvoiceId !== undefined,
+    )
     .map((r) => ({
       id: r.id,
       invoiceNumber: r.invoiceNumber ?? '',
