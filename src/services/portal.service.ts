@@ -9,6 +9,7 @@ import { creatives } from '../db/schema/creatives.js';
 import { landingPages } from '../db/schema/landing-pages.js';
 import { agreements } from '../db/schema/agreements.js';
 import { getApprovalStatesForCreatives } from './creative-approval.service.js';
+import { computeDaysOverdue, deriveDisplayStatus } from './invoice.service.js';
 import type { AuthPayload } from '../types/index.js';
 
 /**
@@ -415,21 +416,30 @@ export async function getInvoices(requester: AuthPayload): Promise<PortalInvoice
   // is null) is never customer-visible regardless of its status. Same
   // PORTAL_INVOICE_HIDDEN_STATUSES gate stays so the client doesn't see
   // drafts/voided either.
+  //
+  // Status is derived, not raw: a Xero `authorised` invoice that's 31 days
+  // past due was still showing "Authorised" on the portal because the
+  // stored `status` column only flips to 'overdue' on the next external
+  // sync. Re-derive daysOverdue + displayStatus per row so the buyer's
+  // badge matches reality the moment the page loads.
   return rows
     .filter((r) =>
       !PORTAL_INVOICE_HIDDEN_STATUSES.has((r.status ?? 'draft').toLowerCase()) &&
       r.xeroInvoiceId !== null && r.xeroInvoiceId !== undefined,
     )
-    .map((r) => ({
-      id: r.id,
-      invoiceNumber: r.invoiceNumber ?? '',
-      status: r.status ?? 'authorised',
-      total: Number(r.total ?? 0),
-      currency: r.currency ?? 'GBP',
-      dueDate: (r.dueDate ?? new Date()).toISOString(),
-      paidDate: r.paidDate ? r.paidDate.toISOString() : null,
-      daysOverdue: r.daysOverdue ?? 0,
-    }));
+    .map((r) => {
+      const daysOverdue = computeDaysOverdue(r.dueDate, r.paidDate, r.status);
+      return {
+        id: r.id,
+        invoiceNumber: r.invoiceNumber ?? '',
+        status: deriveDisplayStatus(r.status, daysOverdue),
+        total: Number(r.total ?? 0),
+        currency: r.currency ?? 'GBP',
+        dueDate: (r.dueDate ?? new Date()).toISOString(),
+        paidDate: r.paidDate ? r.paidDate.toISOString() : null,
+        daysOverdue,
+      };
+    });
 }
 
 export async function getCompliance(requester: AuthPayload): Promise<PortalCompliance[]> {
