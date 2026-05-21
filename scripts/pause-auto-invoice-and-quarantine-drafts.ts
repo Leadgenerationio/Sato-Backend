@@ -30,6 +30,11 @@ import { and, eq, sql, inArray } from 'drizzle-orm';
  * --apply wraps the UPDATEs in a transaction so a mid-run failure
  * leaves prod consistent.
  *
+ * Safety gate: --apply refuses to run if the candidate-draft count
+ * isn't exactly 2 (the incident shape Sam described). Pass
+ * --allow-different-count to override; intended for a partial-cleanup
+ * recovery where one row has already been voided by hand.
+ *
  * Idempotent on retry: re-running after --apply is a no-op
  *   - workflow already paused → UPDATE matches 0 rows
  *   - invoices already voided → SELECT for drafts returns []
@@ -40,12 +45,18 @@ import { and, eq, sql, inArray } from 'drizzle-orm';
  */
 
 const APPLY = process.argv.includes('--apply');
+// Safety gate: --apply refuses to run if the candidate-draft count
+// isn't exactly EXPECTED_DRAFT_COUNT. Pass --allow-different-count to
+// override (e.g. one row was already voided by hand). Prevents an
+// unrelated row that happens to match the totals from being voided.
+const ALLOW_DIFFERENT_COUNT = process.argv.includes('--allow-different-count');
 const CLIENT_NAME = 'UK Energy Saving Network';
 
 // Exact totals Sam pointed at. Treated as ±£0.01 because decimal(12,2)
 // columns can have trailing zeroes that ===-match the integer literal
 // but it's safer to compare numerically.
 const DRAFT_TOTALS = [17880, 21465];
+const EXPECTED_DRAFT_COUNT = 2;
 
 function tag(): string {
   return APPLY ? '[APPLY]' : '[DRY-RUN]';
@@ -113,8 +124,8 @@ async function main() {
 
   if (drafts.length === 0) {
     console.log('→ no drafts match the criteria; quarantine step is a no-op (already cleaned up?)');
-  } else if (drafts.length !== 2) {
-    console.warn(`⚠ expected exactly 2 drafts but found ${drafts.length} — DOUBLE-CHECK before --apply`);
+  } else if (drafts.length !== EXPECTED_DRAFT_COUNT) {
+    console.warn(`⚠ expected exactly ${EXPECTED_DRAFT_COUNT} drafts but found ${drafts.length} — DOUBLE-CHECK before --apply`);
   }
 
   // ─── Step 4: locate the auto-invoice workflow row(s) ──────────
@@ -135,6 +146,19 @@ async function main() {
   if (!APPLY) {
     console.log(`${tag()} done — no changes written. Re-run with --apply to commit.`);
     process.exit(0);
+  }
+
+  // Safety gate. Refuse to void if the candidate count doesn't match
+  // the spec's expectation, unless the operator has explicitly opted in.
+  // Wrong count = something unexpected on prod; stop and let a human
+  // eyeball the dry-run output before touching rows.
+  if (drafts.length !== EXPECTED_DRAFT_COUNT && !ALLOW_DIFFERENT_COUNT) {
+    console.error('');
+    console.error(`✗ aborting: expected exactly ${EXPECTED_DRAFT_COUNT} draft candidate(s) but found ${drafts.length}.`);
+    console.error('  This is either a different incident than the one Sam reported, or one of');
+    console.error('  the rows was already retired by hand. Review the candidate list above.');
+    console.error('  To proceed anyway, re-run with --apply --allow-different-count');
+    process.exit(2);
   }
 
   console.log(`${tag()} executing destructive operations inside a transaction…`);
