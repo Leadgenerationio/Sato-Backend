@@ -152,12 +152,24 @@ async function main() {
   // the spec's expectation, unless the operator has explicitly opted in.
   // Wrong count = something unexpected on prod; stop and let a human
   // eyeball the dry-run output before touching rows.
+  //
+  // We split 0 candidates from N≠2 because the most likely cause of 0
+  // is a successful re-run, and "review the candidate list above"
+  // doesn't help when the list is empty.
   if (drafts.length !== EXPECTED_DRAFT_COUNT && !ALLOW_DIFFERENT_COUNT) {
     console.error('');
-    console.error(`✗ aborting: expected exactly ${EXPECTED_DRAFT_COUNT} draft candidate(s) but found ${drafts.length}.`);
-    console.error('  This is either a different incident than the one Sam reported, or one of');
-    console.error('  the rows was already retired by hand. Review the candidate list above.');
-    console.error('  To proceed anyway, re-run with --apply --allow-different-count');
+    if (drafts.length === 0) {
+      console.error('✗ aborting: 0 draft candidates matched the spec totals.');
+      console.error('  Most likely cause: --apply has already run successfully and the rows are');
+      console.error('  voided. The workflow-pause step is still effective on its own — if you');
+      console.error('  intended to re-pause the cron without touching invoices, run');
+      console.error('  --apply --allow-different-count to skip this guard.');
+    } else {
+      console.error(`✗ aborting: expected exactly ${EXPECTED_DRAFT_COUNT} draft candidate(s) but found ${drafts.length}.`);
+      console.error('  This is either a different incident than the one Sam reported, or one of');
+      console.error('  the rows was already retired by hand. Review the candidate list above.');
+      console.error('  To proceed anyway, re-run with --apply --allow-different-count');
+    }
     process.exit(2);
   }
 
