@@ -24,11 +24,14 @@ const updateCampaignSchema = z.object({
 });
 
 // Sam Loom #42-46 — leadreports.io-style traffic-source rows per campaign.
+// accountIds (plural) is required by migration 0030's multi-account model;
+// without it Zod silently strips the array and the link rolls up zero spend.
 const createTrafficSourceSchema = z.object({
   body: z.object({
     name: z.string().min(1).max(255),
     platform: z.string().max(100).optional(),
     accountId: z.string().max(100).optional(),
+    accountIds: z.array(z.string().max(100)).optional(),
     catchrUrl: z.string().max(2000).optional(),
     isActive: z.boolean().optional(),
   }),
@@ -38,6 +41,7 @@ const updateTrafficSourceSchema = z.object({
     name: z.string().min(1).max(255).optional(),
     platform: z.string().max(100).optional(),
     accountId: z.string().max(100).optional(),
+    accountIds: z.array(z.string().max(100)).optional(),
     catchrUrl: z.string().max(2000).nullable().optional(),
     isActive: z.boolean().optional(),
     totalSpend: z.number().nonnegative().optional(),
