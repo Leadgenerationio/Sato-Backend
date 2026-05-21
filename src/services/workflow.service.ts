@@ -266,24 +266,36 @@ export async function setWorkflowStatus(
 }
 
 /**
- * Returns true when the workflow with this handler_key exists AND is
- * paused. Used by the cron workers to short-circuit before invoking an
+ * Returns true when ANY workflow row with this handler_key is paused.
+ * Used by the cron workers to short-circuit before invoking an
  * automation handler when an admin has paused it from the UI.
+ *
+ * Multi-tenant note: the seed migration (PR #7) creates one workflow
+ * row per business with the same handler_key. The previous
+ * implementation used `LIMIT 1` with no ORDER BY, so the row Postgres
+ * returned was nondeterministic — if Sam paused his tenant's row but
+ * Postgres happened to return a different tenant's `active` row, the
+ * cron would still fire. We now filter on `status='paused'` directly
+ * and treat "any paused row" as "automation is paused globally" — the
+ * pessimistic stance, matching Sam's "pause until hardened" directive.
  *
  * Returns false when:
  *   - no workflow row carries this handler_key (legacy / unbound jobs)
- *   - the workflow exists and is active / draft
+ *   - all workflow rows with this handler_key are active / draft
  *   - the DB lookup itself fails (fail-open: better a cron fires than
  *     silently stops because of a transient DB blip)
  */
 export async function isAutomationPaused(handlerKey: string): Promise<boolean> {
   try {
-    const [row] = await db
-      .select({ status: workflows.status })
+    const rows = await db
+      .select({ id: workflows.id })
       .from(workflows)
-      .where(eq(workflows.handlerKey, handlerKey))
+      .where(and(
+        eq(workflows.handlerKey, handlerKey),
+        eq(workflows.status, 'paused'),
+      ))
       .limit(1);
-    return row?.status === 'paused';
+    return rows.length > 0;
   } catch {
     return false;
   }
