@@ -101,6 +101,12 @@ describe('Integration API', () => {
       expect(d.xero).toMatchObject({ configured: expect.any(Boolean) });
       expect(d.leadbyte).toMatchObject({ configured: expect.any(Boolean), leadsThisMonth: expect.any(Number) });
       expect(d.catchr).toMatchObject({ configured: expect.any(Boolean), adSpendLast30Days: expect.any(Number), currency: 'GBP' });
+      // OCT-40: lastSyncAt must be either a string (DB-backed timestamp) or
+      // null — never undefined. The previous in-memory-only source dropped
+      // to null on every API restart, so the "recent-sync-as-live" fallback
+      // could never fire. Now DB-backed via max(ad_spend.synced_at).
+      expect(d.catchr).toHaveProperty('lastSyncAt');
+      expect(d.catchr.lastSyncAt === null || typeof d.catchr.lastSyncAt === 'string').toBe(true);
       expect(d.signnow).toMatchObject({ configured: expect.any(Boolean), agreementCount: expect.any(Number) });
       expect(d.r2).toMatchObject({ configured: expect.any(Boolean), fileCount: expect.any(Number) });
       expect(d.resend).toMatchObject({ configured: expect.any(Boolean) });

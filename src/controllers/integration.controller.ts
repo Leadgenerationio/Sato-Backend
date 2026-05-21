@@ -599,6 +599,7 @@ async function buildOverview() {
     creativeCountRow,
     leadsThisMonthRow,
     adSpend30dRow,
+    adSpendLatestSyncRow,
   ] = await Promise.all([
     db
       .select({ count: sql<number>`count(*)::int` })
@@ -617,7 +618,16 @@ async function buildOverview() {
       .select({ total: sql<number>`coalesce(sum(${adSpend.spend}), 0)::float8` })
       .from(adSpend)
       .where(and(gte(adSpend.date, thirtyDaysAgo))),
+    // OCT-40: ad_spend.synced_at is the DB-backed source of truth for the
+    // most recent Catchr sync. The in-memory getLastCatchrSyncAt() resets
+    // to null on API restart and never sees writes from the sync worker
+    // process, so the "recent-sync-as-live" fallback below could never fire.
+    db
+      .select({ latest: sql<string | null>`max(${adSpend.syncedAt})::text` })
+      .from(adSpend),
   ]);
+  const latestCatchrSyncFromDb = adSpendLatestSyncRow[0]?.latest ?? null;
+  const latestCatchrSyncAt = latestCatchrSyncFromDb ?? getLastCatchrSyncAt();
 
   const xeroConfigured = xeroClient.isXeroConfigured();
   let xeroConnected = false;
@@ -671,11 +681,11 @@ async function buildOverview() {
       logger.warn({ err }, 'Catchr probe failed in overview');
     }
     // Fallback connectivity signal — sync evidence beats probe response.
-    // If the hourly cron ran recently and we have spend rows, the
-    // integration is healthy even if the probe just hiccuped.
+    // If a recent sync wrote ad_spend rows, the integration is healthy
+    // even if the probe just hiccuped. Uses the DB-backed timestamp so
+    // it survives API restarts and works across worker/server processes.
     if (!catchrConnected) {
-      const lastSync = getLastCatchrSyncAt();
-      const lastSyncMs = lastSync ? new Date(lastSync).getTime() : 0;
+      const lastSyncMs = latestCatchrSyncAt ? new Date(latestCatchrSyncAt).getTime() : 0;
       const recentSync = lastSyncMs && (Date.now() - lastSyncMs) < 2 * 3600 * 1000;
       const recentSpend = (adSpend30dRow[0]?.total ?? 0) > 0;
       if (recentSync && recentSpend) {
@@ -705,7 +715,7 @@ async function buildOverview() {
       connected: catchrConnected,
       platformsConnected: catchrPlatformsCount,
       lastError: catchrError,
-      lastSyncAt: getLastCatchrSyncAt(),
+      lastSyncAt: latestCatchrSyncAt,
       adSpendLast30Days: Math.round((adSpend30dRow[0]?.total ?? 0) * 100) / 100,
       currency: 'GBP',
     },
