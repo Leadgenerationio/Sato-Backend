@@ -269,6 +269,52 @@ describe('Portal API', () => {
     });
   });
 
+  // Sam, 2026-05-21 — an invoice 31 days past due was still showing
+  // "Authorised" on the portal because the stored `status` column only
+  // flips to 'overdue' on the next Xero sync. /portal/invoices now runs
+  // each row through deriveDisplayStatus + computeDaysOverdue so the
+  // badge label and the days counter reflect reality at request time.
+  describe('Invoice status — derived overdue for past-due authorised', () => {
+    const OVERDUE_AUTHORISED_ID = '00000000-0000-0000-0000-0000000d3001';
+
+    beforeAll(async () => {
+      await db
+        .insert(invoices)
+        .values({
+          id: OVERDUE_AUTHORISED_ID,
+          clientId: DEMO_CLIENT_ID,
+          invoiceNumber: 'INV-DERIVED-OVERDUE',
+          status: 'authorised',
+          xeroInvoiceId: 'xero-derived-overdue',
+          total: '222.22',
+          currency: 'GBP',
+          // 31 days ago — stored status is still 'authorised' but the
+          // derived display must read 'overdue' with daysOverdue ≥ 31.
+          dueDate: new Date(Date.now() - 31 * 24 * 60 * 60 * 1000),
+          // daysOverdue column intentionally left null/0 to prove the
+          // value on the response is computed live, not read from disk.
+        })
+        .onConflictDoNothing();
+    });
+
+    afterAll(async () => {
+      await db.delete(invoices).where(eq(invoices.id, OVERDUE_AUTHORISED_ID));
+    });
+
+    it('past-due authorised invoice surfaces as overdue with live daysOverdue', async () => {
+      const res = await request(app).get('/api/v1/portal/invoices').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+      const row = res.body.data.invoices.find(
+        (i: { invoiceNumber: string }) => i.invoiceNumber === 'INV-DERIVED-OVERDUE',
+      );
+      expect(row).toBeDefined();
+      expect(row.status).toBe('overdue');
+      // ±1 day tolerance so the test isn't flaky around midnight / DST.
+      expect(row.daysOverdue).toBeGreaterThanOrEqual(30);
+      expect(row.daysOverdue).toBeLessThanOrEqual(32);
+    });
+  });
+
   // Campaigns in admin-only workflow states (draft/archived/deleted) must
   // not appear on the portal Campaigns tab — but paused/ended/churned
   // remain visible so historical leads have a parent campaign in the UI.
