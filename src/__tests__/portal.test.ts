@@ -201,6 +201,74 @@ describe('Portal API', () => {
     });
   });
 
+  // Sam wants what the client owes surfaced first — outstanding rows
+  // (overdue / sent / authorised) before paid, with the most-overdue row
+  // at the top of the outstanding bucket.
+  describe('Invoice ordering — outstanding first, then due_date ASC', () => {
+    const OVERDUE_ID = '00000000-0000-0000-0000-0000000d2001';
+    const AUTH_ID = '00000000-0000-0000-0000-0000000d2002';
+    const PAID_ID = '00000000-0000-0000-0000-0000000d2003';
+
+    beforeAll(async () => {
+      const now = Date.now();
+      const day = 24 * 60 * 60 * 1000;
+      await db
+        .insert(invoices)
+        .values([
+          {
+            id: PAID_ID,
+            clientId: DEMO_CLIENT_ID,
+            invoiceNumber: 'INV-ORD-PAID',
+            status: 'paid',
+            xeroInvoiceId: 'xero-ord-paid',
+            total: '100.00',
+            currency: 'GBP',
+            dueDate: new Date(now - day),
+            paidDate: new Date(now - day),
+            createdAt: new Date(now - day),
+          },
+          {
+            id: AUTH_ID,
+            clientId: DEMO_CLIENT_ID,
+            invoiceNumber: 'INV-ORD-AUTH',
+            status: 'authorised',
+            xeroInvoiceId: 'xero-ord-auth',
+            total: '200.00',
+            currency: 'GBP',
+            dueDate: new Date(now + 5 * day),
+            createdAt: new Date(now - day),
+          },
+          {
+            id: OVERDUE_ID,
+            clientId: DEMO_CLIENT_ID,
+            invoiceNumber: 'INV-ORD-OVERDUE',
+            status: 'overdue',
+            xeroInvoiceId: 'xero-ord-overdue',
+            total: '300.00',
+            currency: 'GBP',
+            dueDate: new Date(now - 31 * day),
+            createdAt: new Date(now - day),
+          },
+        ])
+        .onConflictDoNothing();
+    });
+
+    afterAll(async () => {
+      await db.delete(invoices).where(eq(invoices.id, OVERDUE_ID));
+      await db.delete(invoices).where(eq(invoices.id, AUTH_ID));
+      await db.delete(invoices).where(eq(invoices.id, PAID_ID));
+    });
+
+    it('returns overdue (oldest due) first, then authorised, then paid', async () => {
+      const res = await request(app).get('/api/v1/portal/invoices').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+      const ours = res.body.data.invoices
+        .map((i: { invoiceNumber: string }) => i.invoiceNumber)
+        .filter((n: string) => n.startsWith('INV-ORD-'));
+      expect(ours).toEqual(['INV-ORD-OVERDUE', 'INV-ORD-AUTH', 'INV-ORD-PAID']);
+    });
+  });
+
   // Campaigns in admin-only workflow states (draft/archived/deleted) must
   // not appear on the portal Campaigns tab — but paused/ended/churned
   // remain visible so historical leads have a parent campaign in the UI.

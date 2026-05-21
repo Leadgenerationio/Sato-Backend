@@ -394,11 +394,21 @@ export async function getLeads(requester: AuthPayload, range?: GetLeadsRange): P
 
 export async function getInvoices(requester: AuthPayload): Promise<PortalInvoice[]> {
   const clientId = requireClientId(requester);
+  // Sam wants what the client owes surfaced first — outstanding rows
+  // (overdue / sent / authorised) before everything else. Inside the
+  // outstanding bucket we sort by due_date ASC so the most-overdue row
+  // is at the top; non-outstanding rows fall back to created_at DESC.
+  // LOWER() guards against Xero's UPPER_CASE statuses. Order is applied
+  // at the DB level so future LIMIT/OFFSET pagination stays correct.
   const rows = await db
     .select()
     .from(invoices)
     .where(eq(invoices.clientId, clientId))
-    .orderBy(desc(invoices.createdAt));
+    .orderBy(
+      sql`CASE WHEN LOWER(${invoices.status}) IN ('overdue', 'sent', 'authorised') THEN 0 ELSE 1 END`,
+      sql`CASE WHEN LOWER(${invoices.status}) IN ('overdue', 'sent', 'authorised') THEN ${invoices.dueDate} END ASC NULLS LAST`,
+      sql`CASE WHEN LOWER(${invoices.status}) IN ('overdue', 'sent', 'authorised') THEN NULL ELSE ${invoices.createdAt} END DESC NULLS LAST`,
+    );
 
   // T5 (Sam, 2026-05-20): mirror the structural guard from
   // invoice.service.isOutstandingInvoice — an unpushed row (xero_invoice_id
