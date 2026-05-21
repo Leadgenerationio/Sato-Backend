@@ -173,7 +173,20 @@ export async function setCampaignType(leadbyteCampaignId: string, type: Campaign
 export interface CampaignSummary {
   id: string;
   name: string;
+  /**
+   * Display-only convenience — first linked Stato buyer if any, else
+   * LeadByte's per-campaign `clientName`. Kept for back-compat with
+   * older clients that don't yet consume `clientNames[]`.
+   */
   clientName: string;
+  /**
+   * OCT-41 (2026-05-21): full list of buyers linked to this campaign via
+   * the `client_campaigns` junction. Empty array if no Sato buyer is
+   * attached yet — fall back to `clientName` (LeadByte's field) for
+   * display. Frontend renders 'Multiple (N)' with a tooltip when length
+   * is > 1.
+   */
+  clientNames: string[];
   vertical: string;
   status: string;
   campaignType: CampaignType;
@@ -300,6 +313,29 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
       'listCampaigns: Catchr ad-spend rollup failed — table will only show LeadByte cost',
     );
   }
+
+  // OCT-41 (2026-05-21) — batch-load all (campaign → Stato buyer) linkages
+  // in one query so the list view can surface every buyer per row, not
+  // just LeadByte's singular `clientName`. Keyed by LeadByte campaign id
+  // because that's what the per-row map step has in hand. Sorted alpha
+  // for stable rendering.
+  const buyerLinkRows = await db
+    .select({
+      leadbyteCampaignId: campaignsTable.leadbyteCampaignId,
+      buyerName: clients.companyName,
+    })
+    .from(campaignsTable)
+    .innerJoin(clientCampaigns, eq(clientCampaigns.campaignId, campaignsTable.id))
+    .innerJoin(clients, eq(clients.id, clientCampaigns.clientId))
+    .where(sql`${campaignsTable.leadbyteCampaignId} IS NOT NULL`);
+  const buyerNamesByLbId = new Map<string, string[]>();
+  for (const r of buyerLinkRows) {
+    if (!r.leadbyteCampaignId) continue;
+    const list = buyerNamesByLbId.get(r.leadbyteCampaignId) ?? [];
+    if (!list.includes(r.buyerName)) list.push(r.buyerName);
+    buyerNamesByLbId.set(r.leadbyteCampaignId, list);
+  }
+  for (const list of buyerNamesByLbId.values()) list.sort((a, b) => a.localeCompare(b));
   const empty: Awaited<ReturnType<typeof leadbyte.getCampaignReport>> = [];
   const todayReport = reports.get('today') ?? empty;
   const weekReport = reports.get('this_week') ?? empty;
@@ -362,10 +398,14 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
     const cpl = totalLeads > 0 ? totalCost / totalLeads : 0;
     const margin = totalRevenue > 0 ? ((totalRevenue - totalCost) / totalRevenue) * 100 : 0;
 
+    const linkedBuyerNames = buyerNamesByLbId.get(c.id) ?? [];
+    const displayClientName = linkedBuyerNames[0] ?? c.clientName;
+
     return {
       id: c.id,
       name: c.name,
-      clientName: c.clientName,
+      clientName: displayClientName,
+      clientNames: linkedBuyerNames.length > 0 ? linkedBuyerNames : (c.clientName ? [c.clientName] : []),
       // LeadByte's /campaigns endpoint doesn't carry a vertical column and
       // Sam hasn't backfilled the Sato `campaigns.vertical` field — so the
       // Campaign Sources pie chart was lumping every campaign into "Other".
@@ -624,13 +664,16 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
   const cpl = totalLeads > 0 ? totalCost / totalLeads : 0;
   const margin = totalRevenue > 0 ? ((totalRevenue - totalCost) / totalRevenue) * 100 : 0;
 
+  const detailBuyerNames = satoMeta.linkedClients.map((c) => c.clientName).filter((n): n is string => !!n);
+  detailBuyerNames.sort((a, b) => a.localeCompare(b));
   return {
     id: campaign.id,
     satoId: satoMeta.satoId,
     costPerLead: satoMeta.costPerLead,
     linkedClients: satoMeta.linkedClients,
     name: campaign.name,
-    clientName: campaign.clientName,
+    clientName: detailBuyerNames[0] ?? campaign.clientName,
+    clientNames: detailBuyerNames.length > 0 ? detailBuyerNames : (campaign.clientName ? [campaign.clientName] : []),
     vertical: campaign.vertical,
     status: campaign.status,
     campaignType: resolveCampaignType(campaign.id, typeMap),

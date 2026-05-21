@@ -4,6 +4,7 @@ import { invoices } from '../db/schema/invoices.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { clients } from '../db/schema/clients.js';
 import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
+import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { trafficSources } from '../db/schema/traffic-sources.js';
 import { adSpend } from '../db/schema/ad-spend.js';
 import type { AuthPayload } from '../types/index.js';
@@ -74,6 +75,13 @@ export interface CampaignReportRow {
   campaignId: string;
   campaignName: string;
   clientName: string;
+  /**
+   * OCT-42 (2026-05-21): full list of buyers linked to this campaign via
+   * `client_campaigns`. Frontend renders "Multiple (N)" with tooltip when
+   * length > 1. Empty array for unmapped campaigns; `clientName` then
+   * reads "Pending client mapping".
+   */
+  clientNames: string[];
   vertical: string;
   leads: number;
   validLeads: number;
@@ -111,6 +119,8 @@ export interface UnifiedReportRow {
   campaignId: string;
   campaignName: string;
   clientName: string;
+  /** OCT-42: all buyers linked to the campaign. See CampaignReportRow.clientNames. */
+  clientNames: string[];
   vertical: string;
   supplier: string;
   supplierPlatform: string;
@@ -197,29 +207,52 @@ export interface FinancialOverviewRow {
 // "Other" because campaigns.vertical is uniformly null in prod).
 import { deriveVerticalFromName } from '../utils/vertical.js';
 
-async function loadCampaignMetaByName(): Promise<Map<string, { clientName: string; vertical: string }>> {
+async function loadCampaignMetaByName(): Promise<Map<string, { clientName: string; clientNames: string[]; vertical: string }>> {
+  // Single query that produces one row per (campaign, buyer) pair via the
+  // `client_campaigns` junction. Multi-buyer campaigns get N rows that we
+  // then collapse into a single map entry with `clientNames[]`.
+  //
+  // OCT-42 (2026-05-21): replaces the prior leftJoin on the legacy
+  // `campaigns.client_id` singular column — which silently zeroed out the
+  // buyer name for every campaign linked via client_campaigns instead.
   const rows = await db
     .select({
       name: campaignsTable.name,
       vertical: campaignsTable.vertical,
-      clientName: clients.companyName,
+      buyerName: clients.companyName,
     })
     .from(campaignsTable)
-    .leftJoin(clients, eq(campaignsTable.clientId, clients.id));
-  const map = new Map<string, { clientName: string; vertical: string }>();
+    .leftJoin(clientCampaigns, eq(clientCampaigns.campaignId, campaignsTable.id))
+    .leftJoin(clients, eq(clients.id, clientCampaigns.clientId));
+
+  const map = new Map<string, { clientName: string; clientNames: string[]; vertical: string }>();
   for (const r of rows) {
     if (!r.name) continue;
-    map.set(r.name, {
-      // clientName stays "Unmapped" until Sam delivers the LeadByte→client
-      // CSV — we genuinely don't know which client owns each campaign.
-      clientName: r.clientName ?? 'Pending client mapping',
-      // Vertical, however, can be derived from the campaign name itself
-      // ("Hearing Aids (PL)" → Hearing Aids). Falls back to derived even
-      // when the synced row exists but has no vertical column.
-      vertical: r.vertical && r.vertical !== 'Unmapped'
-        ? r.vertical
-        : deriveVerticalFromName(r.name),
-    });
+    const existing = map.get(r.name);
+    if (!existing) {
+      const initialNames = r.buyerName ? [r.buyerName] : [];
+      map.set(r.name, {
+        clientName: r.buyerName ?? 'Pending client mapping',
+        clientNames: initialNames,
+        // Vertical can be derived from the campaign name itself
+        // ("Hearing Aids (PL)" → Hearing Aids). Falls back to derived
+        // even when the synced row exists but has no vertical column.
+        vertical: r.vertical && r.vertical !== 'Unmapped'
+          ? r.vertical
+          : deriveVerticalFromName(r.name),
+      });
+    } else if (r.buyerName && !existing.clientNames.includes(r.buyerName)) {
+      existing.clientNames.push(r.buyerName);
+    }
+  }
+  // Sort names alpha for stable rendering and resolve the display name.
+  for (const meta of map.values()) {
+    meta.clientNames.sort((a, b) => a.localeCompare(b));
+    if (meta.clientNames.length === 0) {
+      meta.clientName = 'Pending client mapping';
+    } else {
+      meta.clientName = meta.clientNames[0];
+    }
   }
   return map;
 }
@@ -247,6 +280,7 @@ export async function getCampaignPerformance(
     // "Unmapped" until Sam's CSV arrives.
     const meta = metaByName.get(r.campaign) ?? {
       clientName: 'Pending client mapping',
+      clientNames: [] as string[],
       vertical: deriveVerticalFromName(r.campaign),
     };
     const totalCost =
@@ -255,6 +289,7 @@ export async function getCampaignPerformance(
       campaignId: r.campaign,
       campaignName: r.campaign,
       clientName: meta.clientName,
+      clientNames: meta.clientNames,
       vertical: meta.vertical,
       leads: r.leads,
       validLeads: r.valid,
@@ -766,6 +801,7 @@ export async function getUnifiedReport(
   const rows: UnifiedReportRow[] = filteredSupplierRows.map((r, i) => {
     const meta = campaignMeta.get(r.campaignName) ?? {
       clientName: 'Pending client mapping',
+      clientNames: [] as string[],
       vertical: deriveVerticalFromName(r.campaignName),
     };
     const revenuePerLead = revenuePerLeadByCampaign.get(r.campaignName) ?? 0;
@@ -793,6 +829,7 @@ export async function getUnifiedReport(
       campaignId: r.campaignId,
       campaignName: r.campaignName,
       clientName: meta.clientName,
+      clientNames: meta.clientNames,
       vertical: meta.vertical,
       supplier: r.supplierName,
       supplierPlatform: r.platform,
