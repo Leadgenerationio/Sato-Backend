@@ -133,4 +133,25 @@ describe('Workflow pause/resume (T4)', () => {
   it('isAutomationPaused returns false when no workflow uses the key', async () => {
     expect(await isAutomationPaused(`${tag}-none`)).toBe(false);
   });
+
+  // PR #7's seed migration creates one workflow row per business with the
+  // same handler_key. The earlier LIMIT-1-no-ORDER-BY implementation was
+  // nondeterministic — Postgres could return any row, so the cron-skip
+  // depended on which tenant Postgres happened to surface. The any-paused
+  // semantics below guarantees: if ANY admin has flagged the automation
+  // paused, the cron short-circuits.
+  it('isAutomationPaused returns true if any matching row is paused (multi-tenant)', async () => {
+    const handlerKey = `${tag}-handler-mt`;
+    await makeWorkflow({ handlerKey, status: 'active' });
+    await makeWorkflow({ handlerKey, status: 'paused' });
+    await makeWorkflow({ handlerKey, status: 'active' });
+    expect(await isAutomationPaused(handlerKey)).toBe(true);
+  });
+
+  it('isAutomationPaused returns false when all matching rows are active (multi-tenant)', async () => {
+    const handlerKey = `${tag}-handler-all-active`;
+    await makeWorkflow({ handlerKey, status: 'active' });
+    await makeWorkflow({ handlerKey, status: 'active' });
+    expect(await isAutomationPaused(handlerKey)).toBe(false);
+  });
 });
