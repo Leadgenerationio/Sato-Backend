@@ -16,10 +16,15 @@
 --
 -- Multi-tenancy note: workflows.list filters by the requester's business_id,
 -- so we have to attach one row per business or admins can't see them in
--- their own UI. The worker's isAutomationPaused() doesn't filter by
--- business — that pre-existing global-pause semantics is out of scope here;
--- pausing in any tenant currently stops the cron for all, matching the
--- system's de-facto single-tenant operation.
+-- their own UI. The worker's isAutomationPaused() does a `LIMIT 1` with no
+-- ORDER BY against `handler_key = X`, so with multiple rows per handler the
+-- result is whichever row Postgres returns first — nondeterministic. Until
+-- isAutomationPaused() is rewritten to "true if any matching row is paused"
+-- (separate PR), we seed `auto-invoice` as `paused` rather than `active`
+-- so the worst-case outcome is the cron stays off (matches Sam's standing
+-- "pause until hardened" instruction) instead of firing unexpectedly. The
+-- other two handlers (chase-overdue / monthly-validated) stay `active` —
+-- they're not subject to Sam's pause directive.
 --
 -- Idempotent in two ways:
 --   * `NOT EXISTS (business_id, handler_key)` — re-running the migration
@@ -45,6 +50,7 @@ WHERE b.status = 'active'
     WHERE w.business_id = b.id AND w.handler_key = 'chase-overdue'
   );
 
+-- auto-invoice seeded as 'paused' — see multi-tenancy note above.
 INSERT INTO workflows (id, business_id, name, description, type, handler_key, schedule, status)
 SELECT
   gen_random_uuid(),
@@ -54,7 +60,7 @@ SELECT
   'scheduled',
   'auto-invoice',
   'Mondays 09:00 UTC',
-  'active'
+  'paused'
 FROM businesses b
 WHERE b.status = 'active'
   AND b.name NOT LIKE '[LOAD-TEST]%'
