@@ -110,4 +110,53 @@ describe('getUnifiedReport — supplier revenue allocation (2026-05-22 fix)', ()
     expect(Number.isFinite(r.totals.revenue)).toBe(true);
     expect(Number.isFinite(r.totals.margin)).toBe(true);
   });
+
+  it('byPlatform aggregation sums to the same totals (revenue + spend + leads) as the totals object', async () => {
+    // Sam (2026-05-15 meeting #10): per-platform roll-up. The aggregation is
+    // a pure SUM over the per-(campaign × supplier) rows already returned —
+    // Σ(byPlatform) must equal totals so the "By source" card never drifts
+    // from the "Totals" strip on /reports/unified.
+    const r = await getUnifiedReport(
+      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      { window: 'this_month' },
+    );
+    expect(Array.isArray(r.byPlatform)).toBe(true);
+    expect(r.byPlatform.length).toBeGreaterThan(0);
+
+    const sumLeads = r.byPlatform.reduce((s, p) => s + p.leads, 0);
+    const sumSpend = r.byPlatform.reduce((s, p) => s + p.spend, 0);
+    const sumRevenue = r.byPlatform.reduce((s, p) => s + p.revenue, 0);
+
+    expect(sumLeads).toBe(r.totals.leads);
+    // Money fields are rounded to 2dp per-row, so tiny float jitter is
+    // possible — assert within 1p tolerance.
+    expect(sumSpend).toBeCloseTo(r.totals.spend, 1);
+    expect(sumRevenue).toBeCloseTo(r.totals.revenue, 1);
+  });
+
+  it('byPlatform groups distinct supplier platforms into separate rows (one per platform)', async () => {
+    // 6 supplier rows across 6 distinct platform strings (facebook / Facebook
+    // Ads / Google Ads / Taboola / Community Manager / Direct) → 6 byPlatform
+    // buckets. Bucketing is case-sensitive against the LeadByte platform
+    // string (we mirror what LeadReports.io shows).
+    const r = await getUnifiedReport(
+      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      { window: 'this_month' },
+    );
+    const platformNames = r.byPlatform.map((p) => p.platform).sort();
+    expect(platformNames).toEqual([
+      'Community Manager',
+      'Direct',
+      'Facebook Ads',
+      'Google Ads',
+      'Taboola',
+      'facebook',
+    ]);
+    // Every row has a non-negative margin (no NaN / Infinity from
+    // divide-by-zero on Direct/Community-Manager which have 0 spend).
+    for (const p of r.byPlatform) {
+      expect(Number.isFinite(p.margin)).toBe(true);
+      expect(Number.isFinite(p.profit)).toBe(true);
+    }
+  });
 });

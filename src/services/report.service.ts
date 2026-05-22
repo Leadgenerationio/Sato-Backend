@@ -147,9 +147,41 @@ export interface UnifiedReportTotals {
   margin: number;
 }
 
+/**
+ * Sam (2026-05-15 meeting #10): "Facebook spend → Facebook profit / margin"
+ * row — the cross-campaign, per-platform roll-up LeadReports.io shows.
+ *
+ * One row per Catchr platform (or LeadByte supplier-platform string when no
+ * Catchr mapping exists). Same money as the per-(campaign × supplier) rows,
+ * just summed across campaigns so Σ(byPlatform.revenue) === totals.revenue
+ * and Σ(byPlatform.spend) === totals.spend. We do NOT re-derive revenue from
+ * LeadByte — the per-row proportional allocation already gave us the right
+ * numbers; this is a pure SUM over the existing rows.
+ *
+ * `catchrUrl` is enriched the same way as the per-supplier rows so users can
+ * jump straight to the Catchr NCP from the aggregated row.
+ */
+export interface UnifiedReportPlatformRow {
+  /** Display name — uses the raw LeadByte platform string ("Facebook Ads",
+   * "Direct", etc.) since that's what Sam reads on LeadReports.io. */
+  platform: string;
+  catchrUrl: string | null;
+  leads: number;
+  spend: number;
+  revenue: number;
+  profit: number;
+  cpl: number;
+  margin: number;
+}
+
 export interface UnifiedReport {
   rows: UnifiedReportRow[];
   totals: UnifiedReportTotals;
+  /**
+   * Sam (2026-05-15 meeting #10) — per-platform roll-up. Additive field; older
+   * frontend builds that don't read it stay working unchanged.
+   */
+  byPlatform: UnifiedReportPlatformRow[];
 }
 
 export interface SupplierReportRow {
@@ -944,7 +976,68 @@ export async function getUnifiedReport(
       : 0,
   };
 
-  return { rows, totals };
+  // Sam (2026-05-15 meeting #10) — "By source · profitability". Aggregate the
+  // already-computed per-(campaign × supplier) rows by `supplierPlatform` so
+  // operators can scan Facebook / Google / TikTok / Taboola / Direct totals
+  // without flipping between campaign rows. This is a pure SUM over `rows`
+  // (which already had revenue + spend allocated correctly above) — no second
+  // LeadByte call, no re-derivation. Σ(byPlatform.revenue) === totals.revenue
+  // and Σ(byPlatform.spend) === totals.spend by construction.
+  //
+  // We bucket on `supplierPlatform` (the LeadByte platform string) rather
+  // than the canonical Catchr platform id because:
+  //   1. Sam reads the same strings on LeadReports.io
+  //   2. Suppliers without a Catchr counterpart (Direct, Community Manager,
+  //      Trustpilot) still get their own row instead of collapsing to a
+  //      single "Unknown" bucket
+  // The Catchr NCP link is propagated from the first row in the bucket that
+  // has one — same first-write-wins convention as catchrByPlatform above.
+  const platformBuckets = new Map<string, {
+    platform: string;
+    catchrUrl: string | null;
+    leads: number;
+    spend: number;
+    revenue: number;
+  }>();
+  for (const r of rows) {
+    const key = r.supplierPlatform || 'Unknown';
+    const existing = platformBuckets.get(key);
+    if (existing) {
+      existing.leads += r.leads;
+      existing.spend += r.spend;
+      existing.revenue += r.revenue;
+      if (!existing.catchrUrl && r.catchrUrl) existing.catchrUrl = r.catchrUrl;
+    } else {
+      platformBuckets.set(key, {
+        platform: key,
+        catchrUrl: r.catchrUrl,
+        leads: r.leads,
+        spend: r.spend,
+        revenue: r.revenue,
+      });
+    }
+  }
+  const byPlatform: UnifiedReportPlatformRow[] = Array.from(platformBuckets.values())
+    .map((b) => {
+      const spend = Math.round(b.spend * 100) / 100;
+      const revenue = Math.round(b.revenue * 100) / 100;
+      const profit = Math.round((revenue - spend) * 100) / 100;
+      return {
+        platform: b.platform,
+        catchrUrl: b.catchrUrl,
+        leads: b.leads,
+        spend,
+        revenue,
+        profit,
+        cpl: b.leads > 0 ? Math.round((spend / b.leads) * 100) / 100 : 0,
+        margin: revenue > 0
+          ? Math.round(((revenue - spend) / revenue) * 1000) / 10
+          : 0,
+      };
+    })
+    .sort((a, b) => b.revenue - a.revenue);
+
+  return { rows, totals, byPlatform };
 }
 
 export async function getPnlSummary(
