@@ -785,8 +785,10 @@ export async function getUnifiedReport(
   // guarantees Σ(supplier.revenue) per campaign === campaign.revenue (LeadByte
   // truth), without depending on the two endpoints' lead counts agreeing.
   const campaignRevenueByName = new Map<string, number>();
+  const campaignLeadsByName = new Map<string, number>();
   for (const c of campaignRows) {
     campaignRevenueByName.set(c.campaign, c.revenue ?? 0);
+    campaignLeadsByName.set(c.campaign, c.leads ?? 0);
   }
   const supplierLeadsSumByCampaign = new Map<string, number>();
   for (const r of supplierRows) {
@@ -870,14 +872,29 @@ export async function getUnifiedReport(
     // See the campaignRevenueByName comment above for why this is proportional
     // allocation rather than revPerLead × r.leads.
     const campaignRevenue = campaignRevenueByName.get(r.campaignName) ?? 0;
+    const campaignLeads = campaignLeadsByName.get(r.campaignName) ?? 0;
     const supplierLeadsSum = supplierLeadsSumByCampaign.get(r.campaignName) ?? 0;
     const revenue = supplierLeadsSum > 0
       ? Math.round((campaignRevenue * r.leads / supplierLeadsSum) * 100) / 100
       : 0;
+    // BUG FIX (2026-05-22): LeadByte's /reports/supplier counts cascade-routing
+    // EVENTS (a single lead presented to 2 suppliers in failover = 2 events),
+    // not unique leads. /reports/campaign holds the unique lead count. Sum of
+    // raw supplier.leads always >= campaign.leads. Without normalization, Stato
+    // totals look inflated vs LeadByte's own dashboard + LeadReports.io.
+    // Normalize via the same proportional allocation we use for revenue so
+    // Σ(supplier.leads) per campaign === campaign.leads (LB unique-lead truth).
+    const leads = supplierLeadsSum > 0 && campaignLeads > 0
+      ? Math.round(campaignLeads * r.leads / supplierLeadsSum)
+      : r.leads;
 
     // Override the LeadByte payout `r.spend` with the row's share of the
     // Catchr platform total — Catchr is the source of truth for ad-network
     // spend; LeadByte's payout column is consistently £0 for those rows.
+    // Use r.leads (raw cascade-event count) for the allocation share — the
+    // platform totals in totalLeadsByCatchrPlatform are also built from raw
+    // r.leads, so the ratios are internally consistent. The normalized `leads`
+    // variable above is for the displayed lead count only.
     const catchrPlat = catchrPlatformByRowIdx.get(i);
     let spend = r.spend;
     if (catchrPlat) {
@@ -902,11 +919,13 @@ export async function getUnifiedReport(
       supplier: r.supplierName,
       supplierPlatform: r.platform,
       catchrUrl,
-      leads: r.leads,
+      leads,
       spend,
       revenue,
       profit,
-      cpl: r.leads > 0 ? Math.round((spend / r.leads) * 100) / 100 : 0,
+      // CPL = spend per actual lead (uses normalized `leads`, not the raw
+      // cascade-event count). Matches how operators think about cost-per-lead.
+      cpl: leads > 0 ? Math.round((spend / leads) * 100) / 100 : 0,
       margin,
     };
   }).sort((a, b) => b.revenue - a.revenue);

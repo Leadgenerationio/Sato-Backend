@@ -85,6 +85,20 @@ describe('getUnifiedReport — supplier revenue allocation (2026-05-22 fix)', ()
     expect(facebookRow!.revenue).toBeLessThan(12_500);
   });
 
+  it('per-campaign lead count sum matches LeadByte truth (840), not the inflated supplier-spend sum (1,382)', async () => {
+    const r = await getUnifiedReport(
+      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      { window: 'this_month' },
+    );
+    const ieRows = r.rows.filter((row) => row.campaignName === 'Hearing Aids (IE)');
+    const sumSupplierLeads = ieRows.reduce((s, row) => s + row.leads, 0);
+    // Must match /reports/campaign truth (840 unique leads), NOT the
+    // /reports/supplier cascade-event sum (1,382). ±1 tolerance for
+    // proportional rounding across 6 supplier rows.
+    expect(sumSupplierLeads).toBeGreaterThanOrEqual(839);
+    expect(sumSupplierLeads).toBeLessThanOrEqual(841);
+  });
+
   it('campaigns with zero supplier leads return zero revenue without divide-by-zero', async () => {
     // Same mock — Hearing Aids (IE) supplier-leads-sum is 1,382 (positive),
     // so we just sanity-check that the totals object is well-formed and the
