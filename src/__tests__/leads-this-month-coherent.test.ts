@@ -97,7 +97,7 @@ describe('leadsThisMonth — dashboard vs integrations overview', () => {
     await invalidateCache('integrations:overview');
   });
 
-  it('dashboard and integrations overview agree on leadsThisMonth', async () => {
+  it('dashboard 12mo tile matches overview leadsLast12Months; overview leadsThisMonth is true current-month', async () => {
     const [dashRes, overviewRes] = await Promise.all([
       request(app).get('/api/v1/dashboard/stats').set('Authorization', `Bearer ${ownerToken}`),
       request(app).get('/api/v1/integrations/overview').set('Authorization', `Bearer ${ownerToken}`),
@@ -107,17 +107,29 @@ describe('leadsThisMonth — dashboard vs integrations overview', () => {
     expect(overviewRes.status).toBe(200);
 
     const dashLeads = dashRes.body.data.leadsThisMonth;
-    const overviewLeads = overviewRes.body.data.leadbyte.leadsThisMonth;
+    const overviewThisMonth = overviewRes.body.data.leadbyte.leadsThisMonth;
+    const overviewLast12m = overviewRes.body.data.leadbyte.leadsLast12Months;
 
-    // Coherence — both endpoints describe the same metric for the same
-    // business, they must return the same number.
+    // The dashboard tile is labelled "Last 12 months" and uses the
+    // rolling 12-month window. The overview's `leadsLast12Months` field
+    // is the same window applied to the same lead_deliveries data — these
+    // must always match.
     expect(typeof dashLeads).toBe('number');
-    expect(typeof overviewLeads).toBe('number');
-    expect(overviewLeads).toBe(dashLeads);
+    expect(typeof overviewLast12m).toBe('number');
+    expect(overviewLast12m).toBe(dashLeads);
+
+    // Overview's `leadsThisMonth` is the TRUE current-month count under
+    // the same FE label "Leads this month" — by definition <= the 12-month
+    // count (current month is a subset of last 12 months). Should equal
+    // exactly the in-month seed we added (11), plus any other this-month
+    // rows already in the shared dev DB.
+    expect(typeof overviewThisMonth).toBe('number');
+    expect(overviewThisMonth).toBeGreaterThanOrEqual(11);
+    expect(overviewThisMonth).toBeLessThanOrEqual(overviewLast12m);
 
     // Sanity — at minimum our two in-window seeds (11 + 22 = 33) must
-    // be present in both counts. Higher is fine: other fixtures live in
-    // the same shared DB.
+    // be present in the 12-month count. Higher is fine: other fixtures
+    // live in the same shared DB.
     expect(dashLeads).toBeGreaterThanOrEqual(33);
   });
 });

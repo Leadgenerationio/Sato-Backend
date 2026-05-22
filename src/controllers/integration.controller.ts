@@ -620,18 +620,17 @@ function thirtyDaysAgoIso(): string {
 }
 
 async function buildOverview() {
-  // Align the LeadByte leads-this-month metric with the dashboard's KPI
-  // tile so the two endpoints can't disagree. Dashboard defaults to the
-  // 'last_year' rolling window (see getDashboardStats — opts.window
-  // defaults to 'last_year') and filters lead_deliveries.delivery_date
-  // BETWEEN win.startIso AND win.endIso. Previously this controller used
-  // a hard-coded "first day of current calendar month" lower bound with
-  // no upper bound, which silently returned 0 whenever the current
-  // month had no rows yet (e.g. early in the month before the daily
-  // LeadByte sync has caught up) — even when the dashboard tile next
-  // to it showed 6,405. Use the same resolver so the two stay in lock-
-  // step regardless of how the default window evolves.
-  const leadsWindow = resolveDashboardWindow('last_year');
+  // The integrations card on the FE shows the value under the label
+  // "LEADS THIS MONTH", so the value must actually be this-month (NOT the
+  // 12-month rolling window the dashboard uses for its own KPI tile —
+  // the dashboard tile is labelled "Last 12 months" so different number
+  // is fine there). Earlier this controller aligned to dashboard's
+  // last_year window to fix a separate bug where the two endpoints
+  // returned different values under the same label; now that the labels
+  // diverge correctly we can return real this-month here. The dashboard
+  // tile continues to use its own resolver and ships its own value.
+  const leadsWindow = resolveDashboardWindow('this_month');
+  const last12mWindow = resolveDashboardWindow('last_year');
   const thirtyDaysAgo = thirtyDaysAgoIso();
 
   const [
@@ -639,6 +638,7 @@ async function buildOverview() {
     creditCheckCountRow,
     creativeCountRow,
     leadsThisMonthRow,
+    leadsLast12mRow,
     adSpend30dRow,
     adSpendLatestSyncRow,
   ] = await Promise.all([
@@ -655,6 +655,10 @@ async function buildOverview() {
       .select({ count: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
       .from(leadDeliveries)
       .where(sql`${leadDeliveries.deliveryDate} >= ${leadsWindow.startIso}::date AND ${leadDeliveries.deliveryDate} <= ${leadsWindow.endIso}::date`),
+    db
+      .select({ count: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
+      .from(leadDeliveries)
+      .where(sql`${leadDeliveries.deliveryDate} >= ${last12mWindow.startIso}::date AND ${leadDeliveries.deliveryDate} <= ${last12mWindow.endIso}::date`),
     db
       .select({ total: sql<number>`coalesce(sum(${adSpend.spend}), 0)::float8` })
       .from(adSpend)
@@ -682,6 +686,25 @@ async function buildOverview() {
       xeroError = status.lastError ?? null;
     } catch (err) {
       logger.warn({ err }, 'Xero status fetch failed in overview');
+    }
+    // BUG FIX (2026-05-22): getStatus() only checks the auth-token cache. It
+    // doesn't probe the live data endpoints, so the integrations card was
+    // reporting Xero as healthy (lastError: null) while /bank-accounts and
+    // /invoices were hitting persistent 429s. Probe the same /Accounts call
+    // the bank widget uses so the card reflects what users actually see.
+    // Cached for 60s via the dedicated probe-cache key to avoid one extra
+    // Xero API call per overview-page-load.
+    if (xeroConnected && !xeroError) {
+      try {
+        await cached('xero:bank-probe:v1', 60, async () => {
+          await xeroClient.getBankBalances();
+          return { ok: true };
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        xeroError = msg;
+        logger.warn({ err }, 'Xero bank-balances probe failed in overview');
+      }
     }
   }
 
@@ -750,6 +773,11 @@ async function buildOverview() {
       configured: isLeadByteConfigured(),
       lastSyncAt: lastLeadByteSyncAt,
       leadsThisMonth: leadsThisMonthRow[0]?.count ?? 0,
+      // Companion field — same lead-deliveries table aggregated over the
+      // rolling 12-month window. Consumers that want the bigger number (the
+      // dashboard's KPI tile, the LeadByte card sometimes) can read this
+      // directly without firing a second window resolution.
+      leadsLast12Months: leadsLast12mRow[0]?.count ?? 0,
       // Newest-first list of multi-buyer campaigns the last sync(s) skipped.
       // The integrations page renders this as a collapsible warning under
       // the LeadByte card so attribution gaps are visible at a glance.
