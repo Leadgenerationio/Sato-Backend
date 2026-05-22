@@ -9,7 +9,7 @@ import { adSpend } from '../db/schema/ad-spend.js';
 import { resolveDashboardWindow } from '../utils/dashboard-window.js';
 import * as xeroClient from '../integrations/xero/xero-client.js';
 import * as vatService from '../services/vat.service.js';
-import { isLeadByteConfigured, getSkippedCampaigns } from '../integrations/leadbyte/leadbyte-client.js';
+import { isLeadByteConfigured, getSkippedCampaigns, getCampaignReport } from '../integrations/leadbyte/leadbyte-client.js';
 import { getActiveProvider } from '../integrations/credit-check/index.js';
 import { isResendConfigured } from '../integrations/resend/resend-client.js';
 import { isSignNowConfigured } from '../integrations/signnow/signnow-client.js';
@@ -624,12 +624,18 @@ async function buildOverview() {
   // "LEADS THIS MONTH", so the value must actually be this-month (NOT the
   // 12-month rolling window the dashboard uses for its own KPI tile —
   // the dashboard tile is labelled "Last 12 months" so different number
-  // is fine there). Earlier this controller aligned to dashboard's
-  // last_year window to fix a separate bug where the two endpoints
-  // returned different values under the same label; now that the labels
-  // diverge correctly we can return real this-month here. The dashboard
-  // tile continues to use its own resolver and ships its own value.
-  const leadsWindow = resolveDashboardWindow('this_month');
+  // is fine there).
+  //
+  // BUG FIX (2026-05-22, follow-up): originally summed lead_deliveries.lead_count
+  // from the DB. The local lead_deliveries table lags behind LeadByte by
+  // ~10k current-month rows because the sync writes daily with delay, so
+  // the DB-based count showed 7,644 while LeadByte /reports/campaign
+  // showed the true 17,819 (which is also what the unified report displays).
+  // Switched both to read from the cached LeadByte campaign report so the
+  // integrations card, unified report, and LeadByte's own dashboard all
+  // agree to the lead. Reuses the same Redis keys as unified-report so
+  // the call shares the cache that's already kept warm by the prewarm
+  // worker — no additional upstream traffic.
   const last12mWindow = resolveDashboardWindow('last_year');
   const thirtyDaysAgo = thirtyDaysAgoIso();
 
@@ -637,7 +643,7 @@ async function buildOverview() {
     agreementCountRow,
     creditCheckCountRow,
     creativeCountRow,
-    leadsThisMonthRow,
+    leadsThisMonthFromLb,
     leadsLast12mRow,
     adSpend30dRow,
     adSpendLatestSyncRow,
@@ -651,10 +657,17 @@ async function buildOverview() {
     db
       .select({ count: sql<number>`count(*)::int` })
       .from(creatives),
-    db
-      .select({ count: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
-      .from(leadDeliveries)
-      .where(sql`${leadDeliveries.deliveryDate} >= ${leadsWindow.startIso}::date AND ${leadDeliveries.deliveryDate} <= ${leadsWindow.endIso}::date`),
+    // Hot-path the cached LeadByte campaign report. Sum total leads across
+    // all campaigns. Returns 0 leads when LeadByte is unconfigured (mock mode).
+    isLeadByteConfigured()
+      ? cached('lb:report:this_month:v5', 900, () => getCampaignReport('this_month'))
+          .then((rows) => rows.reduce((s, r) => s + (r.leads ?? 0), 0))
+          .catch(() => 0)
+      : Promise.resolve(0),
+    // 12-month total still comes from the local lead_deliveries roll-up —
+    // it's what the dashboard tile shows and aligning to it keeps the two
+    // numbers consistent. The sync lag is much smaller proportionally on a
+    // 365-day window than on a 1-21-day window.
     db
       .select({ count: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
       .from(leadDeliveries)
@@ -772,7 +785,7 @@ async function buildOverview() {
     leadbyte: {
       configured: isLeadByteConfigured(),
       lastSyncAt: lastLeadByteSyncAt,
-      leadsThisMonth: leadsThisMonthRow[0]?.count ?? 0,
+      leadsThisMonth: leadsThisMonthFromLb,
       // Companion field — same lead-deliveries table aggregated over the
       // rolling 12-month window. Consumers that want the bigger number (the
       // dashboard's KPI tile, the LeadByte card sometimes) can read this

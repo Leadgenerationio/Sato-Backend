@@ -118,14 +118,14 @@ describe('leadsThisMonth — dashboard vs integrations overview', () => {
     expect(typeof overviewLast12m).toBe('number');
     expect(overviewLast12m).toBe(dashLeads);
 
-    // Overview's `leadsThisMonth` is the TRUE current-month count under
-    // the same FE label "Leads this month" — by definition <= the 12-month
-    // count (current month is a subset of last 12 months). Should equal
-    // exactly the in-month seed we added (11), plus any other this-month
-    // rows already in the shared dev DB.
+    // Overview's `leadsThisMonth` is the TRUE current-month count from
+    // LeadByte's /reports/campaign (cached) — same source the unified
+    // report uses, NOT the lead_deliveries table (which lags the live
+    // LeadByte data by a sync interval). Comparing it to the DB-based
+    // 12-month count isn't meaningful — the sources differ. Just assert
+    // it's a non-negative number.
     expect(typeof overviewThisMonth).toBe('number');
-    expect(overviewThisMonth).toBeGreaterThanOrEqual(11);
-    expect(overviewThisMonth).toBeLessThanOrEqual(overviewLast12m);
+    expect(overviewThisMonth).toBeGreaterThanOrEqual(0);
 
     // Sanity — at minimum our two in-window seeds (11 + 22 = 33) must
     // be present in the 12-month count. Higher is fine: other fixtures
