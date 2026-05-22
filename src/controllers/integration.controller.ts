@@ -425,12 +425,22 @@ export async function r2Status(_req: Request, res: Response) {
 // ─── Catchr ad-spend ───
 
 export async function catchrStatus(_req: Request, res: Response) {
+  // OCT-40: ad_spend.synced_at is the DB-backed source of truth for the
+  // most recent Catchr sync. The in-memory getLastCatchrSyncAt() resets
+  // to null on API restart and never sees writes from the sync worker
+  // process, so this endpoint used to return lastSyncAt:null even while
+  // /overview reported a real timestamp from the DB. Match buildOverview()
+  // and fall back to the in-memory value only when the table is empty.
+  const latestSyncRow = await db
+    .select({ latest: sql<string | null>`max(${adSpend.syncedAt})::text` })
+    .from(adSpend);
+  const latestSyncFromDb = latestSyncRow[0]?.latest ?? null;
   res.json({
     status: 'success',
     data: {
       configured: isCatchrConfigured(),
       mcpUrl: process.env.CATCHR_MCP_URL || 'https://api.catchr.io/mcp',
-      lastSyncAt: getLastCatchrSyncAt(),
+      lastSyncAt: latestSyncFromDb ?? getLastCatchrSyncAt(),
     },
   });
 }
