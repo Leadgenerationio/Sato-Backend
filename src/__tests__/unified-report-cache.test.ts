@@ -170,7 +170,11 @@ describe('getUnifiedReport — cache shields against rate-limited LeadByte', () 
     expect(r1.totals.profit).toBe(
       Math.round((r1.totals.revenue - r1.totals.spend) * 100) / 100,
     );
-    expect(r1.totals.margin).toBeGreaterThanOrEqual(0);
+    // Margin can be negative or positive depending on how much ad_spend the
+    // dev DB has accumulated for facebook-ads. The cache-shielding test
+    // doesn't control that — coverage for spend/margin allocation lives in
+    // `unified-report-revenue-allocation.test.ts` + `traffic-source-aggregation.test.ts`.
+    expect(Number.isFinite(r1.totals.margin)).toBe(true);
 
     const r2 = await getUnifiedReport(
       { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,

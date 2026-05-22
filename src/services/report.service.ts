@@ -768,11 +768,30 @@ export async function getUnifiedReport(
       .where(eq(trafficSources.isActive, true)),
   ]);
 
-  // Build revenue-per-lead by campaign name so we can allocate.
-  const revenuePerLeadByCampaign = new Map<string, number>();
+  // BUG FIX (2026-05-22): LeadByte's `/reports/campaign` and `/reports/supplier`
+  // return inconsistent lead counts for the same campaign × window. Example
+  // discovered live for Hearing Aids (IE), 2026-05 month-to-date:
+  //   /reports/campaign:  leads=840  revenue=£15,189.20  (matches LeadReports.io)
+  //   /reports/supplier:  Σ supplier.leads = 1,382       (counts cascade/route
+  //                                                       presentations, not
+  //                                                       unique deliveries)
+  // The previous algorithm did `revPerLead = campaign.revenue / campaign.leads`
+  // then `r.revenue = revPerLead × r.leads`, which inflated every multi-supplier
+  // campaign's revenue by (Σ supplier.leads − campaign.leads). For Hearing
+  // Aids (IE) that turned £15,189 into £24,989 (+65%).
+  //
+  // Correct allocation: distribute campaign.revenue across its supplier rows
+  // PROPORTIONALLY to each supplier's share of the supplier-spend leads. This
+  // guarantees Σ(supplier.revenue) per campaign === campaign.revenue (LeadByte
+  // truth), without depending on the two endpoints' lead counts agreeing.
+  const campaignRevenueByName = new Map<string, number>();
   for (const c of campaignRows) {
-    if (c.leads > 0) revenuePerLeadByCampaign.set(c.campaign, c.revenue / c.leads);
-    else revenuePerLeadByCampaign.set(c.campaign, 0);
+    campaignRevenueByName.set(c.campaign, c.revenue ?? 0);
+  }
+  const supplierLeadsSumByCampaign = new Map<string, number>();
+  for (const r of supplierRows) {
+    const prev = supplierLeadsSumByCampaign.get(r.campaignName) ?? 0;
+    supplierLeadsSumByCampaign.set(r.campaignName, prev + (r.leads ?? 0));
   }
 
   // Catchr NCP lookup keyed by platform (lowercased) — Sato-side traffic
@@ -848,8 +867,13 @@ export async function getUnifiedReport(
       clientNames: [] as string[],
       vertical: deriveVerticalFromName(r.campaignName),
     };
-    const revenuePerLead = revenuePerLeadByCampaign.get(r.campaignName) ?? 0;
-    const revenue = Math.round(revenuePerLead * r.leads * 100) / 100;
+    // See the campaignRevenueByName comment above for why this is proportional
+    // allocation rather than revPerLead × r.leads.
+    const campaignRevenue = campaignRevenueByName.get(r.campaignName) ?? 0;
+    const supplierLeadsSum = supplierLeadsSumByCampaign.get(r.campaignName) ?? 0;
+    const revenue = supplierLeadsSum > 0
+      ? Math.round((campaignRevenue * r.leads / supplierLeadsSum) * 100) / 100
+      : 0;
 
     // Override the LeadByte payout `r.spend` with the row's share of the
     // Catchr platform total — Catchr is the source of truth for ad-network
