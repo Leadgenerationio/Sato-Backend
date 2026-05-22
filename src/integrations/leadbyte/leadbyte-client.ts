@@ -898,6 +898,45 @@ export async function processQuarantine(input: LeadByteQuarantineInput): Promise
   return lbWrite('POST', '/quarantine/process', input);
 }
 
+// ─── Skipped-campaign observability ─────────────────────────────────────────
+//
+// `populateLeadDeliveries` skips campaigns mapped to more than one buyer
+// because LeadByte's /reports/* endpoints don't expose per-buyer daily
+// granularity — attributing the campaign-level daily totals to one of the
+// linked clients would corrupt the dashboard. The skip is correct, but
+// silent (just a log line) meant operators had no way to see which
+// campaigns were affected from the UI. We keep the last 100 skip events
+// in memory (FIFO) and expose them through the existing /leadbyte/status
+// endpoint so the integrations page can render them. In-memory only:
+// they reset on API restart, which is fine for an observability signal
+// (a DB table would be overkill for a list that's recomputed every hour).
+export interface SkippedCampaign {
+  campaignId: string;
+  campaignName: string | null;
+  buyerCount: number;
+  at: string; // ISO timestamp
+}
+
+const SKIPPED_CAMPAIGNS_MAX = 100;
+const skippedCampaigns: SkippedCampaign[] = [];
+
+export function recordSkippedCampaign(entry: SkippedCampaign): void {
+  skippedCampaigns.push(entry);
+  while (skippedCampaigns.length > SKIPPED_CAMPAIGNS_MAX) {
+    skippedCampaigns.shift();
+  }
+}
+
+/** Returns a copy (newest first) so callers can't mutate the internal buffer. */
+export function getSkippedCampaigns(): SkippedCampaign[] {
+  return [...skippedCampaigns].reverse();
+}
+
+/** Test-only — drops every entry. */
+export function __resetSkippedCampaigns(): void {
+  skippedCampaigns.length = 0;
+}
+
 // ─── Sync ───────────────────────────────────────────────────────────────────
 
 export interface SyncResult {
@@ -1251,24 +1290,29 @@ async function populateLeadDeliveries(deps: {
   const { eq, isNotNull } = await import('drizzle-orm');
 
   // Group links by campaign: campaign_id → list of client_ids.
+  // Also pull the campaign name so skip-event records carry a human label
+  // (the integrations page surfaces these — leadbyteCampaignId alone is
+  // meaningless to operators).
   const links = await deps.db
     .select({
       campaignId: deps.clientCampaigns.campaignId,
       clientId: deps.clientCampaigns.clientId,
       leadbyteCampaignId: deps.campaigns.leadbyteCampaignId,
+      campaignName: deps.campaigns.name,
     })
     .from(deps.clientCampaigns)
     .innerJoin(deps.campaigns, eq(deps.campaigns.id, deps.clientCampaigns.campaignId))
     .where(isNotNull(deps.campaigns.leadbyteCampaignId));
   if (links.length === 0) return { rowsUpserted: 0, campaignsSkipped: 0 };
 
-  const byCampaign = new Map<string, { campaignId: string; leadbyteCampaignId: string; clientIds: string[] }>();
+  const byCampaign = new Map<string, { campaignId: string; leadbyteCampaignId: string; campaignName: string | null; clientIds: string[] }>();
   for (const l of links) {
     const lbId = l.leadbyteCampaignId;
     if (!lbId) continue;
     const entry = byCampaign.get(l.campaignId) ?? {
       campaignId: l.campaignId,
       leadbyteCampaignId: lbId,
+      campaignName: l.campaignName ?? null,
       clientIds: [],
     };
     entry.clientIds.push(l.clientId);
@@ -1315,7 +1359,9 @@ async function populateLeadDeliveries(deps: {
   for (const entry of byCampaign.values()) {
     if (entry.clientIds.length !== 1) {
       // Multi-client campaign: API only returns campaign-level daily totals,
-      // can't safely attribute. Skip + log. Future enhancement: per-buyer
+      // can't safely attribute. Skip + log + record into the in-memory skip
+      // buffer so the integrations page can surface affected campaigns
+      // without trawling Railway logs. Future enhancement: per-buyer
       // groupBy on /reports/* if LeadByte supports it.
       campaignsSkipped++;
       logger.warn(
@@ -1326,6 +1372,12 @@ async function populateLeadDeliveries(deps: {
         },
         'lead_deliveries: skipping multi-client campaign — no per-buyer daily attribution yet',
       );
+      recordSkippedCampaign({
+        campaignId: entry.leadbyteCampaignId,
+        campaignName: entry.campaignName,
+        buyerCount: entry.clientIds.length,
+        at: new Date().toISOString(),
+      });
       continue;
     }
 

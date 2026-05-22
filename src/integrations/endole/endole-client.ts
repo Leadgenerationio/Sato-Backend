@@ -2,6 +2,10 @@ import { logger } from '../../utils/logger.js';
 import type { EndoleCreditReport } from './endole-types.js';
 import { scoreToRiskRating } from '../credit-check/types.js';
 import { CreditProviderError } from '../credit-check/errors.js';
+import { createNotification } from '../../services/notification.service.js';
+import { db } from '../../config/database.js';
+import { notifications } from '../../db/schema/notifications.js';
+import { and, desc, eq, gte } from 'drizzle-orm';
 
 /**
  * Endole API v1.1 — UK company credit checks.
@@ -131,6 +135,17 @@ export async function runCreditCheck(companyNumber: string, companyName: string)
         : undefined;
 
     if (upstreamCode === '102') {
+      // Sam funds Endole via top-ups; without an alert here, credit checks fail
+      // silently for hours until someone notices the integrations card. Emit a
+      // system_error notification (deduped within ~1 hour) so the morning
+      // checklist + SMS alerter surface it on the very next poll. Failures to
+      // emit must NOT swallow the upstream balance-exhausted error — the
+      // caller still needs to see the typed CreditProviderError.
+      try {
+        await emitBalanceExhaustedNotification();
+      } catch (err) {
+        logger.error({ err }, 'Endole 102 alert emit failed (continuing)');
+      }
       throw new CreditProviderError(
         `Endole credit_checks failed: ${res.status} — provider balance exhausted (top up at endole.co.uk)`,
         { code: 'credit_provider_balance_exhausted', upstreamStatus: res.status, upstreamCode },
@@ -164,4 +179,48 @@ export async function runCreditCheck(companyNumber: string, companyName: string)
     'endole-credit-check',
   );
   return report;
+}
+
+// Title is constant so we can dedupe on it directly.
+export const ENDOLE_BALANCE_EXHAUSTED_TITLE = 'Endole credit-check balance exhausted';
+const BALANCE_DEDUPE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Insert a system_error notification for "balance exhausted" — but skip when
+ * a row with the same title already exists in the last hour. Without this,
+ * a Sam-side burst of credit checks would create dozens of identical rows.
+ *
+ * When DATABASE_URL isn't configured (unit tests / local dev) `db` is null;
+ * we fall back to createNotification() which writes to the in-memory store
+ * unconditionally — that's fine because there's no spam risk without a DB.
+ */
+async function emitBalanceExhaustedNotification(): Promise<void> {
+  if (db) {
+    const since = new Date(Date.now() - BALANCE_DEDUPE_WINDOW_MS);
+    const existing = await db
+      .select({ id: notifications.id })
+      .from(notifications)
+      .where(
+        and(
+          eq(notifications.title, ENDOLE_BALANCE_EXHAUSTED_TITLE),
+          eq(notifications.read, false),
+          gte(notifications.createdAt, since),
+        ),
+      )
+      .orderBy(desc(notifications.createdAt))
+      .limit(1);
+    if (existing.length > 0) {
+      logger.debug({ id: existing[0].id }, 'Endole 102 alert suppressed (recent unread duplicate)');
+      return;
+    }
+  }
+
+  await createNotification({
+    type: 'system_error',
+    severity: 'error',
+    title: ENDOLE_BALANCE_EXHAUSTED_TITLE,
+    message: 'Endole credit-check balance is empty. Top up at https://www.endole.co.uk/ to resume credit checks.',
+    actionUrl: 'https://www.endole.co.uk/',
+    metadata: { provider: 'endole', upstreamCode: '102' },
+  });
 }

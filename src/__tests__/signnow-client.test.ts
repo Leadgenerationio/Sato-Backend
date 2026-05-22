@@ -475,4 +475,27 @@ describe('SignNow client — webhook signature verification', () => {
     delete process.env.SIGNNOW_WEBHOOK_SECRET;
     expect(signnow.verifyWebhookSignature('{}', 'whatever')).toBe(false);
   });
+
+  it('warns exactly once when called repeatedly without a secret (no log spam)', () => {
+    delete process.env.SIGNNOW_WEBHOOK_SECRET;
+    // Reset the module-level guard so we test from a clean slate, otherwise
+    // earlier suites in this file might have tripped it already.
+    signnow.__testing.resetWebhookSecretWarned();
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // Two back-to-back calls without a secret — every real webhook delivery
+      // would call this, so we must not spam Railway logs.
+      expect(signnow.verifyWebhookSignature('{"a":1}', 'sig-1')).toBe(false);
+      expect(signnow.verifyWebhookSignature('{"a":2}', 'sig-2')).toBe(false);
+
+      const notConfiguredLogs = warnSpy.mock.calls
+        .map((c) => c.join(' '))
+        .filter((line) => line.includes('[signnow][webhook] secret not configured'));
+      expect(notConfiguredLogs).toHaveLength(1);
+    } finally {
+      warnSpy.mockRestore();
+      signnow.__testing.resetWebhookSecretWarned();
+    }
+  });
 });

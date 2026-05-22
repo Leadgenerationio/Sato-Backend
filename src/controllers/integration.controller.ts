@@ -6,9 +6,10 @@ import { creditChecks } from '../db/schema/credit-checks.js';
 import { creatives } from '../db/schema/creatives.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { adSpend } from '../db/schema/ad-spend.js';
+import { resolveDashboardWindow } from '../utils/dashboard-window.js';
 import * as xeroClient from '../integrations/xero/xero-client.js';
 import * as vatService from '../services/vat.service.js';
-import { isLeadByteConfigured } from '../integrations/leadbyte/leadbyte-client.js';
+import { isLeadByteConfigured, getSkippedCampaigns } from '../integrations/leadbyte/leadbyte-client.js';
 import { getActiveProvider } from '../integrations/credit-check/index.js';
 import { isResendConfigured } from '../integrations/resend/resend-client.js';
 import { isSignNowConfigured } from '../integrations/signnow/signnow-client.js';
@@ -314,6 +315,11 @@ export async function leadbyteStatus(_req: Request, res: Response) {
     data: {
       configured: isLeadByteConfigured(),
       lastSyncAt: lastLeadByteSyncAt,
+      // Multi-buyer campaigns the populateLeadDeliveries pass skipped because
+      // LeadByte's API has no per-buyer daily granularity. Newest first,
+      // capped at 100 entries in memory. Surfaced on the integrations page
+      // so operators can see attribution gaps without log access.
+      skippedCampaigns: getSkippedCampaigns(),
     },
   });
 }
@@ -335,13 +341,43 @@ export async function creditCheckStatus(_req: Request, res: Response) {
   // Endole sandbox returns sample data, not real scores — surface this loudly
   // so admins know why the integrations page shows a connected-but-fake state.
   const endoleSandbox = String(process.env.ENDOLE_SANDBOX || '').toLowerCase() === 'true';
+
+  // Real count from the credit_checks log. The FE renders this verbatim
+  // (Sato-Frontend src/pages/settings.tsx — `creditChecksRun = status?.checksRun ?? 0`,
+  // and src/pages/integrations.tsx — `data.creditCheck.checksRun.toLocaleString()`)
+  // with no time window, so we mirror `buildOverview` and return the all-time
+  // count. Also expose a 30d window so the UI can switch without an API change.
+  // The credit_checks schema (db/schema/credit-checks.ts) doesn't carry a
+  // `provider` column today — every row is an Endole check (the only live
+  // provider). When Creditsafe or another provider lands, add `provider` to
+  // the schema and filter here on `provider === 'endole'` for the Endole card.
+  let checksRun = 0;
+  let checksRunLast30d = 0;
+  if (db) {
+    try {
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 86_400_000);
+      const [allRow, last30Row] = await Promise.all([
+        db.select({ count: sql<number>`count(*)::int` }).from(creditChecks),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(creditChecks)
+          .where(gte(creditChecks.checkedAt, thirtyDaysAgo)),
+      ]);
+      checksRun = allRow[0]?.count ?? 0;
+      checksRunLast30d = last30Row[0]?.count ?? 0;
+    } catch (err) {
+      logger.warn({ err }, 'credit-check count query failed; returning 0');
+    }
+  }
+
   res.json({
     status: 'success',
     data: {
       provider,
       configured: provider !== 'mock',
       sandbox: provider === 'endole' ? endoleSandbox : false,
-      checksRun: 0,
+      checksRun,
+      checksRunLast30d,
     },
   });
 }
@@ -579,18 +615,23 @@ function maskId(value: string): string {
 // counts are still de-duplicated within the window.
 const OVERVIEW_TTL_SECONDS = 15;
 
-function startOfMonthIso(): string {
-  return new Date(new Date().getFullYear(), new Date().getMonth(), 1)
-    .toISOString()
-    .split('T')[0];
-}
-
 function thirtyDaysAgoIso(): string {
   return new Date(Date.now() - 30 * 86_400_000).toISOString().split('T')[0];
 }
 
 async function buildOverview() {
-  const monthStart = startOfMonthIso();
+  // Align the LeadByte leads-this-month metric with the dashboard's KPI
+  // tile so the two endpoints can't disagree. Dashboard defaults to the
+  // 'last_year' rolling window (see getDashboardStats — opts.window
+  // defaults to 'last_year') and filters lead_deliveries.delivery_date
+  // BETWEEN win.startIso AND win.endIso. Previously this controller used
+  // a hard-coded "first day of current calendar month" lower bound with
+  // no upper bound, which silently returned 0 whenever the current
+  // month had no rows yet (e.g. early in the month before the daily
+  // LeadByte sync has caught up) — even when the dashboard tile next
+  // to it showed 6,405. Use the same resolver so the two stay in lock-
+  // step regardless of how the default window evolves.
+  const leadsWindow = resolveDashboardWindow('last_year');
   const thirtyDaysAgo = thirtyDaysAgoIso();
 
   const [
@@ -613,7 +654,7 @@ async function buildOverview() {
     db
       .select({ count: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
       .from(leadDeliveries)
-      .where(gte(leadDeliveries.deliveryDate, monthStart)),
+      .where(sql`${leadDeliveries.deliveryDate} >= ${leadsWindow.startIso}::date AND ${leadDeliveries.deliveryDate} <= ${leadsWindow.endIso}::date`),
     db
       .select({ total: sql<number>`coalesce(sum(${adSpend.spend}), 0)::float8` })
       .from(adSpend)
@@ -709,6 +750,10 @@ async function buildOverview() {
       configured: isLeadByteConfigured(),
       lastSyncAt: lastLeadByteSyncAt,
       leadsThisMonth: leadsThisMonthRow[0]?.count ?? 0,
+      // Newest-first list of multi-buyer campaigns the last sync(s) skipped.
+      // The integrations page renders this as a collapsible warning under
+      // the LeadByte card so attribution gaps are visible at a glance.
+      skippedCampaigns: getSkippedCampaigns(),
     },
     catchr: {
       configured: catchrConfigured,

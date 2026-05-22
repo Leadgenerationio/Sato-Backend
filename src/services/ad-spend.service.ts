@@ -178,12 +178,25 @@ export async function syncAll(deps?: { db?: typeof db }): Promise<AdSpendSyncRes
 
         const rowsByKey = new Map<string, AdSpendInsert>();
         let skippedEmptyCampaign = 0;
+        // Keep the keys of the FIRST empty-campaign row we see for this
+        // account-sync so the warn-log below can show the operator which
+        // dimensions the platform actually returned. This is the "fail
+        // loudly" path: if a platform's field map is wrong, the log line
+        // tells you exactly which keys the row has so you can spot the
+        // mismatch against FIELD_MAP[platform].campaignId without having
+        // to attach a debugger to prod.
+        let sampleEmptyRowKeys: string[] | null = null;
+        let sampleConfiguredCampaignField: string | null = null;
         for (const row of resp.rows) {
           const d = coerceDate(row[map.date]);
           if (!d) continue;
           const campaignId = String(row[map.campaignId] ?? '');
           if (!campaignId) {
             skippedEmptyCampaign++;
+            if (sampleEmptyRowKeys === null) {
+              sampleEmptyRowKeys = Object.keys(row);
+              sampleConfiguredCampaignField = map.campaignId;
+            }
             continue;
           }
           const spendValue = coerceNumber(row[map.spend]);
@@ -209,7 +222,13 @@ export async function syncAll(deps?: { db?: typeof db }): Promise<AdSpendSyncRes
         }
         if (skippedEmptyCampaign > 0) {
           logger.warn(
-            { platform: source.platform, accountId: acc.id, skippedEmptyCampaign },
+            {
+              platform: source.platform,
+              accountId: acc.id,
+              skippedEmptyCampaign,
+              configuredCampaignField: sampleConfiguredCampaignField,
+              sampleRowKeys: sampleEmptyRowKeys,
+            },
             'Catchr: dropped rows with empty campaign_id — field map likely needs adjusting',
           );
         }

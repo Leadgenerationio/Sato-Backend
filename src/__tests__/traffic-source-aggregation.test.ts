@@ -167,6 +167,47 @@ describe('traffic-source-aggregation — campaign attribution', () => {
     expect(m.get(lbIdOf(4))).toBeCloseTo(11, 5);
     expect(m.get(lbIdOf(5))).toBeCloseTo(22, 5);
   });
+
+  // Bug 2026-05-22 — repro: in prod, `traffic_sources.platform` was written
+  // with the FE-picker values ('google', 'Facebook', 'TikTok'), but
+  // `ad_spend.platform` is the canonical Catchr identifier
+  // ('google-ads', 'facebook-ads', 'tik-tok'). Raw `=` join silently
+  // returned zero rows for every campaign → Solar Panels (UK) had real
+  // £8,926 TikTok spend but the /campaigns endpoint reported totalCost: 0
+  // and margin: 100% (visibly broken — 13k leads, £132k revenue, "no
+  // cost"). Both helpers MUST canonicalize platform on both sides of the
+  // join so operator-entered mappings actually attribute spend.
+  it('aggregateCatchrSpendByLbId canonicalizes FE-style platform values vs Catchr platform values', async () => {
+    const solarUk = await makeCampaign(`Solar Panels (UK) ${tag}`, lbIdOf(8));
+    const insulation = await makeCampaign(`Insulation ${tag}`, lbIdOf(9));
+    // Operator picks 'TikTok' / 'google' / 'Facebook' in the FE — these are
+    // the exact distinct values found in prod traffic_sources.platform.
+    await linkSource({ campaignId: solarUk, platform: 'TikTok', accountId: acctOf(1) });
+    await linkSource({ campaignId: insulation, platform: 'google', accountId: acctOf(2) });
+    // Catchr writes the hyphenated canonical strings.
+    await seedSpend({ platform: 'tik-tok', accountId: acctOf(1), spend: 100 });
+    await seedSpend({ platform: 'google-ads', accountId: acctOf(2), spend: 250 });
+    // Stray unmapped row that must NOT leak into either campaign.
+    await seedSpend({ platform: 'facebook-ads', accountId: acctOf(3), spend: 9999 });
+
+    const m = await aggregateCatchrSpendByLbId(30);
+    expect(m.get(lbIdOf(8))).toBeCloseTo(100, 5);
+    expect(m.get(lbIdOf(9))).toBeCloseTo(250, 5);
+  });
+
+  it('aggregateCatchrSpend canonicalizes platform — TikTok ↔ tik-tok join must fire', async () => {
+    const campaignId = await makeCampaign(`Solar ${tag}`, lbIdOf(10));
+    // Mixed-case "TikTok" stays out of the canonical form on its own — the
+    // SQL must lower-case-trim it down to 'tik-tok'.
+    await linkSource({ campaignId, platform: 'TikTok', accountId: acctOf(1) });
+    await seedSpend({ platform: 'tik-tok', accountId: acctOf(1), spend: 50 });
+    // Sibling Catchr row on a different account on the same canonical
+    // platform — must NOT contribute.
+    await seedSpend({ platform: 'tik-tok', accountId: acctOf(2), spend: 999 });
+
+    const total = await aggregateCatchrSpend(campaignId);
+    expect(total).toBeCloseTo(50, 5);
+  });
 });
 
 describe('traffic-source-aggregation — unlinked diagnostic', () => {

@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { isUuid } from '../utils/zod-helpers.js';
+import { canonicalPlatformSql } from '../utils/catchr-platform.js';
 
 /**
  * T1 — Manual ad-account → campaign attribution.
@@ -72,16 +73,23 @@ export async function aggregateCatchrSpend(
   windowDays: number = DEFAULT_WINDOW_DAYS,
 ): Promise<number> {
   if (!isUuid(campaignId)) return 0;
+  // Both sides of the join go through canonicalPlatformSql() so the FE-side
+  // picker values ('google', 'Facebook', 'TikTok') match the Catchr-side
+  // strings ('google-ads', 'facebook-ads', 'tik-tok'). Without that, the
+  // raw `=` join would silently produce zero rows for every campaign — see
+  // bug investigation 2026-05-22.
+  const adPlatform = sql.raw(canonicalPlatformSql('a.platform'));
+  const tsPlatform = sql.raw(canonicalPlatformSql('ts.platform'));
   const rows = (await db.execute(sql`
     with source_accounts as (
-      select ts.platform, ts.account_id as acc_id
+      select ${tsPlatform} as platform, ts.account_id as acc_id
       from traffic_sources ts
       where ts.campaign_id = ${campaignId}::uuid
         and ts.is_active = true
         and ts.account_id is not null
         and ts.platform is not null
       union
-      select ts.platform, jsonb_array_elements_text(ts.account_ids) as acc_id
+      select ${tsPlatform} as platform, jsonb_array_elements_text(ts.account_ids) as acc_id
       from traffic_sources ts
       where ts.campaign_id = ${campaignId}::uuid
         and ts.is_active = true
@@ -89,8 +97,11 @@ export async function aggregateCatchrSpend(
     )
     select coalesce(sum(a.spend::numeric), 0)::float as total
     from ad_spend a
-    join source_accounts sa on a.platform = sa.platform and a.account_id = sa.acc_id
+    join source_accounts sa
+      on ${adPlatform} = sa.platform
+     and a.account_id = sa.acc_id
     where a.date >= current_date - make_interval(days => ${windowDays})
+      and sa.platform is not null
   `)) as unknown as Array<{ total: number }>;
   return Number(rows[0]?.total ?? 0);
 }
@@ -108,15 +119,20 @@ export async function aggregateCatchrSpend(
 export async function aggregateCatchrSpendByLbId(
   windowDays: number = DEFAULT_WINDOW_DAYS,
 ): Promise<Map<string, number>> {
+  // See aggregateCatchrSpend() for why both sides go through
+  // canonicalPlatformSql — Catchr-side `'google-ads'` would otherwise never
+  // join FE-picker-side `'google'`.
+  const adPlatform = sql.raw(canonicalPlatformSql('a.platform'));
+  const tsPlatform = sql.raw(canonicalPlatformSql('ts.platform'));
   const rows = (await db.execute(sql`
     with source_accounts as (
-      select ts.campaign_id, ts.platform, ts.account_id as acc_id
+      select ts.campaign_id, ${tsPlatform} as platform, ts.account_id as acc_id
       from traffic_sources ts
       where ts.is_active = true
         and ts.account_id is not null
         and ts.platform is not null
       union
-      select ts.campaign_id, ts.platform, jsonb_array_elements_text(ts.account_ids) as acc_id
+      select ts.campaign_id, ${tsPlatform} as platform, jsonb_array_elements_text(ts.account_ids) as acc_id
       from traffic_sources ts
       where ts.is_active = true
         and ts.platform is not null
@@ -125,9 +141,12 @@ export async function aggregateCatchrSpendByLbId(
            coalesce(sum(a.spend::numeric), 0)::float as total
     from source_accounts sa
     join campaigns c on c.id = sa.campaign_id
-    join ad_spend a on a.platform = sa.platform and a.account_id = sa.acc_id
+    join ad_spend a
+      on ${adPlatform} = sa.platform
+     and a.account_id = sa.acc_id
     where a.date >= current_date - make_interval(days => ${windowDays})
       and c.leadbyte_campaign_id is not null
+      and sa.platform is not null
     group by c.leadbyte_campaign_id
   `)) as unknown as Array<{ lb_id: string; total: number }>;
   const out = new Map<string, number>();
@@ -149,15 +168,22 @@ export async function aggregateCatchrSpendByLbId(
 export async function aggregateUnlinkedSpend(
   windowDays: number = DEFAULT_WINDOW_DAYS,
 ): Promise<UnlinkedSpendSummary> {
+  // Diagnostic must match what aggregateCatchrSpend* actually attributes —
+  // otherwise a row that the rollup attributes (after canonical platform
+  // normalization) would still appear as "unlinked" here. Normalize both
+  // sides so an active mapping with platform='google' correctly hides
+  // ad_spend rows on platform='google-ads' from the unlinked list.
+  const adPlatform = sql.raw(canonicalPlatformSql('a.platform'));
+  const tsPlatform = sql.raw(canonicalPlatformSql('ts.platform'));
   const rows = (await db.execute(sql`
     with mapped as (
-      select distinct ts.platform, ts.account_id as acc_id
+      select distinct ${tsPlatform} as platform, ts.account_id as acc_id
       from traffic_sources ts
       where ts.is_active = true
         and ts.account_id is not null
         and ts.platform is not null
       union
-      select distinct ts.platform, jsonb_array_elements_text(ts.account_ids) as acc_id
+      select distinct ${tsPlatform} as platform, jsonb_array_elements_text(ts.account_ids) as acc_id
       from traffic_sources ts
       where ts.is_active = true
         and ts.platform is not null
@@ -169,7 +195,7 @@ export async function aggregateUnlinkedSpend(
            count(distinct a.date)::int as days_active
     from ad_spend a
     left join mapped m
-      on m.platform = a.platform and m.acc_id = a.account_id
+      on m.platform = ${adPlatform} and m.acc_id = a.account_id
     where a.date >= current_date - make_interval(days => ${windowDays})
       and m.platform is null
     group by a.platform, a.account_id

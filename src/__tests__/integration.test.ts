@@ -75,6 +75,34 @@ describe('Integration API', () => {
       const res = await request(app).get('/api/v1/integrations/leadbyte/status').set('Authorization', `Bearer ${clientToken}`);
       expect(res.status).toBe(403);
     });
+
+    // Multi-buyer campaigns are skipped by populateLeadDeliveries because
+    // LeadByte's API has no per-buyer daily granularity. The status endpoint
+    // surfaces those skip events to the integrations page so operators can
+    // see attribution gaps without grepping logs.
+    it('returns skippedCampaigns (newest first) recorded during sync', async () => {
+      const lb = await import('../integrations/leadbyte/leadbyte-client.js');
+      lb.__resetSkippedCampaigns();
+      lb.recordSkippedCampaign({ campaignId: 'lb-1', campaignName: 'INSULATION', buyerCount: 2, at: '2026-05-22T08:00:00.000Z' });
+      lb.recordSkippedCampaign({ campaignId: 'lb-2', campaignName: 'SOLAR', buyerCount: 3, at: '2026-05-22T09:00:00.000Z' });
+
+      const res = await request(app).get('/api/v1/integrations/leadbyte/status').set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.data.skippedCampaigns)).toBe(true);
+      expect(res.body.data.skippedCampaigns).toHaveLength(2);
+      // Newest first.
+      expect(res.body.data.skippedCampaigns[0]).toMatchObject({
+        campaignId: 'lb-2',
+        campaignName: 'SOLAR',
+        buyerCount: 3,
+      });
+      expect(res.body.data.skippedCampaigns[1]).toMatchObject({
+        campaignId: 'lb-1',
+        campaignName: 'INSULATION',
+        buyerCount: 2,
+      });
+      lb.__resetSkippedCampaigns();
+    });
   });
 
   describe('POST /api/v1/integrations/leadbyte/sync', () => {

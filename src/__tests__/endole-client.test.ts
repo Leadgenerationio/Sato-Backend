@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { eq } from 'drizzle-orm';
 import * as endole from '../integrations/endole/endole-client.js';
+import * as notificationService from '../services/notification.service.js';
+import { db } from '../config/database.js';
+import { notifications } from '../db/schema/notifications.js';
 
 const ORIGINAL_FETCH = global.fetch;
 
@@ -249,5 +253,113 @@ describe('Endole client — unconfigured fallback', () => {
     expect(r.companyName).toBe('Acme Ltd');
     expect(r.creditScore).toBeGreaterThanOrEqual(40);
     expect(r.creditScore).toBeLessThanOrEqual(100);
+  });
+});
+
+// ─── Endole 102 balance-exhausted alerts ───
+//
+// When the upstream returns error_code "102" (Sam's Endole balance is empty),
+// the client must (a) still throw the typed CreditProviderError so the UI
+// renders a meaningful message, AND (b) write a notification row so the
+// morning checklist + SMS alerter surface it. Without (b), credit checks fail
+// silently for hours until someone notices the integrations card.
+describe('Endole client — 102 balance-exhausted alert', () => {
+  const originalEnv = { ...process.env };
+
+  // Wipe any pre-existing rows with the dedupe title so each test starts
+  // with a clean slate — otherwise an earlier test (or stale dev-DB row)
+  // will be picked up by the in-client dedupe lookup and suppress the
+  // emit we're asserting on.
+  async function clearBalanceAlertRows(): Promise<void> {
+    if (!db) return;
+    await db
+      .delete(notifications)
+      .where(eq(notifications.title, endole.ENDOLE_BALANCE_EXHAUSTED_TITLE));
+  }
+
+  beforeEach(async () => {
+    process.env.ENDOLE_APP_ID = '23013';
+    process.env.ENDOLE_APP_KEY = 'test-secret';
+    delete process.env.ENDOLE_SANDBOX;
+    // Force createNotification to use the in-memory store so we're spying on
+    // a plain call (not chasing inserts in Postgres). The dedupe lookup
+    // inside endole-client still uses the real `db` — we wipe rows above.
+    process.env.USE_DB_NOTIFICATIONS = 'false';
+    await clearBalanceAlertRows();
+  });
+  afterEach(async () => {
+    process.env = { ...originalEnv };
+    global.fetch = ORIGINAL_FETCH;
+    vi.restoreAllMocks();
+    await clearBalanceAlertRows();
+  });
+
+  it('inserts a system_error notification when Endole returns error_code 102', async () => {
+    global.fetch = vi.fn(async () =>
+      mockEndoleErr(403, {
+        error: 'You do not have enough credit in your balance.',
+        error_code: '102',
+        error_type: 'insufficient-credit',
+      }),
+    ) as unknown as typeof fetch;
+
+    const createSpy = vi.spyOn(notificationService, 'createNotification');
+
+    await endole.runCreditCheck('12201105', 'Real Co').catch(() => undefined);
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    const arg = createSpy.mock.calls[0][0];
+    expect(arg.type).toBe('system_error');
+    expect(arg.severity).toBe('error');
+    expect(arg.title).toBe(endole.ENDOLE_BALANCE_EXHAUSTED_TITLE);
+    expect(arg.title).toMatch(/balance exhausted/i);
+    expect(arg.message).toMatch(/endole\.co\.uk/i);
+    expect(arg.metadata).toMatchObject({ provider: 'endole', upstreamCode: '102' });
+  });
+
+  it('still throws CreditProviderError after emitting the alert', async () => {
+    global.fetch = vi.fn(async () =>
+      mockEndoleErr(403, {
+        error: 'You do not have enough credit in your balance.',
+        error_code: '102',
+        error_type: 'insufficient-credit',
+      }),
+    ) as unknown as typeof fetch;
+    vi.spyOn(notificationService, 'createNotification').mockResolvedValue({
+      id: 'ntf-test', type: 'system_error', title: 't', message: 'm',
+      severity: 'error', read: false, createdAt: new Date().toISOString(),
+    });
+
+    const err = await endole.runCreditCheck('12201105', 'Real Co').catch((e: unknown) => e);
+    const e = err as Error & { code?: string };
+    expect(e).toBeInstanceOf(Error);
+    expect(e.code).toBe('credit_provider_balance_exhausted');
+  });
+
+  it('does NOT emit a notification on non-102 upstream errors', async () => {
+    global.fetch = vi.fn(async () =>
+      mockEndoleErr(429, { error: { code: '204', message: 'throttling-too-many' } }),
+    ) as unknown as typeof fetch;
+
+    const createSpy = vi.spyOn(notificationService, 'createNotification');
+
+    await endole.runCreditCheck('12345678', 'Busy Ltd').catch(() => undefined);
+
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it('still throws CreditProviderError when the notification emit itself fails', async () => {
+    global.fetch = vi.fn(async () =>
+      mockEndoleErr(403, {
+        error: 'You do not have enough credit in your balance.',
+        error_code: '102',
+        error_type: 'insufficient-credit',
+      }),
+    ) as unknown as typeof fetch;
+    vi.spyOn(notificationService, 'createNotification').mockRejectedValue(new Error('DB down'));
+
+    const err = await endole.runCreditCheck('12201105', 'Real Co').catch((e: unknown) => e);
+    const e = err as Error & { code?: string };
+    expect(e.code).toBe('credit_provider_balance_exhausted');
   });
 });

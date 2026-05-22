@@ -35,7 +35,15 @@ export async function pollOnce(): Promise<PollResult> {
   const opsPhone = process.env.OPS_ALERT_PHONE;
 
   if (!opsPhone) return { sent: 0, failed: 0 };
-  if (!twilio.isTwilioConfigured()) return { sent: 0, failed: 0 };
+  if (!twilio.isTwilioConfigured()) {
+    // Hard no-op: do NOT touch smsNotifiedAt or smsAttempts. The DB-write
+    // mask used to happen because sendSms() returns a mock id in mock mode
+    // and the worker then marked rows notified — so when real creds finally
+    // landed on Railway the backlog was lost. Logging here makes the
+    // deferral visible in production logs instead of being silent.
+    logger.info('[twilio][mock] alerts deferred — TWILIO_* not configured');
+    return { sent: 0, failed: 0 };
+  }
 
   const rows = await db
     .select()

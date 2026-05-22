@@ -10,6 +10,12 @@ import { adSpend } from '../db/schema/ad-spend.js';
 import type { AuthPayload } from '../types/index.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
+import { cached } from '../utils/cache.js';
+
+// Cache TTL for LeadByte report calls used by /reports/unified. Mirrors the
+// TTL used by campaign.service so the key/TTL pairing is consistent across
+// consumers of `lb:report:{w}:v5` and `lb:supplier-spend:{w}:v1`.
+const UNIFIED_REPORT_TTL_SECONDS = 900;
 
 // LeadByte DeliveryWindow → ISO date range. Mirrors leadbyte-client.windowToRange
 // but lives here so report.service can run its own Catchr ad_spend query.
@@ -155,6 +161,25 @@ export interface SupplierReportRow {
   cpl: number;
   campaigns: number;
 }
+
+/**
+ * Invoice statuses that count as recognised revenue.
+ *
+ * Xero defaults to accrual accounting: an invoice is recognised the moment
+ * it's issued (AUTHORISED) — not when cash clears the bank (PAID). A filter
+ * that only matched `status='paid'` zeroed out every legitimately-issued
+ * invoice still awaiting payment, which made `financial-overview` and
+ * `dashboard/stats` show `revenue: 0` even when the invoices table had
+ * real authorised data.
+ *
+ * Both 'paid' and 'authorised' are recognised here; 'sent', 'draft', and
+ * 'overdue' (the live-derived display status) stay out — drafts aren't
+ * legally issued and overdue is just an authorised invoice past due date,
+ * already counted via 'authorised'.
+ *
+ * Exported so `dashboard.service.ts` shares the exact same definition.
+ */
+export const RECOGNISED_INVOICE_STATUSES = ['paid', 'authorised'] as const;
 
 export interface FinancialOverviewRow {
   month: string;
@@ -529,15 +554,23 @@ export async function getFinancialOverview(
   _requester: AuthPayload,
   opts: { window?: import('../utils/dashboard-window.js').DashboardWindow } = {},
 ): Promise<FinancialOverviewRow[]> {
-  // Real query: last 12 months of revenue (paid invoices), expenses (ad
-  // spend from Catchr), and invoice status counts per month. This drives
-  // the dashboard's revenue-vs-expenses chart.
+  // Real query: last 12 months of revenue (paid + authorised invoices),
+  // expenses (ad spend from Catchr), and invoice status counts per month.
+  // This drives the dashboard's revenue-vs-expenses chart.
   //
   // Buckets by `invoices.dueDate` rather than `createdAt`: every paid
   // invoice's created_at equals its Xero sync time (~May 2026), which
   // collapsed the whole 12-month chart into a single bar. `due_date`
   // carries the actual invoice period from Xero, so historical revenue
   // back to mid-2025 renders correctly.
+  //
+  // Revenue recognition uses RECOGNISED_INVOICE_STATUSES (paid + authorised)
+  // — see the constant's docblock. The previous `status='paid'` filter
+  // produced cash-basis numbers that read as zero on every recently-issued
+  // invoice. Note: as of 2026-05-22, live Xero sync is rate-limited (429)
+  // so the invoices table mostly contains locally-created drafts; this
+  // change fixes the aggregation so once sync catches up, AUTHORISED rows
+  // will roll into the revenue series correctly.
   //
   // Expenses now come from `ad_spend.spend` (live Catchr feed) rather
   // than `lead_deliveries.cost`, which is never populated (every row
@@ -561,7 +594,7 @@ export async function getFinancialOverview(
         vat: sql<string>`coalesce(sum(${invoices.vatAmount}), 0)`,
       })
       .from(invoices)
-      .where(and(eq(invoices.status, 'paid'), gte(invoices.dueDate, windowStart)))
+      .where(and(inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]), gte(invoices.dueDate, windowStart)))
       .groupBy(sql`to_char(${invoices.dueDate}, 'YYYY-MM')`),
     db
       .select({
@@ -708,9 +741,20 @@ export async function getUnifiedReport(
 
   // Fetch in parallel: LeadByte gives us the LB-side numbers; the DB query
   // resolves campaign meta (clientName + vertical) and Catchr NCP mapping.
+  //
+  // BUG FIX (2026-05-22): Both LeadByte calls now go through `cached()` with
+  // the SAME cache keys as campaign.service / cache-prewarm — previously the
+  // unified report called LeadByte directly, which meant:
+  //   1. We bypassed the warm cache the campaigns page just populated
+  //   2. Every unified request hit LeadByte twice in parallel, racing the
+  //      rate-limiter — when one of the two returned empty, the report
+  //      silently surfaced 0 rows OR 55 rows with revenue=0 (campaign-map
+  //      empty → no revenue-per-lead → every row got £0). The negative-cache
+  //      in cached() also absorbs transient upstream blips for 30s instead
+  //      of every caller re-hammering the rate-limited endpoint.
   const [campaignRows, supplierRows, campaignMeta, sourcesRows] = await Promise.all([
-    leadbyte.getCampaignReport(window),
-    leadbyte.getSupplierSpend(window),
+    cached(`lb:report:${window}:v5`, UNIFIED_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport(window)),
+    cached(`lb:supplier-spend:${window}:v1`, UNIFIED_REPORT_TTL_SECONDS, () => leadbyte.getSupplierSpend(window)),
     loadCampaignMetaByName(),
     // Pull Catchr NCP URLs keyed by (campaignId-or-name, platform). Both keys
     // are stored on traffic_sources rows; we resolve them after the join.

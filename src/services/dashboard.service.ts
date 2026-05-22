@@ -13,6 +13,7 @@ import {
   resolveDashboardWindow,
   type DashboardWindow,
 } from '../utils/dashboard-window.js';
+import { RECOGNISED_INVOICE_STATUSES } from './report.service.js';
 
 export interface LeadsByDayPoint {
   /** Short weekday label, e.g. "Mon". */
@@ -306,11 +307,16 @@ export async function getDashboardStats(
     leadsRow, prevRevenueRow, prevLeadsRow,
     rollingRevenueRow, rollingCostRow,
   ] = await Promise.all([
-    // Revenue in the selected window — paid invoices with due_date in range.
+    // Revenue in the selected window — recognised invoices (paid + authorised)
+    // with due_date in range. See RECOGNISED_INVOICE_STATUSES in
+    // report.service.ts for why authorised is included alongside paid.
     db
       .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
       .from(invoices)
-      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= ${win.startIso}::date AND ${invoices.dueDate} <= ${win.endIso}::date`),
+      .where(and(
+        inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]),
+        sql`${invoices.dueDate} >= ${win.startIso}::date AND ${invoices.dueDate} <= ${win.endIso}::date`,
+      )),
     // Ad spend in the selected window. Catchr only has ~50d of history;
     // for windows wider than that the sum is bounded by what's available.
     db
@@ -345,7 +351,10 @@ export async function getDashboardStats(
     db
       .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
       .from(invoices)
-      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= ${win.prevStartIso}::date AND ${invoices.dueDate} <= ${win.prevEndIso}::date`),
+      .where(and(
+        inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]),
+        sql`${invoices.dueDate} >= ${win.prevStartIso}::date AND ${invoices.dueDate} <= ${win.prevEndIso}::date`,
+      )),
     // Prior equivalent window for leadsChange.
     db
       .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
@@ -359,7 +368,10 @@ export async function getDashboardStats(
     db
       .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
       .from(invoices)
-      .where(sql`${invoices.status} = 'paid' AND ${invoices.dueDate} >= (current_date - interval '365 days') AND ${invoices.dueDate} <= current_date`),
+      .where(and(
+        inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]),
+        sql`${invoices.dueDate} >= (current_date - interval '365 days') AND ${invoices.dueDate} <= current_date`,
+      )),
     // Rolling-90d cost — same reasoning. 90d gives the post-acquisition
     // invoice cycle time to convert spend into the revenue captured above.
     db

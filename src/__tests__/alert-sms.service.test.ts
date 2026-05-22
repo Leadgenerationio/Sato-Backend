@@ -3,6 +3,7 @@ import { and, eq, inArray, isNull, lt } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { notifications } from '../db/schema/notifications.js';
 import * as twilioClient from '../integrations/twilio/twilio-client.js';
+import { logger } from '../utils/logger.js';
 
 // Import the unit under test LAST so the env-var beforeEach below runs
 // before any module-load-time env reads.
@@ -297,5 +298,19 @@ describe('alert-sms.service — backlog preservation: no Twilio creds', () => {
     const [row] = await db.select().from(notifications).where(eq(notifications.id, id));
     expect(row.smsNotifiedAt).toBeNull();
     expect(row.smsAttempts).toBe(0);
+  });
+
+  it('logs a visible mock-mode deferral line so operators see why nothing was sent', async () => {
+    const logSpy = vi.spyOn(logger, 'info').mockImplementation(() => logger);
+
+    const id = await insertSystemError('Pending alert', 'msg');
+    createdIds.push(id);
+
+    await pollOnce();
+
+    const calls = logSpy.mock.calls.map((args) =>
+      args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '),
+    );
+    expect(calls.some((line) => line.includes('[twilio][mock] alerts deferred'))).toBe(true);
   });
 });

@@ -317,6 +317,20 @@ export interface XeroBankAccount {
   balance: string;                  // statement balance (what the bank says), signed decimal
   balanceDate: string | null;       // 'as of' date Xero reports for the statement balance
   unreconciledLines: number | null; // pending statement lines not yet reconciled in Xero
+  /**
+   * Which tier of the bank-balance fallback produced the `balance` value.
+   *   - 'cash-validation' = Finance API (best, real statement balance)
+   *   - 'bank-summary'    = Accounting Reports BankSummary closing balance
+   *   - 'accounts'        = /Accounts row Balance field (rarely populated)
+   *   - 'fallback-zero'   = ALL upstream tiers failed; `balance` is the
+   *                         hardcoded '0' sentinel. Operators should treat
+   *                         this as "unknown", not "real zero" — pair with
+   *                         the `[xero][bank-balance][fallback-zero]` error
+   *                         log line in Railway to debug.
+   * Optional (back-compat): older callers that don't look at this still get
+   * the same `balance` string they always did.
+   */
+  balanceSource?: 'cash-validation' | 'bank-summary' | 'accounts' | 'fallback-zero';
 }
 
 interface XeroAccountsResponse {
@@ -475,14 +489,47 @@ export async function getBankBalances(): Promise<XeroBankAccount[]> {
     // Account.Balance is rarely populated for Custom Connections but kept as
     // a last fallback for orgs where Xero does include it.
     const fallbackBalance = typeof a.Balance === 'number' ? a.Balance.toFixed(2) : null;
+
+    // Per-account tier resolution. Each entry is greppable in Railway via
+    // [xero][bank-balance][tier=…] — gives Sam a fast answer to "where did
+    // this number actually come from?" without needing to instrument calls.
+    let balance: string;
+    let balanceSource: XeroBankAccount['balanceSource'];
+    if (stmt) {
+      balance = stmt.value;
+      balanceSource = 'cash-validation';
+      // eslint-disable-next-line no-console
+      console.warn(`[xero][bank-balance][tier=cash-validation] accountId=${a.AccountID} name=${JSON.stringify(a.Name)} balance=${balance}`);
+    } else if (bsRow) {
+      balance = bsRow.value;
+      balanceSource = 'bank-summary';
+      // eslint-disable-next-line no-console
+      console.warn(`[xero][bank-balance][tier=bank-summary] accountId=${a.AccountID} name=${JSON.stringify(a.Name)} balance=${balance}`);
+    } else if (fallbackBalance !== null) {
+      balance = fallbackBalance;
+      balanceSource = 'accounts';
+      // eslint-disable-next-line no-console
+      console.warn(`[xero][bank-balance][tier=accounts] accountId=${a.AccountID} name=${JSON.stringify(a.Name)} balance=${balance}`);
+    } else {
+      // All three upstream tiers failed — return the historic '0' sentinel
+      // for back-compat with consumers that always expect a string, but
+      // surface a greppable error line so operators can distinguish "API
+      // down" from "real zero balance" in Railway logs.
+      balance = '0';
+      balanceSource = 'fallback-zero';
+      // eslint-disable-next-line no-console
+      console.error(`[xero][bank-balance][fallback-zero] accountId=${a.AccountID} name=${JSON.stringify(a.Name)} — all 3 tiers (CashValidation, BankSummary, Accounts.Balance) failed; returning '0' sentinel. Treat as unknown, not real zero.`);
+    }
+
     return {
       accountId: a.AccountID,
       name: a.Name,
       code: a.Code ?? null,
       currency: a.CurrencyCode ?? 'GBP',
-      balance: stmt?.value ?? bsRow?.value ?? fallbackBalance ?? '0',
+      balance,
       balanceDate: stmt?.date ?? bsRow?.date ?? null,
       unreconciledLines: stmt?.unreconciledLines ?? null,
+      balanceSource,
     };
   });
 }

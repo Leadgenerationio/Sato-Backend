@@ -20,9 +20,17 @@ import type {
 
 let cachedToken: SignNowToken | null = null;
 
+// One-shot guard for the "webhook secret not configured" warning. Without
+// this we'd spam Railway logs on every webhook delivery once Sam wires
+// SignNow's outbound URL up but forgets to set SIGNNOW_WEBHOOK_SECRET.
+let webhookSecretWarned = false;
+
 export const __testing = {
   resetTokenCache() {
     cachedToken = null;
+  },
+  resetWebhookSecretWarned() {
+    webhookSecretWarned = false;
   },
 };
 
@@ -306,7 +314,19 @@ export async function downloadSignedPdf(envelopeId: string): Promise<Buffer> {
  */
 export function verifyWebhookSignature(rawBody: string, signature: string): boolean {
   const secret = webhookSecret();
-  if (!secret || !signature) return false;
+  if (!secret) {
+    // Warn ONCE per process — every subsequent call returns false silently.
+    // Without this guard, a misconfigured webhook URL silently rejects every
+    // delivery and Sam can't tell the difference between "wrong secret" and
+    // "secret simply isn't set". The module-level boolean prevents log spam.
+    if (!webhookSecretWarned) {
+      webhookSecretWarned = true;
+      // eslint-disable-next-line no-console
+      console.warn('[signnow][webhook] secret not configured — signature verification disabled. Set SIGNNOW_WEBHOOK_SECRET on Railway to accept SignNow callbacks.');
+    }
+    return false;
+  }
+  if (!signature) return false;
 
   const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
 

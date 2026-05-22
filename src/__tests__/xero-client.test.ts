@@ -297,6 +297,60 @@ describe('Xero — getBankBalances (statement balance via Finance API)', () => {
     expect(accounts[0].unreconciledLines).toBeNull();
   });
 
+  it('emits a greppable [xero][bank-balance][fallback-zero] error log AND marks balanceSource=fallback-zero when all three tiers fail', async () => {
+    // CashValidation 403 (Finance scope missing), BankSummary 500 (Reports
+    // outage), /Accounts response omits Balance — exact prod failure mode
+    // Sam hit on 2026-05-18 before the BankSummary fallback was wired in.
+    global.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('/connect/token')) return mockOk({ access_token: 'tok', expires_in: 1800 });
+      if (u.endsWith('/connections')) return mockOk([{ id: 'c-1', tenantId: 't', tenantName: 'x' }]);
+      if (u.includes('/api.xro/2.0/Accounts')) {
+        // No Balance field — Xero Custom Connection tokens commonly omit it.
+        return mockOk({
+          Accounts: [
+            { AccountID: 'acc-zero', Name: 'Main', Code: '090', CurrencyCode: 'GBP', Type: 'BANK', Status: 'ACTIVE' },
+          ],
+        });
+      }
+      if (u.includes('/CashValidation')) return mockErr(403, { Type: 'NoPermission' });
+      if (u.includes('/Reports/BankSummary')) return mockErr(500, { Type: 'InternalError' });
+      throw new Error(`unexpected fetch ${u}`);
+    }) as unknown as typeof fetch;
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // We also assert no per-tier `warn` line was logged for this account
+    // (since none of the upstream tiers served the value).
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const accounts = await xero.getBankBalances();
+      expect(accounts).toHaveLength(1);
+      // Back-compat: balance string is still '0', shape is unchanged.
+      expect(accounts[0].balance).toBe('0');
+      // New sentinel: callers that DO look at balanceSource can tell this
+      // is "unknown" rather than "real zero".
+      expect(accounts[0].balanceSource).toBe('fallback-zero');
+
+      // Exactly one greppable error log was emitted, with the marker prefix
+      // and the offending accountId so it's actionable in Railway.
+      const fallbackLogs = errorSpy.mock.calls
+        .map((c) => c.join(' '))
+        .filter((line) => line.includes('[xero][bank-balance][fallback-zero]'));
+      expect(fallbackLogs).toHaveLength(1);
+      expect(fallbackLogs[0]).toContain('acc-zero');
+
+      // No per-tier "served" warn line for fallback-zero accounts.
+      const tierWarns = warnSpy.mock.calls
+        .map((c) => c.join(' '))
+        .filter((line) => line.includes('[xero][bank-balance][tier='));
+      expect(tierWarns).toHaveLength(0);
+    } finally {
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
   it('requests only the accounting scopes the Custom Connection is entitled to', async () => {
     // finance.statements.read is intentionally NOT requested here — see the
     // SCOPES comment in xero-client.ts. Requesting an unentitled scope fails
