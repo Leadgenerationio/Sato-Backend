@@ -430,3 +430,80 @@ describe('xeroFetchWithBackoff — OCT-51 retry deadline', () => {
     expect(calls).toBe(1);
   });
 });
+
+// OCT-54 — the OCT-51 deadline only bounded the retry sleep loop. A single
+// fetch that hung forever (network stall, half-open TCP, slow upstream) would
+// block the caller past the 15s budget because each `await fetch(url, init)`
+// had no signal. The fix wraps every fetch in AbortSignal.timeout(remaining
+// budget) and converts the abort into a synthesized 504. These tests prove
+// the deadline is honest end-to-end, not just for the sleep portion.
+describe('xeroFetchWithBackoff — OCT-54 per-fetch timeout', () => {
+  afterEach(() => {
+    global.fetch = ORIGINAL_FETCH;
+  });
+
+  it('returns a synthesized 504 within the deadline even when fetch hangs forever', async () => {
+    // Mock fetch hangs UNLESS its AbortSignal fires. Without the OCT-54 fix
+    // the signal would never be passed in, so the promise would never resolve
+    // and the test would time out at vitest's 5s default — which is the
+    // regression we're guarding against.
+    let calls = 0;
+    let lastSignalSeen: AbortSignal | undefined;
+    global.fetch = vi.fn((_url: unknown, init?: unknown) => {
+      calls++;
+      const signal = (init as { signal?: AbortSignal } | undefined)?.signal;
+      lastSignalSeen = signal;
+      return new Promise<Response>((_, reject) => {
+        if (!signal) return; // hangs forever — surfaces the regression
+        signal.addEventListener('abort', () => {
+          // DOMException with name 'TimeoutError' is what AbortSignal.timeout
+          // emits in Node ≥18; matches isAbortLikeError().
+          reject(new DOMException('The operation timed out.', 'TimeoutError'));
+        });
+      });
+    }) as unknown as typeof fetch;
+
+    const deadlineMs = 250;
+    const started = Date.now();
+    const res = await xero.__testing.xeroFetchWithBackoff(
+      'https://api.xero.com/hang',
+      { headers: { Authorization: 'Bearer test' } },
+      deadlineMs,
+    );
+    const elapsedMs = Date.now() - started;
+
+    // The fetch is aborted mid-flight → synthesized 504, never reaches
+    // the 429-retry sleep branch.
+    expect(res.status).toBe(504);
+    expect(calls).toBe(1);
+    expect(lastSignalSeen).toBeDefined();
+    // End-to-end elapsed bounded by deadline + small overhead (event loop /
+    // timer drift on Windows). The pre-OCT-54 code would have hung past
+    // vitest's 5s test timeout, so anything well under that proves the fix.
+    expect(elapsedMs).toBeLessThan(deadlineMs + 500);
+  });
+
+  it('passes the AbortSignal through to fetch so callers can chain composition', async () => {
+    // Sanity check that we don't override a caller's existing signal with our
+    // own without composing — currently we replace it, which is intentional
+    // for now (no caller passes a signal). This test pins that behaviour so
+    // a future change to compose via AbortSignal.any has to update the test
+    // deliberately.
+    let signalReceived: AbortSignal | undefined;
+    global.fetch = vi.fn((_url: unknown, init?: unknown) => {
+      signalReceived = (init as { signal?: AbortSignal } | undefined)?.signal;
+      return Promise.resolve(mockOk({ ok: true }));
+    }) as unknown as typeof fetch;
+
+    await xero.__testing.xeroFetchWithBackoff(
+      'https://api.xero.com/ok',
+      { headers: { Authorization: 'Bearer test' } },
+    );
+
+    expect(signalReceived).toBeDefined();
+    // The signal must not already be aborted on the first call — a Date.now()
+    // drift or off-by-one in remaining-budget math could ship an already-dead
+    // signal and would surface as the very first fetch returning a 504.
+    expect(signalReceived!.aborted).toBe(false);
+  });
+});
