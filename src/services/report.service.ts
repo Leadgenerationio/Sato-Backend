@@ -859,11 +859,21 @@ export async function getUnifiedReport(
   //      in cached() also absorbs transient upstream blips for 30s instead
   //      of every caller re-hammering the rate-limited endpoint.
   //
-  // OCT-49 caveat: the `lb:report:*` / `lb:supplier-spend:*` cache keys
-  // are NOT yet tenant-scoped. Today (one LeadByte account → one tenant in
-  // practice) this is fine. The cache-key scoping is its own ticket (see
-  // OCT-50-ish, "Unified-report cache keys missing businessId"). Don't
-  // bundle that here.
+  // OCT-50 resolution (closed not-applicable): the `lb:report:*` /
+  // `lb:supplier-spend:*` cache keys remain global by design.
+  //   - The cached value is RAW LeadByte data (one account, single tenant
+  //     in the prod model), identical for every requester.
+  //   - The tenant filter runs in JS after the cache read (see
+  //     `tenantSafeCampaignRows` / `tenantSafeSupplierRows` below), so
+  //     two tenants reading the same cached payload still walk away with
+  //     correctly-scoped results.
+  //   - Sharing the keys with `campaign.service` and the cache-prewarm
+  //     worker keeps cache reuse intact across the codebase.
+  //
+  // If LeadByte ever becomes per-tenant (one LB credential per business),
+  // these keys WILL need `${businessId}` inserted — at that point also
+  // update campaign.service + the prewarm worker to match. Until then,
+  // keeping them global is the correct semantics, not a leak.
   const [campaignRows, supplierRows, campaignMeta, sourcesRows, allCampaignRows] = await Promise.all([
     cached(`lb:report:${window}:v5`, UNIFIED_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport(window)),
     cached(`lb:supplier-spend:${window}:v1`, UNIFIED_REPORT_TTL_SECONDS, () => leadbyte.getSupplierSpend(window)),
