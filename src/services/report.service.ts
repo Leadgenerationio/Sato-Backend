@@ -350,6 +350,26 @@ export async function loadCampaignMetaByName(
   return map;
 }
 
+/**
+ * OCT-48 / OCT-49 shared predicate: a LeadByte campaign row is safe to show
+ * to the current tenant if its campaign name either appears in this tenant's
+ * scoped metadata, OR doesn't appear in any tenant's metadata at all (truly
+ * orphan, safe to surface as Pending). Dropped: rows whose campaign exists in
+ * Stato but is linked exclusively to OTHER tenants — that's a cross-tenant
+ * leak. Defined here so getCampaignPerformance and getUnifiedReport stay in
+ * lockstep; previously the logic was duplicated inline at both call sites.
+ */
+function makeTenantSafeCampaignPredicate(
+  scopedCampaignMeta: ReadonlyMap<string, unknown>,
+  allKnownCampaignNames: ReadonlySet<string>,
+): (campaignName: string) => boolean {
+  return (campaignName) =>
+    scopedCampaignMeta.has(campaignName) || !allKnownCampaignNames.has(campaignName);
+}
+
+// Exported for direct unit testing — no production call sites.
+export const __testing = { makeTenantSafeCampaignPredicate };
+
 // ─── Service ───
 
 export async function getCampaignPerformance(
@@ -386,9 +406,8 @@ export async function getCampaignPerformance(
   // Drops rows whose campaign exists in Stato but is linked to other
   // tenants — that's the cross-tenant leak the underscore in `_requester`
   // was silently masking.
-  const tenantSafeRows = rows.filter(
-    (r) => scopedMeta.has(r.campaign) || !allKnownCampaignNames.has(r.campaign),
-  );
+  const isTenantSafe = makeTenantSafeCampaignPredicate(scopedMeta, allKnownCampaignNames);
+  const tenantSafeRows = rows.filter((r) => isTenantSafe(r.campaign));
 
   return tenantSafeRows.map((r): CampaignReportRow => {
     // If the synced campaign row exists, use its meta; otherwise derive
@@ -902,8 +921,7 @@ export async function getUnifiedReport(
   // orphan, safe to surface). Drops rows whose campaign is mapped to OTHER
   // tenants in Stato — that's the cross-tenant leak the previous `_requester`
   // underscore silently masked.
-  const isTenantSafeCampaign = (campaignName: string): boolean =>
-    campaignMeta.has(campaignName) || !allKnownCampaignNames.has(campaignName);
+  const isTenantSafeCampaign = makeTenantSafeCampaignPredicate(campaignMeta, allKnownCampaignNames);
   const tenantSafeCampaignRows = campaignRows.filter((r) => isTenantSafeCampaign(r.campaign));
   const tenantSafeSupplierRows = supplierRows.filter((r) => isTenantSafeCampaign(r.campaignName));
 
