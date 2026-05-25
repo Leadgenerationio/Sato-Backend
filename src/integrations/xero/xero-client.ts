@@ -711,10 +711,35 @@ export async function getVatLiability(fromDate: string, toDate: string): Promise
   // retry loop early and return the last 429 — the cache layer above
   // surfaces it as the existing "rate-limited" path. Honour Retry-After
   // for accuracy but never sleep past the deadline.
+  //
+  // OCT-54: each fetch's AbortSignal now uses the REMAINING deadline budget,
+  // not a fixed 15s. The previous code gave every retry a fresh 15s timeout
+  // which could individually overshoot the overall deadline (14s into the
+  // budget + 15s for the next fetch = 29s end-to-end). Capping at the
+  // remaining budget makes the deadline an honest worst-case ceiling.
   const RETRY_DEADLINE_MS = 15_000;
   const retryStart = Date.now();
   const backoffSchedule = [5, 10, 20];
-  let res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+
+  const fetchWithRemainingBudget = async (): Promise<Response> => {
+    const remainingMs = RETRY_DEADLINE_MS - (Date.now() - retryStart);
+    if (remainingMs <= 0) return synthesizedTimeoutResponse();
+    const perFetchMs = Math.min(remainingMs, PER_FETCH_TIMEOUT_CEILING_MS);
+    try {
+      return await fetch(url, { headers, signal: AbortSignal.timeout(perFetchMs) });
+    } catch (err) {
+      if (isAbortLikeError(err)) {
+        logger.warn(
+          { perFetchMs, elapsedMs: Date.now() - retryStart, fromDate, toDate },
+          'Xero TaxSummary fetch aborted by per-fetch timeout (OCT-54) — synthesizing 504',
+        );
+        return synthesizedTimeoutResponse();
+      }
+      throw err;
+    }
+  };
+
+  let res = await fetchWithRemainingBudget();
   for (let attempt = 0; attempt < backoffSchedule.length && res.status === 429; attempt++) {
     const xeroHint = Number(res.headers.get('Retry-After') ?? '0');
     const waitSec = xeroHint > 0 ? Math.min(xeroHint, 30) : backoffSchedule[attempt];
@@ -728,7 +753,7 @@ export async function getVatLiability(fromDate: string, toDate: string): Promise
     }
     logger.warn({ attempt: attempt + 1, waitSec, elapsedMs, fromDate, toDate }, 'Xero TaxSummary 429 — backing off');
     await new Promise((r) => setTimeout(r, waitSec * 1000));
-    res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+    res = await fetchWithRemainingBudget();
   }
 
   if (!res.ok) {
@@ -927,14 +952,38 @@ export async function getContactById(contactId: string): Promise<XeroContactDeta
  *
  * OCT-51: a total-elapsed-time deadline of RETRY_DEADLINE_MS bounds how
  * long we'll keep retrying. Worst case without this was ~17s of sleep
- * plus however long the upstream fetches hang (the caller's `init`
- * usually omits a signal, so no fetch-level timeout). Now we bail out
- * of the retry loop the moment the next sleep would push us past the
- * deadline and return the last 429 — callers (and the cache layer
- * above) see the existing rate-limited code path instead of blocking
- * the operator UI.
+ * plus however long the upstream fetches hang. We bail out of the
+ * retry loop the moment the next sleep would push us past the deadline
+ * and return the last 429 — callers (and the cache layer above) see
+ * the existing rate-limited code path instead of blocking the operator UI.
+ *
+ * OCT-54: each fetch gets its own AbortSignal bounded by the REMAINING
+ * deadline budget (capped at PER_FETCH_TIMEOUT_CEILING_MS for sanity).
+ * Without this, the OCT-51 deadline still didn't bound a single hung
+ * fetch — a stalled Xero response could block the worker thread past
+ * the 15s budget. A per-fetch timeout converts the hang into a
+ * synthesized 504 the caller can handle the same way it handles any
+ * other Xero failure.
  */
 const XERO_RETRY_DEADLINE_MS = 15_000;
+const PER_FETCH_TIMEOUT_CEILING_MS = 15_000;
+
+function isAbortLikeError(err: unknown): boolean {
+  // Node's AbortSignal.timeout rejects with a DOMException whose `name` is
+  // 'TimeoutError'; manual AbortController.abort() emits 'AbortError'. Both
+  // are signals from US, not the upstream — treat identically.
+  if (!err || typeof err !== 'object') return false;
+  const name = (err as { name?: unknown }).name;
+  return name === 'AbortError' || name === 'TimeoutError';
+}
+
+function synthesizedTimeoutResponse(): Response {
+  // 504 Gateway Timeout: honest about what happened (we gave up waiting on
+  // Xero) and distinct from a 429 (rate-limited) so the caller doesn't
+  // misclassify the failure mode in logs / metrics.
+  return new Response('', { status: 504, statusText: 'Gateway Timeout (Xero deadline)' });
+}
+
 async function xeroFetchWithBackoff(
   url: string,
   init: RequestInit,
@@ -945,7 +994,28 @@ async function xeroFetchWithBackoff(
   const retryStart = Date.now();
   let lastRes: Response | null = null;
   for (let attempt = 0; attempt < delays.length + 1; attempt++) {
-    const res = await fetch(url, init);
+    const remainingMs = deadlineMs - (Date.now() - retryStart);
+    if (remainingMs <= 0) {
+      logger.warn(
+        { attempt, deadlineMs, url },
+        'Xero deadline exhausted before fetch — returning timeout response',
+      );
+      return lastRes ?? synthesizedTimeoutResponse();
+    }
+    const perFetchMs = Math.min(remainingMs, PER_FETCH_TIMEOUT_CEILING_MS);
+    let res: Response;
+    try {
+      res = await fetch(url, { ...init, signal: AbortSignal.timeout(perFetchMs) });
+    } catch (err) {
+      if (isAbortLikeError(err)) {
+        logger.warn(
+          { attempt, perFetchMs, elapsedMs: Date.now() - retryStart, deadlineMs, url },
+          'Xero fetch aborted by per-fetch timeout (OCT-54) — returning synthesized 504',
+        );
+        return lastRes ?? synthesizedTimeoutResponse();
+      }
+      throw err;
+    }
     if (res.status !== 429) return res;
     lastRes = res;
     if (attempt >= delays.length) break;
