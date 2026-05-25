@@ -8,7 +8,8 @@ import { clients } from '../db/schema/clients.js';
 import { invoices } from '../db/schema/invoices.js';
 import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
-import { loadCampaignMetaByName } from '../services/report.service.js';
+import { loadCampaignMetaByName, getUnifiedReport } from '../services/report.service.js';
+import type { AuthPayload } from '../types/index.js';
 
 let ownerToken: string;
 let clientToken: string;
@@ -265,13 +266,55 @@ describe('loadCampaignMetaByName — OCT-48 multi-tenant isolation', () => {
     expect(orphan?.clientNames).toEqual([]);
   });
 
-  it('alien campaign IS visible when no businessId scope is passed (back-compat)', async () => {
-    // getUnifiedReport (line 834 caller) still calls loadCampaignMetaByName()
-    // unscoped. That path is OCT-49 work — this assertion locks in the
-    // back-compat so OCT-49 can be tracked separately without breaking
-    // the unified-report aggregation in the meantime.
+  it('alien campaign IS visible when no businessId scope is passed (helper back-compat)', async () => {
+    // After OCT-49 there are no production callers of loadCampaignMetaByName()
+    // without a businessId — getUnifiedReport now passes requester.businessId
+    // through. This assertion locks in the helper-level back-compat in case
+    // a future caller wants the global view (e.g. an internal admin tool).
     const meta = await loadCampaignMetaByName();
     expect(meta.has(ALIEN_CAMPAIGN_NAME)).toBe(true);
     expect(meta.has(OWNER_CAMPAIGN_NAME)).toBe(true);
+  });
+});
+
+// OCT-49 — getUnifiedReport previously took `_requester` and ignored it.
+// LeadByte rows came in unscoped, so any campaign owned by another tenant
+// would surface in the unified report's rows + byPlatform aggregation.
+// Direct unit tests on the service entry point because the API-level path
+// can't reach the row filter in this test env (no LEADBYTE_TOKEN → empty
+// rows → filter never fires).
+describe('getUnifiedReport — OCT-49 multi-tenant guard', () => {
+  function authPayload(opts: { businessId?: string }): AuthPayload {
+    return {
+      userId: 'oct-49-test-user',
+      role: 'owner',
+      email: 'oct-49@test.local',
+      businessId: opts.businessId,
+    };
+  }
+
+  it('returns the zero shape when the requester has no businessId', async () => {
+    const out = await getUnifiedReport(authPayload({}));
+    expect(out).toEqual({
+      rows: [],
+      totals: { leads: 0, spend: 0, revenue: 0, profit: 0, margin: 0 },
+      byPlatform: [],
+    });
+  });
+
+  it('returns a valid empty-but-correct UnifiedReport for a tenant with no Stato campaigns (and no LeadByte data in dev)', async () => {
+    // Synth a tenant with no campaigns — the rows + byPlatform should both be
+    // empty arrays (not undefined / not crashing). This verifies the tenant
+    // guard composes cleanly with the existing "no LB data" handling.
+    const out = await getUnifiedReport(authPayload({ businessId: '00000000-0000-0000-0000-0000000a4900' }));
+    expect(Array.isArray(out.rows)).toBe(true);
+    expect(Array.isArray(out.byPlatform)).toBe(true);
+    expect(out.totals).toMatchObject({
+      leads: expect.any(Number),
+      spend: expect.any(Number),
+      revenue: expect.any(Number),
+      profit: expect.any(Number),
+      margin: expect.any(Number),
+    });
   });
 });
