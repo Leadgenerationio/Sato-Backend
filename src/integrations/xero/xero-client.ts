@@ -48,6 +48,12 @@ export const __testing = {
     cache = null;
     lastAuthError = null;
   },
+  // OCT-51: expose the 429-retry wrapper so tests can verify the
+  // overall-deadline guard without going through a real Xero endpoint.
+  // The `deadlineOverrideMs` lets tests use a tiny budget (e.g. 200ms)
+  // instead of the production 15_000ms.
+  xeroFetchWithBackoff: (url: string, init: RequestInit, deadlineOverrideMs?: number) =>
+    xeroFetchWithBackoff(url, init, deadlineOverrideMs),
 };
 
 function clientId(): string {
@@ -697,12 +703,30 @@ export async function getVatLiability(fromDate: string, toDate: string): Promise
   // with exponential backoff (5s, 10s, 20s — capped each step) honoring
   // Retry-After when Xero supplies it. Combined with the controller's 60min
   // cache, this should mask all but the deepest rate-limit windows.
+  //
+  // OCT-51: cap the TOTAL elapsed wall time across all retry attempts.
+  // Worst case without this used to be ~35s sleep + 4×15s fetch timeouts =
+  // ~95s, long enough to hang `buildOverview()` past its 60s response
+  // window and block the operator UI. With the deadline we abort the
+  // retry loop early and return the last 429 — the cache layer above
+  // surfaces it as the existing "rate-limited" path. Honour Retry-After
+  // for accuracy but never sleep past the deadline.
+  const RETRY_DEADLINE_MS = 15_000;
+  const retryStart = Date.now();
   const backoffSchedule = [5, 10, 20];
   let res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
   for (let attempt = 0; attempt < backoffSchedule.length && res.status === 429; attempt++) {
     const xeroHint = Number(res.headers.get('Retry-After') ?? '0');
     const waitSec = xeroHint > 0 ? Math.min(xeroHint, 30) : backoffSchedule[attempt];
-    logger.warn({ attempt: attempt + 1, waitSec, fromDate, toDate }, 'Xero TaxSummary 429 — backing off');
+    const elapsedMs = Date.now() - retryStart;
+    if (elapsedMs + waitSec * 1000 >= RETRY_DEADLINE_MS) {
+      logger.warn(
+        { attempt: attempt + 1, waitSec, elapsedMs, deadlineMs: RETRY_DEADLINE_MS, fromDate, toDate },
+        'Xero TaxSummary 429 retry deadline exceeded — returning last 429 response',
+      );
+      break;
+    }
+    logger.warn({ attempt: attempt + 1, waitSec, elapsedMs, fromDate, toDate }, 'Xero TaxSummary 429 — backing off');
     await new Promise((r) => setTimeout(r, waitSec * 1000));
     res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
   }
@@ -900,9 +924,25 @@ export async function getContactById(contactId: string): Promise<XeroContactDeta
  * Used by every Xero read path so the bootstrap-on-create flow doesn't
  * silently lose contact lookups when the dashboard + hourly sync happen
  * to be hitting Xero at the same moment.
+ *
+ * OCT-51: a total-elapsed-time deadline of RETRY_DEADLINE_MS bounds how
+ * long we'll keep retrying. Worst case without this was ~17s of sleep
+ * plus however long the upstream fetches hang (the caller's `init`
+ * usually omits a signal, so no fetch-level timeout). Now we bail out
+ * of the retry loop the moment the next sleep would push us past the
+ * deadline and return the last 429 — callers (and the cache layer
+ * above) see the existing rate-limited code path instead of blocking
+ * the operator UI.
  */
-async function xeroFetchWithBackoff(url: string, init: RequestInit): Promise<Response> {
+const XERO_RETRY_DEADLINE_MS = 15_000;
+async function xeroFetchWithBackoff(
+  url: string,
+  init: RequestInit,
+  deadlineOverrideMs?: number,
+): Promise<Response> {
+  const deadlineMs = deadlineOverrideMs ?? XERO_RETRY_DEADLINE_MS;
   const delays = [2000, 5000, 10000];
+  const retryStart = Date.now();
   let lastRes: Response | null = null;
   for (let attempt = 0; attempt < delays.length + 1; attempt++) {
     const res = await fetch(url, init);
@@ -915,7 +955,15 @@ async function xeroFetchWithBackoff(url: string, init: RequestInit): Promise<Res
     const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
       ? Math.min(retryAfter * 1000, delays[attempt])
       : delays[attempt];
-    logger.warn({ status: 429, attempt, waitMs, url }, 'Xero 429 — backing off');
+    const elapsedMs = Date.now() - retryStart;
+    if (elapsedMs + waitMs >= deadlineMs) {
+      logger.warn(
+        { status: 429, attempt, waitMs, elapsedMs, deadlineMs, url },
+        'Xero 429 retry deadline exceeded — returning last 429 response',
+      );
+      break;
+    }
+    logger.warn({ status: 429, attempt, waitMs, elapsedMs, url }, 'Xero 429 — backing off');
     await new Promise((r) => setTimeout(r, waitMs));
   }
   return lastRes!;
