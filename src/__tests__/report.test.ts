@@ -6,6 +6,9 @@ import { db } from '../config/database.js';
 import { businesses } from '../db/schema/businesses.js';
 import { clients } from '../db/schema/clients.js';
 import { invoices } from '../db/schema/invoices.js';
+import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
+import { clientCampaigns } from '../db/schema/client-campaigns.js';
+import { loadCampaignMetaByName } from '../services/report.service.js';
 
 let ownerToken: string;
 let clientToken: string;
@@ -191,5 +194,84 @@ describe('Report API', () => {
         expect(ownerRevenue).toBeLessThan(ALIEN_INVOICE_TOTAL);
       });
     });
+  });
+});
+
+// OCT-48 — loadCampaignMetaByName must scope to the requester's businessId,
+// otherwise getCampaignPerformance (which previously accepted `_requester`
+// but never used it) leaks other tenants' campaign-name + buyer metadata.
+//
+// Direct unit test on the helper because the LeadByte path returns no rows
+// in the test env (no LEADBYTE_TOKEN), so the API-level integration test
+// would never exercise the filter. Seeds an "alien" tenant + an "owner"
+// tenant, plus campaigns linked to each, then verifies the helper returns
+// only the campaigns visible to the requester's business.
+describe('loadCampaignMetaByName — OCT-48 multi-tenant isolation', () => {
+  const ALIEN_BUSINESS_ID = '00000000-0000-0000-0000-0000000a4801';
+  const ALIEN_CLIENT_ID = '00000000-0000-0000-0000-0000000a4802';
+  const ALIEN_CAMPAIGN_ID = '00000000-0000-0000-0000-0000000a4803';
+  const ALIEN_CAMPAIGN_NAME = 'OCT-48 ALIEN — leak canary';
+
+  const OWNER_BUSINESS_ID = '00000000-0000-0000-0000-0000000a4810';
+  const OWNER_CLIENT_ID = '00000000-0000-0000-0000-0000000a4811';
+  const OWNER_CAMPAIGN_ID = '00000000-0000-0000-0000-0000000a4812';
+  const OWNER_CAMPAIGN_NAME = 'OCT-48 OWNER — should appear';
+
+  const ORPHAN_CAMPAIGN_ID = '00000000-0000-0000-0000-0000000a4820';
+  const ORPHAN_CAMPAIGN_NAME = 'OCT-48 ORPHAN — no junction';
+
+  beforeAll(async () => {
+    await db.insert(businesses).values([
+      { id: ALIEN_BUSINESS_ID, name: 'OCT-48 alien biz', slug: 'oct-48-alien', status: 'active' },
+      { id: OWNER_BUSINESS_ID, name: 'OCT-48 owner biz', slug: 'oct-48-owner', status: 'active' },
+    ]).onConflictDoNothing();
+
+    await db.insert(clients).values([
+      { id: ALIEN_CLIENT_ID, businessId: ALIEN_BUSINESS_ID, companyName: 'OCT-48 alien client', contactEmail: 'oct48@alien.test', currency: 'GBP', status: 'active' },
+      { id: OWNER_CLIENT_ID, businessId: OWNER_BUSINESS_ID, companyName: 'OCT-48 owner client', contactEmail: 'oct48@owner.test', currency: 'GBP', status: 'active' },
+    ]).onConflictDoNothing();
+
+    await db.insert(campaignsTable).values([
+      { id: ALIEN_CAMPAIGN_ID, name: ALIEN_CAMPAIGN_NAME, vertical: 'Solar Panels', status: 'active' },
+      { id: OWNER_CAMPAIGN_ID, name: OWNER_CAMPAIGN_NAME, vertical: 'Hearing Aids', status: 'active' },
+      // Orphan campaign — exists in campaigns table but has NO client_campaigns row.
+      { id: ORPHAN_CAMPAIGN_ID, name: ORPHAN_CAMPAIGN_NAME, vertical: 'Insulation', status: 'active' },
+    ]).onConflictDoNothing();
+
+    await db.insert(clientCampaigns).values([
+      { campaignId: ALIEN_CAMPAIGN_ID, clientId: ALIEN_CLIENT_ID },
+      { campaignId: OWNER_CAMPAIGN_ID, clientId: OWNER_CLIENT_ID },
+    ]).onConflictDoNothing();
+  });
+
+  afterAll(async () => {
+    await db.delete(clientCampaigns).where(inArray(clientCampaigns.campaignId, [ALIEN_CAMPAIGN_ID, OWNER_CAMPAIGN_ID]));
+    await db.delete(campaignsTable).where(inArray(campaignsTable.id, [ALIEN_CAMPAIGN_ID, OWNER_CAMPAIGN_ID, ORPHAN_CAMPAIGN_ID]));
+    await db.delete(clients).where(inArray(clients.id, [ALIEN_CLIENT_ID, OWNER_CLIENT_ID]));
+    await db.delete(businesses).where(inArray(businesses.id, [ALIEN_BUSINESS_ID, OWNER_BUSINESS_ID]));
+  });
+
+  it("excludes the alien tenant's campaign when called with the owner's businessId", async () => {
+    const meta = await loadCampaignMetaByName(OWNER_BUSINESS_ID);
+    expect(meta.has(OWNER_CAMPAIGN_NAME)).toBe(true);
+    expect(meta.has(ALIEN_CAMPAIGN_NAME)).toBe(false);
+  });
+
+  it('still surfaces truly-orphan campaigns (no junction rows at all)', async () => {
+    const meta = await loadCampaignMetaByName(OWNER_BUSINESS_ID);
+    const orphan = meta.get(ORPHAN_CAMPAIGN_NAME);
+    expect(orphan).toBeDefined();
+    expect(orphan?.clientName).toBe('Pending client mapping');
+    expect(orphan?.clientNames).toEqual([]);
+  });
+
+  it('alien campaign IS visible when no businessId scope is passed (back-compat)', async () => {
+    // getUnifiedReport (line 834 caller) still calls loadCampaignMetaByName()
+    // unscoped. That path is OCT-49 work — this assertion locks in the
+    // back-compat so OCT-49 can be tracked separately without breaking
+    // the unified-report aggregation in the meantime.
+    const meta = await loadCampaignMetaByName();
+    expect(meta.has(ALIEN_CAMPAIGN_NAME)).toBe(true);
+    expect(meta.has(OWNER_CAMPAIGN_NAME)).toBe(true);
   });
 });
