@@ -726,7 +726,10 @@ export async function getVatLiability(fromDate: string, toDate: string): Promise
     if (remainingMs <= 0) return synthesizedTimeoutResponse();
     const perFetchMs = Math.min(remainingMs, PER_FETCH_TIMEOUT_CEILING_MS);
     try {
-      return await fetch(url, { headers, signal: AbortSignal.timeout(perFetchMs) });
+      // No caller signal on this path today, but use composeAbortSignal anyway
+      // so the pattern matches xeroFetchWithBackoff and a future caller-signal
+      // addition is a no-op rather than a silent strip.
+      return await fetch(url, { headers, signal: composeAbortSignal(undefined, perFetchMs) });
     } catch (err) {
       if (isAbortLikeError(err)) {
         logger.warn(
@@ -981,7 +984,26 @@ function synthesizedTimeoutResponse(): Response {
   // 504 Gateway Timeout: honest about what happened (we gave up waiting on
   // Xero) and distinct from a 429 (rate-limited) so the caller doesn't
   // misclassify the failure mode in logs / metrics.
+  //
+  // Caching note: callers (getContactById, getContactByEmail, etc.) throw on
+  // !res.ok, so a 504 propagates as a rejected promise and the `cached()`
+  // helper does NOT negative-cache it. Under a sustained Xero hang every
+  // request burns its own deadline budget — bounded per-request, unbounded
+  // across requests. That's still a win over the pre-OCT-54 hang-forever
+  // shape but the herd-protection gap is real; track in a follow-up if we
+  // see it in production.
   return new Response('', { status: 504, statusText: 'Gateway Timeout (Xero deadline)' });
+}
+
+/**
+ * Compose our deadline signal with the caller's, if any. Whichever fires
+ * first wins. Without this, `{ ...init, signal: ours }` would silently strip
+ * the caller's signal — getContactById / getContactByEmail both pass
+ * `signal: AbortSignal.timeout(45_000)` and would have lost it.
+ */
+function composeAbortSignal(callerSignal: AbortSignal | undefined, perFetchMs: number): AbortSignal {
+  const ours = AbortSignal.timeout(perFetchMs);
+  return callerSignal ? AbortSignal.any([callerSignal, ours]) : ours;
 }
 
 async function xeroFetchWithBackoff(
@@ -1005,7 +1027,7 @@ async function xeroFetchWithBackoff(
     const perFetchMs = Math.min(remainingMs, PER_FETCH_TIMEOUT_CEILING_MS);
     let res: Response;
     try {
-      res = await fetch(url, { ...init, signal: AbortSignal.timeout(perFetchMs) });
+      res = await fetch(url, { ...init, signal: composeAbortSignal(init.signal ?? undefined, perFetchMs) });
     } catch (err) {
       if (isAbortLikeError(err)) {
         logger.warn(

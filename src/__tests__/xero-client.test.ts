@@ -483,12 +483,7 @@ describe('xeroFetchWithBackoff — OCT-54 per-fetch timeout', () => {
     expect(elapsedMs).toBeLessThan(deadlineMs + 500);
   });
 
-  it('passes the AbortSignal through to fetch so callers can chain composition', async () => {
-    // Sanity check that we don't override a caller's existing signal with our
-    // own without composing — currently we replace it, which is intentional
-    // for now (no caller passes a signal). This test pins that behaviour so
-    // a future change to compose via AbortSignal.any has to update the test
-    // deliberately.
+  it('passes an AbortSignal through to fetch (composed from caller + per-fetch deadline)', async () => {
     let signalReceived: AbortSignal | undefined;
     global.fetch = vi.fn((_url: unknown, init?: unknown) => {
       signalReceived = (init as { signal?: AbortSignal } | undefined)?.signal;
@@ -505,5 +500,65 @@ describe('xeroFetchWithBackoff — OCT-54 per-fetch timeout', () => {
     // drift or off-by-one in remaining-budget math could ship an already-dead
     // signal and would surface as the very first fetch returning a 504.
     expect(signalReceived!.aborted).toBe(false);
+  });
+
+  it('honours a caller-supplied AbortSignal AND the per-fetch deadline (whichever fires first)', async () => {
+    // getContactById / getContactByEmail pass `signal: AbortSignal.timeout(45_000)`.
+    // The pre-fix code did `{ ...init, signal: ours }` which silently STRIPPED
+    // the caller signal. After composeAbortSignal, the caller's signal is
+    // composed with ours via AbortSignal.any — whichever fires first wins.
+    // We prove this by passing a caller signal that aborts in 50ms; even
+    // though the deadline budget allows 1s and fetch hangs forever, the
+    // caller-side abort still wins.
+    global.fetch = vi.fn((_url: unknown, init?: unknown) => {
+      const signal = (init as { signal?: AbortSignal } | undefined)?.signal;
+      return new Promise<Response>((_, reject) => {
+        if (!signal) return;
+        signal.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      });
+    }) as unknown as typeof fetch;
+
+    const callerSignal = AbortSignal.timeout(50);
+    const started = Date.now();
+    const res = await xero.__testing.xeroFetchWithBackoff(
+      'https://api.xero.com/hang-with-caller-signal',
+      { headers: { Authorization: 'Bearer test' }, signal: callerSignal },
+      1_000, // deadline 1s — much longer than the caller's 50ms
+    );
+    const elapsedMs = Date.now() - started;
+
+    expect(res.status).toBe(504);
+    // If the caller signal was stripped, this would take ~1s (the deadline).
+    // With composition the abort fires at ~50ms.
+    expect(elapsedMs).toBeLessThan(400);
+  });
+
+  it('returns the last 429 when the deadline is exhausted between retries (no extra fetch)', async () => {
+    // Exercises the `remainingMs <= 0` branch at the top of the loop, which
+    // fires AFTER at least one 429 → backoff → would-overshoot bail-out.
+    // Pre-OCT-54 this was already covered by the OCT-51 deadline check, but
+    // OCT-54 moved the check to the iteration top — we need a test that
+    // proves we return the original 429 there (not a synthesized 504).
+    let callCount = 0;
+    global.fetch = vi.fn(async () => {
+      callCount++;
+      // First call returns 429 fast so we enter the retry loop. Second call
+      // shouldn't happen because the deadline check before it should fire.
+      return mockErr(429, { Message: 'rate limited' });
+    }) as unknown as typeof fetch;
+
+    const deadlineMs = 100;
+    const res = await xero.__testing.xeroFetchWithBackoff(
+      'https://api.xero.com/fake',
+      { headers: { Authorization: 'Bearer test' } },
+      deadlineMs,
+    );
+    // We expect to return the real 429 from the first call, not a synth 504
+    // — because that's the closest representation of what happened upstream.
+    expect(res.status).toBe(429);
+    // Single fetch only — the deadline trip prevents the second.
+    expect(callCount).toBe(1);
   });
 });
