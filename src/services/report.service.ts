@@ -1210,6 +1210,20 @@ export async function getPnlSummary(
     : [];
   const adSpendRow = adSpendRows[0];
 
+  // OCT-47: tenant-scope the "needs-mapping" count. `ad_spend` has no
+  // `business_id` column and unattributed rows have `client_id IS NULL`
+  // by definition, so a direct filter on the table can't be tenant-aware.
+  // Instead we surface only rows whose (platform, account_id) matches one
+  // of THIS tenant's `traffic_sources` — i.e. accounts the tenant has
+  // already wired up but whose latest sync hasn't been reattributed yet
+  // (timing race, manual edit, etc.). Truly orphaned rows (no tenant has
+  // ever mapped that account) are intentionally not surfaced here — they
+  // belong on a future internal admin page, not in operator-facing P&L.
+  //
+  // The EXISTS subquery follows traffic_sources → campaigns → clients to
+  // enforce the businessId scope. It handles both schemas:
+  //   - legacy single-account rows (`traffic_sources.account_id`)
+  //   - new multi-account rows (`traffic_sources.account_ids` jsonb array)
   const [unattributedRow] = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(adSpend)
@@ -1218,6 +1232,18 @@ export async function getPnlSummary(
         isNull(adSpend.clientId),
         gte(adSpend.date, fromIso),
         lte(adSpend.date, toIso),
+        sql`EXISTS (
+          SELECT 1
+          FROM ${trafficSources} ts
+          JOIN ${campaignsTable} c ON c.id = ts.campaign_id
+          JOIN ${clients} cl ON cl.id = c.client_id
+          WHERE cl.business_id = ${businessId}
+            AND ts.platform = ${adSpend.platform}
+            AND (
+              ts.account_id = ${adSpend.accountId}
+              OR ts.account_ids ? ${adSpend.accountId}
+            )
+        )`,
       ),
     );
   const unattributedSpendRows = unattributedRow?.count ?? 0;
