@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { inArray } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { businesses } from '../db/schema/businesses.js';
@@ -22,19 +23,25 @@ import type { AuthPayload } from '../types/index.js';
  * subquery was wrong. This test exercises the scope predicate end-to-end.
  */
 
-const OWNER_BUSINESS_ID = '00000000-0000-0000-0000-0000000a4701';
-const OWNER_CLIENT_ID = '00000000-0000-0000-0000-0000000a4702';
-const OWNER_CAMPAIGN_ID = '00000000-0000-0000-0000-0000000a4703';
-const OWNER_TRAFFIC_SOURCE_ID = '00000000-0000-0000-0000-0000000a4704';
-const OWNER_AD_SPEND_ID = '00000000-0000-0000-0000-0000000a4705';
-const OWNER_ACCOUNT_ID = 'act_oct47_owner_18391';
+// All synthetic IDs hash-randomized per run so the test can't collide with
+// any pre-existing dev-DB row that happens to share a `(platform, account_id)`
+// tuple or a hard-coded UUID. Per Yash's PR review — the previous
+// deterministic constants made the exact-delta assertion below depend on the
+// dev DB never containing rows that matched the seeds, which is true today
+// but isn't a stable contract.
+const OWNER_BUSINESS_ID = randomUUID();
+const OWNER_CLIENT_ID = randomUUID();
+const OWNER_CAMPAIGN_ID = randomUUID();
+const OWNER_TRAFFIC_SOURCE_ID = randomUUID();
+const OWNER_AD_SPEND_ID = randomUUID();
+const OWNER_ACCOUNT_ID = `act_oct47_owner_${randomUUID()}`;
 
-const ALIEN_BUSINESS_ID = '00000000-0000-0000-0000-0000000a4711';
-const ALIEN_CLIENT_ID = '00000000-0000-0000-0000-0000000a4712';
-const ALIEN_CAMPAIGN_ID = '00000000-0000-0000-0000-0000000a4713';
-const ALIEN_TRAFFIC_SOURCE_ID = '00000000-0000-0000-0000-0000000a4714';
-const ALIEN_AD_SPEND_ID = '00000000-0000-0000-0000-0000000a4715';
-const ALIEN_ACCOUNT_ID = 'act_oct47_alien_18392';
+const ALIEN_BUSINESS_ID = randomUUID();
+const ALIEN_CLIENT_ID = randomUUID();
+const ALIEN_CAMPAIGN_ID = randomUUID();
+const ALIEN_TRAFFIC_SOURCE_ID = randomUUID();
+const ALIEN_AD_SPEND_ID = randomUUID();
+const ALIEN_ACCOUNT_ID = `act_oct47_alien_${randomUUID()}`;
 
 // Date inside the default 30-day window so the date filter doesn't exclude
 // the seeded rows. Wall-clock today minus 7 days is well inside [fromIso,
@@ -106,22 +113,16 @@ describe('getPnlSummary — OCT-47 unattributedSpendRows tenant scoping', () => 
     expect(alien.unattributedSpendRows).toBeGreaterThanOrEqual(1);
 
     // The owner count must NOT include the alien row, and vice versa. Probe
-    // by calling with a never-seeded business — its count is "everything
-    // common in the dev DB minus our two seeds". The seeded delta should
-    // therefore be exactly +1 each.
-    const noScope = await getPnlSummary(
-      authPayload('00000000-0000-0000-0000-000000004799'),
-      30,
-    );
+    // by calling with a never-seeded business — random UUID so it can't
+    // collide with any real seeded business. Seeded delta should be exactly
+    // +1 each: each tenant sees their own seed but not the alien's.
+    const noScope = await getPnlSummary(authPayload(randomUUID()), 30);
     expect(owner.unattributedSpendRows - noScope.unattributedSpendRows).toBe(1);
     expect(alien.unattributedSpendRows - noScope.unattributedSpendRows).toBe(1);
   });
 
   it('a never-seeded business sees neither tenant\'s row', async () => {
-    const stranger = await getPnlSummary(
-      authPayload('00000000-0000-0000-0000-00000000479a'),
-      30,
-    );
+    const stranger = await getPnlSummary(authPayload(randomUUID()), 30);
     const owner = await getPnlSummary(authPayload(OWNER_BUSINESS_ID), 30);
     // Stranger count must be strictly less than owner count, since stranger
     // can't see the seeded owner row.
