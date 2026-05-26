@@ -264,7 +264,24 @@ export interface FinancialOverviewRow {
 // "Other" because campaigns.vertical is uniformly null in prod).
 import { deriveVerticalFromName } from '../utils/vertical.js';
 
-async function loadCampaignMetaByName(): Promise<Map<string, { clientName: string; clientNames: string[]; vertical: string }>> {
+/**
+ * Returns campaign-name → {clientName, clientNames[], vertical}.
+ *
+ * When `businessId` is supplied (OCT-48), the join is filtered so that:
+ *   - campaigns linked via client_campaigns to a client in THIS business
+ *     appear with that buyer in clientNames[];
+ *   - campaigns with no client_campaigns row at all (truly unmapped) appear
+ *     with `clientName='Pending client mapping'`;
+ *   - campaigns whose client_campaigns rows all point to OTHER tenants'
+ *     clients DO NOT appear in the returned map.
+ *
+ * Exported for unit testing of the OCT-48 scope guard. The other internal
+ * caller (getUnifiedReport) intentionally passes no businessId so it gets
+ * the global view — that path is OCT-49 work, tracked separately.
+ */
+export async function loadCampaignMetaByName(
+  businessId?: string,
+): Promise<Map<string, { clientName: string; clientNames: string[]; vertical: string }>> {
   // Single query that produces one row per (campaign, buyer) pair via the
   // `client_campaigns` junction. Multi-buyer campaigns get N rows that we
   // then collapse into a single map entry with `clientNames[]`.
@@ -272,15 +289,34 @@ async function loadCampaignMetaByName(): Promise<Map<string, { clientName: strin
   // OCT-42 (2026-05-21): replaces the prior leftJoin on the legacy
   // `campaigns.client_id` singular column — which silently zeroed out the
   // buyer name for every campaign linked via client_campaigns instead.
-  const rows = await db
-    .select({
-      name: campaignsTable.name,
-      vertical: campaignsTable.vertical,
-      buyerName: clients.companyName,
-    })
-    .from(campaignsTable)
-    .leftJoin(clientCampaigns, eq(clientCampaigns.campaignId, campaignsTable.id))
-    .leftJoin(clients, eq(clients.id, clientCampaigns.clientId));
+  //
+  // OCT-48: tenant scope. When `businessId` is supplied, restrict the join
+  // to buyers that belong to that business — OR rows where no client is
+  // linked yet at all (the leftJoin produces a NULL `clients.id` for
+  // campaigns without any junction row, and those genuinely-unmapped
+  // campaigns are safe to surface to every tenant). The combined predicate
+  // excludes a campaign whose junction rows all point to OTHER tenants'
+  // clients, so we never leak a competitor's campaign name as "Pending".
+  const rows = businessId
+    ? await db
+        .select({
+          name: campaignsTable.name,
+          vertical: campaignsTable.vertical,
+          buyerName: clients.companyName,
+        })
+        .from(campaignsTable)
+        .leftJoin(clientCampaigns, eq(clientCampaigns.campaignId, campaignsTable.id))
+        .leftJoin(clients, eq(clients.id, clientCampaigns.clientId))
+        .where(sql`${clients.businessId} = ${businessId} OR ${clients.id} IS NULL`)
+    : await db
+        .select({
+          name: campaignsTable.name,
+          vertical: campaignsTable.vertical,
+          buyerName: clients.companyName,
+        })
+        .from(campaignsTable)
+        .leftJoin(clientCampaigns, eq(clientCampaigns.campaignId, campaignsTable.id))
+        .leftJoin(clients, eq(clients.id, clientCampaigns.clientId));
 
   const map = new Map<string, { clientName: string; clientNames: string[]; vertical: string }>();
   for (const r of rows) {
@@ -317,13 +353,26 @@ async function loadCampaignMetaByName(): Promise<Map<string, { clientName: strin
 // ─── Service ───
 
 export async function getCampaignPerformance(
-  _requester: AuthPayload,
+  requester: AuthPayload,
   window: DeliveryWindow = 'this_month',
 ): Promise<CampaignReportRow[]> {
-  const [rows, metaByName] = await Promise.all([
+  // OCT-48: the function previously accepted `_requester` but never used it.
+  // LeadByte data is single-account (one auth covers all Sam's campaigns)
+  // so the raw report doesn't carry a Stato tenant signal — we have to
+  // intersect with this tenant's `campaigns` metadata to derive the scope.
+  const businessId = requester.businessId;
+  if (!businessId) return [];
+
+  const [rows, scopedMeta, allKnownCampaignRows] = await Promise.all([
     leadbyte.getCampaignReport(window),
-    loadCampaignMetaByName(),
+    loadCampaignMetaByName(businessId),
+    // The set of campaign names Stato knows about across ALL tenants.
+    // We use this to tell "truly orphan LB campaign nobody owns" (safe to
+    // surface as Pending) apart from "campaign owned by ANOTHER tenant"
+    // (must hide so we don't leak the name).
+    db.select({ name: campaignsTable.name }).from(campaignsTable),
   ]);
+  const allKnownCampaignNames = new Set(allKnownCampaignRows.map((c) => c.name));
 
   // Empty when LeadByte returns nothing for the window — the UI shows an
   // empty state. Previously fell back to a mock generator which displayed
@@ -331,11 +380,21 @@ export async function getCampaignPerformance(
   // numbers that aren't real.
   if (rows.length === 0) return [];
 
-  return rows.map((r): CampaignReportRow => {
+  // OCT-48 row filter: keep rows whose campaign either belongs to THIS
+  // tenant (in scopedMeta) or doesn't belong to any tenant at all
+  // (not in allKnownCampaignNames → truly orphan, safe to show as Pending).
+  // Drops rows whose campaign exists in Stato but is linked to other
+  // tenants — that's the cross-tenant leak the underscore in `_requester`
+  // was silently masking.
+  const tenantSafeRows = rows.filter(
+    (r) => scopedMeta.has(r.campaign) || !allKnownCampaignNames.has(r.campaign),
+  );
+
+  return tenantSafeRows.map((r): CampaignReportRow => {
     // If the synced campaign row exists, use its meta; otherwise derive
     // vertical from the LeadByte campaign name itself. Client stays
     // "Unmapped" until Sam's CSV arrives.
-    const meta = metaByName.get(r.campaign) ?? {
+    const meta = scopedMeta.get(r.campaign) ?? {
       clientName: 'Pending client mapping',
       clientNames: [] as string[],
       vertical: deriveVerticalFromName(r.campaign),
