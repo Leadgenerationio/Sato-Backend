@@ -1,6 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { eq, inArray } from 'drizzle-orm';
 import request from 'supertest';
 import app from '../index.js';
+import { db } from '../config/database.js';
+import { businesses } from '../db/schema/businesses.js';
+import { clients } from '../db/schema/clients.js';
+import { invoices } from '../db/schema/invoices.js';
 
 let ownerToken: string;
 let clientToken: string;
@@ -128,6 +133,63 @@ describe('Report API', () => {
     it('client cannot access pnl-summary', async () => {
       const res = await request(app).get('/api/v1/reports/pnl-summary').set('Authorization', `Bearer ${clientToken}`);
       expect(res.status).toBe(403);
+    });
+
+    // OCT-46 — `getPnlSummary` previously summed invoices.total globally
+    // because `invoices` has no business_id column. Once a second tenant is
+    // provisioned, the owner's P&L Summary would silently include the other
+    // tenant's paid revenue. The fix scopes via INNER JOIN through clients;
+    // this test seeds an "alien tenant" + a paid invoice on it and verifies
+    // the owner's response doesn't double-count it.
+    describe('OCT-46 — multi-tenant isolation', () => {
+      const ALIEN_BUSINESS_ID = '00000000-0000-0000-0000-0000000a4601';
+      const ALIEN_CLIENT_ID = '00000000-0000-0000-0000-0000000a4602';
+      const ALIEN_INVOICE_ID = '00000000-0000-0000-0000-0000000a4603';
+      const ALIEN_INVOICE_TOTAL = 999_999.99;
+
+      beforeAll(async () => {
+        await db.insert(businesses).values({
+          id: ALIEN_BUSINESS_ID,
+          name: 'OCT-46 alien tenant',
+          slug: 'oct-46-alien',
+          status: 'active',
+        }).onConflictDoNothing();
+        await db.insert(clients).values({
+          id: ALIEN_CLIENT_ID,
+          businessId: ALIEN_BUSINESS_ID,
+          companyName: 'OCT-46 alien client',
+          contactEmail: 'oct46@alien.test',
+          currency: 'GBP',
+          status: 'active',
+        }).onConflictDoNothing();
+        // Paid invoice on the alien tenant, in the last 30d window — would
+        // be included in any global sum.
+        await db.insert(invoices).values({
+          id: ALIEN_INVOICE_ID,
+          clientId: ALIEN_CLIENT_ID,
+          invoiceNumber: 'OCT-46-ALIEN-INV',
+          status: 'paid',
+          xeroInvoiceId: 'xero-oct-46-alien',
+          total: String(ALIEN_INVOICE_TOTAL),
+          currency: 'GBP',
+        }).onConflictDoNothing();
+      });
+
+      afterAll(async () => {
+        await db.delete(invoices).where(eq(invoices.id, ALIEN_INVOICE_ID));
+        await db.delete(clients).where(eq(clients.id, ALIEN_CLIENT_ID));
+        await db.delete(businesses).where(inArray(businesses.id, [ALIEN_BUSINESS_ID]));
+      });
+
+      it("excludes another tenant's £999,999 paid invoice from the owner's PnL", async () => {
+        const res = await request(app).get('/api/v1/reports/pnl-summary?days=30').set('Authorization', `Bearer ${ownerToken}`);
+        expect(res.status).toBe(200);
+        const ownerRevenue = parseFloat(res.body.data.revenue);
+        // The alien £999k must not leak in. We don't assert an exact owner
+        // revenue (depends on existing seeded data) — only that the alien's
+        // total cannot be present, even hidden in a larger sum.
+        expect(ownerRevenue).toBeLessThan(ALIEN_INVOICE_TOTAL);
+      });
     });
   });
 });

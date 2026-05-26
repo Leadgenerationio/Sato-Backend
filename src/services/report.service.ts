@@ -1051,13 +1051,42 @@ export async function getPnlSummary(
   const fromIso = fromDate.toISOString().slice(0, 10);
   const toIso = today.toISOString().slice(0, 10);
 
-  // Revenue = sum(invoices.total) where status='paid' AND createdAt in window
-  // (invoices table is single-tenant in Phase 1 so no businessId scope yet)
+  // Tenant scope guard — without a businessId we can't safely return a P&L.
+  // Returning zeros (rather than throwing) keeps the dashboard widget
+  // rendering for system / service-account callers; the FE shows £0 across
+  // the board which is the correct signal for "no tenant context". Same
+  // pattern getClientPnl uses (returns [] when businessId is missing).
+  if (!businessId) {
+    return {
+      fromDate: fromIso,
+      toDate: toIso,
+      currency: 'GBP',
+      revenue: '0.00',
+      fixedCosts: '0.00',
+      oneOffCosts: '0.00',
+      advertisingCosts: '0.00',
+      adSpend: '0.00',
+      totalCosts: '0.00',
+      netProfit: '0.00',
+      margin: '0.0000',
+      uncategorisedCount: 0,
+      unattributedSpendRows: 0,
+    };
+  }
+
+  // Revenue = sum(invoices.total) where status='paid' AND createdAt in window.
+  // OCT-46: `invoices` has no `business_id` column, so we tenant-scope via
+  // INNER JOIN through `clients` (invoices.client_id → clients.business_id),
+  // matching the pattern getClientPnl already uses. Without this guard the
+  // P&L Summary would sum paid revenue across every tenant in the database
+  // the moment a second business is provisioned.
   const [revenueRow] = await db
     .select({ total: sql<string>`coalesce(sum(${invoices.total}::numeric), 0)::text` })
     .from(invoices)
+    .innerJoin(clients, eq(clients.id, invoices.clientId))
     .where(
       and(
+        eq(clients.businessId, businessId),
         eq(invoices.status, 'paid'),
         gte(invoices.createdAt, fromDate),
         lte(invoices.createdAt, today),
