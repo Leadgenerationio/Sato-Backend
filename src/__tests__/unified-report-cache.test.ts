@@ -153,7 +153,7 @@ describe('getUnifiedReport — cache shields against rate-limited LeadByte', () 
     );
 
     const r1 = await getUnifiedReport(
-      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      { sub: 'test', role: 'owner', businessId: '00000000-0000-0000-0000-000000005ea1' } as never,
       { window: 'this_month' },
     );
 
@@ -177,7 +177,7 @@ describe('getUnifiedReport — cache shields against rate-limited LeadByte', () 
     expect(Number.isFinite(r1.totals.margin)).toBe(true);
 
     const r2 = await getUnifiedReport(
-      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      { sub: 'test', role: 'owner', businessId: '00000000-0000-0000-0000-000000005ea1' } as never,
       { window: 'this_month' },
     );
 

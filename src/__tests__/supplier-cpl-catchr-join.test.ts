@@ -73,7 +73,7 @@ describe('Supplier performance — Catchr ad_spend join', () => {
 
   it('Facebook + Google Ads suppliers get totalSpend from Catchr, not LeadByte', async () => {
     const rows = await getSupplierPerformance(
-      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      { sub: 'test', role: 'owner', businessId: '00000000-0000-0000-0000-000000005ea1' } as never,
       'this_month',
     );
 
@@ -101,7 +101,7 @@ describe('Supplier performance — Catchr ad_spend join', () => {
 
   it('"Direct" supplier (no Catchr platform mapping) stays at £0 spend', async () => {
     const rows = await getSupplierPerformance(
-      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      { sub: 'test', role: 'owner', businessId: '00000000-0000-0000-0000-000000005ea1' } as never,
       'this_month',
     );
     const direct = rows.find((r) => r.supplierName === 'Direct');
@@ -112,7 +112,7 @@ describe('Supplier performance — Catchr ad_spend join', () => {
 
   it('Unified report rows for ad-platform suppliers get non-zero Catchr spend', async () => {
     const { rows } = await getUnifiedReport(
-      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      { sub: 'test', role: 'owner', businessId: '00000000-0000-0000-0000-000000005ea1' } as never,
       { window: 'this_month' },
     );
     const fbRow = rows.find((r) => r.supplier === 'facebook');
