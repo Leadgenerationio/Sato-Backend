@@ -350,6 +350,26 @@ export async function loadCampaignMetaByName(
   return map;
 }
 
+/**
+ * OCT-48 / OCT-49 shared predicate: a LeadByte campaign row is safe to show
+ * to the current tenant if its campaign name either appears in this tenant's
+ * scoped metadata, OR doesn't appear in any tenant's metadata at all (truly
+ * orphan, safe to surface as Pending). Dropped: rows whose campaign exists in
+ * Stato but is linked exclusively to OTHER tenants — that's a cross-tenant
+ * leak. Defined here so getCampaignPerformance and getUnifiedReport stay in
+ * lockstep; previously the logic was duplicated inline at both call sites.
+ */
+function makeTenantSafeCampaignPredicate(
+  scopedCampaignMeta: ReadonlyMap<string, unknown>,
+  allKnownCampaignNames: ReadonlySet<string>,
+): (campaignName: string) => boolean {
+  return (campaignName) =>
+    scopedCampaignMeta.has(campaignName) || !allKnownCampaignNames.has(campaignName);
+}
+
+// Exported for direct unit testing — no production call sites.
+export const __testing = { makeTenantSafeCampaignPredicate };
+
 // ─── Service ───
 
 export async function getCampaignPerformance(
@@ -386,9 +406,8 @@ export async function getCampaignPerformance(
   // Drops rows whose campaign exists in Stato but is linked to other
   // tenants — that's the cross-tenant leak the underscore in `_requester`
   // was silently masking.
-  const tenantSafeRows = rows.filter(
-    (r) => scopedMeta.has(r.campaign) || !allKnownCampaignNames.has(r.campaign),
-  );
+  const isTenantSafe = makeTenantSafeCampaignPredicate(scopedMeta, allKnownCampaignNames);
+  const tenantSafeRows = rows.filter((r) => isTenantSafe(r.campaign));
 
   return tenantSafeRows.map((r): CampaignReportRow => {
     // If the synced campaign row exists, use its meta; otherwise derive
@@ -825,10 +844,25 @@ export interface UnifiedReportFilters {
 }
 
 export async function getUnifiedReport(
-  _requester: AuthPayload,
+  requester: AuthPayload,
   filters: UnifiedReportFilters = {},
 ): Promise<UnifiedReport> {
   const window: DeliveryWindow = filters.window ?? 'this_month';
+
+  // OCT-49: this function used to take `_requester` and ignore it. LeadByte
+  // data is single-account (one auth covers Sam's whole org) so the raw
+  // report carries no tenant signal — we have to intersect with this
+  // tenant's Stato campaigns to scope. Early-return when there's no
+  // businessId (system / service-account callers) so we never serve
+  // unscoped LeadByte data.
+  const businessId = requester.businessId;
+  if (!businessId) {
+    return {
+      rows: [],
+      totals: { leads: 0, spend: 0, revenue: 0, profit: 0, margin: 0 },
+      byPlatform: [],
+    };
+  }
 
   // Fetch in parallel: LeadByte gives us the LB-side numbers; the DB query
   // resolves campaign meta (clientName + vertical) and Catchr NCP mapping.
@@ -843,10 +877,26 @@ export async function getUnifiedReport(
   //      empty → no revenue-per-lead → every row got £0). The negative-cache
   //      in cached() also absorbs transient upstream blips for 30s instead
   //      of every caller re-hammering the rate-limited endpoint.
-  const [campaignRows, supplierRows, campaignMeta, sourcesRows] = await Promise.all([
+  //
+  // OCT-50 resolution (closed not-applicable): the `lb:report:*` /
+  // `lb:supplier-spend:*` cache keys remain global by design.
+  //   - The cached value is RAW LeadByte data (one account, single tenant
+  //     in the prod model), identical for every requester.
+  //   - The tenant filter runs in JS after the cache read (see
+  //     `tenantSafeCampaignRows` / `tenantSafeSupplierRows` below), so
+  //     two tenants reading the same cached payload still walk away with
+  //     correctly-scoped results.
+  //   - Sharing the keys with `campaign.service` and the cache-prewarm
+  //     worker keeps cache reuse intact across the codebase.
+  //
+  // If LeadByte ever becomes per-tenant (one LB credential per business),
+  // these keys WILL need `${businessId}` inserted — at that point also
+  // update campaign.service + the prewarm worker to match. Until then,
+  // keeping them global is the correct semantics, not a leak.
+  const [campaignRows, supplierRows, campaignMeta, sourcesRows, allCampaignRows] = await Promise.all([
     cached(`lb:report:${window}:v5`, UNIFIED_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport(window)),
     cached(`lb:supplier-spend:${window}:v1`, UNIFIED_REPORT_TTL_SECONDS, () => leadbyte.getSupplierSpend(window)),
-    loadCampaignMetaByName(),
+    loadCampaignMetaByName(businessId),
     // Pull Catchr NCP URLs keyed by (campaignId-or-name, platform). Both keys
     // are stored on traffic_sources rows; we resolve them after the join.
     db
@@ -857,7 +907,23 @@ export async function getUnifiedReport(
       })
       .from(trafficSources)
       .where(eq(trafficSources.isActive, true)),
+    // OCT-49: the set of campaign names Stato knows about across ALL
+    // tenants. Used to tell "truly orphan LB campaign nobody owns" (safe to
+    // surface) apart from "campaign owned by another tenant" (must hide so
+    // we don't leak the name). Same pattern as OCT-48's getCampaignPerformance.
+    db.select({ name: campaignsTable.name }).from(campaignsTable),
   ]);
+  const allKnownCampaignNames = new Set(allCampaignRows.map((c) => c.name));
+
+  // OCT-49 tenant-scope filter — applied to BOTH LeadByte row sets before any
+  // downstream map building. Keeps rows whose campaign either belongs to this
+  // tenant (in campaignMeta) or isn't in any tenant's metadata at all (truly
+  // orphan, safe to surface). Drops rows whose campaign is mapped to OTHER
+  // tenants in Stato — that's the cross-tenant leak the previous `_requester`
+  // underscore silently masked.
+  const isTenantSafeCampaign = makeTenantSafeCampaignPredicate(campaignMeta, allKnownCampaignNames);
+  const tenantSafeCampaignRows = campaignRows.filter((r) => isTenantSafeCampaign(r.campaign));
+  const tenantSafeSupplierRows = supplierRows.filter((r) => isTenantSafeCampaign(r.campaignName));
 
   // BUG FIX (2026-05-22): LeadByte's `/reports/campaign` and `/reports/supplier`
   // return inconsistent lead counts for the same campaign × window. Example
@@ -877,12 +943,12 @@ export async function getUnifiedReport(
   // truth), without depending on the two endpoints' lead counts agreeing.
   const campaignRevenueByName = new Map<string, number>();
   const campaignLeadsByName = new Map<string, number>();
-  for (const c of campaignRows) {
+  for (const c of tenantSafeCampaignRows) {
     campaignRevenueByName.set(c.campaign, c.revenue ?? 0);
     campaignLeadsByName.set(c.campaign, c.leads ?? 0);
   }
   const supplierLeadsSumByCampaign = new Map<string, number>();
-  for (const r of supplierRows) {
+  for (const r of tenantSafeSupplierRows) {
     const prev = supplierLeadsSumByCampaign.get(r.campaignName) ?? 0;
     supplierLeadsSumByCampaign.set(r.campaignName, prev + (r.leads ?? 0));
   }
@@ -902,10 +968,11 @@ export async function getUnifiedReport(
     }
   }
 
-  // Apply filters BEFORE the row map so we don't allocate work we'll throw away.
+  // Apply user-supplied filters BEFORE the row map so we don't allocate work
+  // we'll throw away. Operates on the already-tenant-scoped row set (OCT-49).
   const supplierFilter = filters.supplier?.toLowerCase() ?? '';
   const campaignFilter = filters.campaign?.toLowerCase() ?? '';
-  const filteredSupplierRows = supplierRows.filter((r) => {
+  const filteredSupplierRows = tenantSafeSupplierRows.filter((r) => {
     if (campaignFilter && !r.campaignName.toLowerCase().includes(campaignFilter)) return false;
     if (supplierFilter) {
       const matchesPlatform = r.platform.toLowerCase().includes(supplierFilter);

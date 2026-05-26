@@ -63,7 +63,14 @@ describe('getUnifiedReport — supplier revenue allocation (2026-05-22 fix)', ()
 
   it('per-campaign revenue sum equals LeadByte truth — never inflated by supplier-side lead double-counting', async () => {
     const r = await getUnifiedReport(
-      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      // Valid-UUID businessId. Pre-OCT-49 this value was ignored; after OCT-49,
+      // loadCampaignMetaByName(businessId) treats it as a real tenant lookup,
+      // so a non-UUID like 'leadgen' triggers a Postgres uuid parse error. We
+      // pass a UUID that isn't seeded in this test — the campaign is therefore
+      // treated as orphan (no Stato mapping in any tenant) and survives the
+      // OCT-49 tenant-safe filter, which is what the revenue-allocation math
+      // here is meant to verify.
+      { sub: 'test', userId: 'rev-alloc-test', email: 'rev-alloc@test.local', role: 'owner', businessId: '00000000-0000-0000-0000-000000005ea1' } as never,
       { window: 'this_month' },
     );
 
@@ -87,7 +94,14 @@ describe('getUnifiedReport — supplier revenue allocation (2026-05-22 fix)', ()
 
   it('per-campaign lead count sum matches LeadByte truth (840), not the inflated supplier-spend sum (1,382)', async () => {
     const r = await getUnifiedReport(
-      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      // Valid-UUID businessId. Pre-OCT-49 this value was ignored; after OCT-49,
+      // loadCampaignMetaByName(businessId) treats it as a real tenant lookup,
+      // so a non-UUID like 'leadgen' triggers a Postgres uuid parse error. We
+      // pass a UUID that isn't seeded in this test — the campaign is therefore
+      // treated as orphan (no Stato mapping in any tenant) and survives the
+      // OCT-49 tenant-safe filter, which is what the revenue-allocation math
+      // here is meant to verify.
+      { sub: 'test', userId: 'rev-alloc-test', email: 'rev-alloc@test.local', role: 'owner', businessId: '00000000-0000-0000-0000-000000005ea1' } as never,
       { window: 'this_month' },
     );
     const ieRows = r.rows.filter((row) => row.campaignName === 'Hearing Aids (IE)');
@@ -104,7 +118,14 @@ describe('getUnifiedReport — supplier revenue allocation (2026-05-22 fix)', ()
     // so we just sanity-check that the totals object is well-formed and the
     // margin calculation doesn't produce NaN.
     const r = await getUnifiedReport(
-      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      // Valid-UUID businessId. Pre-OCT-49 this value was ignored; after OCT-49,
+      // loadCampaignMetaByName(businessId) treats it as a real tenant lookup,
+      // so a non-UUID like 'leadgen' triggers a Postgres uuid parse error. We
+      // pass a UUID that isn't seeded in this test — the campaign is therefore
+      // treated as orphan (no Stato mapping in any tenant) and survives the
+      // OCT-49 tenant-safe filter, which is what the revenue-allocation math
+      // here is meant to verify.
+      { sub: 'test', userId: 'rev-alloc-test', email: 'rev-alloc@test.local', role: 'owner', businessId: '00000000-0000-0000-0000-000000005ea1' } as never,
       { window: 'this_month' },
     );
     expect(Number.isFinite(r.totals.revenue)).toBe(true);
@@ -117,7 +138,14 @@ describe('getUnifiedReport — supplier revenue allocation (2026-05-22 fix)', ()
     // Σ(byPlatform) must equal totals so the "By source" card never drifts
     // from the "Totals" strip on /reports/unified.
     const r = await getUnifiedReport(
-      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      // Valid-UUID businessId. Pre-OCT-49 this value was ignored; after OCT-49,
+      // loadCampaignMetaByName(businessId) treats it as a real tenant lookup,
+      // so a non-UUID like 'leadgen' triggers a Postgres uuid parse error. We
+      // pass a UUID that isn't seeded in this test — the campaign is therefore
+      // treated as orphan (no Stato mapping in any tenant) and survives the
+      // OCT-49 tenant-safe filter, which is what the revenue-allocation math
+      // here is meant to verify.
+      { sub: 'test', userId: 'rev-alloc-test', email: 'rev-alloc@test.local', role: 'owner', businessId: '00000000-0000-0000-0000-000000005ea1' } as never,
       { window: 'this_month' },
     );
     expect(Array.isArray(r.byPlatform)).toBe(true);
@@ -140,7 +168,14 @@ describe('getUnifiedReport — supplier revenue allocation (2026-05-22 fix)', ()
     // buckets. Bucketing is case-sensitive against the LeadByte platform
     // string (we mirror what LeadReports.io shows).
     const r = await getUnifiedReport(
-      { sub: 'test', role: 'owner', businessId: 'leadgen' } as never,
+      // Valid-UUID businessId. Pre-OCT-49 this value was ignored; after OCT-49,
+      // loadCampaignMetaByName(businessId) treats it as a real tenant lookup,
+      // so a non-UUID like 'leadgen' triggers a Postgres uuid parse error. We
+      // pass a UUID that isn't seeded in this test — the campaign is therefore
+      // treated as orphan (no Stato mapping in any tenant) and survives the
+      // OCT-49 tenant-safe filter, which is what the revenue-allocation math
+      // here is meant to verify.
+      { sub: 'test', userId: 'rev-alloc-test', email: 'rev-alloc@test.local', role: 'owner', businessId: '00000000-0000-0000-0000-000000005ea1' } as never,
       { window: 'this_month' },
     );
     const platformNames = r.byPlatform.map((p) => p.platform).sort();
