@@ -374,3 +374,59 @@ describe('Xero — getBankBalances (statement balance via Finance API)', () => {
     expect(bodyOnTokenCall).not.toContain('finance.statements.read');
   });
 });
+
+// OCT-51 — xeroFetchWithBackoff used to retry on 429 with backoff
+// [2s, 5s, 10s] and no overall deadline. Combined with no per-fetch
+// timeout from most callers, a sustained rate-limit could keep the
+// caller blocked for ~17s of sleep + however long the upstream fetch
+// hangs. The deadline guard bails out of the loop as soon as the
+// next sleep would push total elapsed past the budget and returns
+// the last 429 — the cache / controller layer above handles it.
+describe('xeroFetchWithBackoff — OCT-51 retry deadline', () => {
+  afterEach(() => {
+    global.fetch = ORIGINAL_FETCH;
+  });
+
+  it('returns the last 429 within the deadline when fetch is rate-limited indefinitely', async () => {
+    // Always rate-limit — no Retry-After so the scripted backoffs fire.
+    let calls = 0;
+    global.fetch = vi.fn(async () => {
+      calls++;
+      return mockErr(429, { Message: 'rate limited' });
+    }) as unknown as typeof fetch;
+
+    const deadlineMs = 200;
+    const started = Date.now();
+    const res = await xero.__testing.xeroFetchWithBackoff(
+      'https://api.xero.com/fake',
+      { headers: { Authorization: 'Bearer test' } },
+      deadlineMs,
+    );
+    const elapsedMs = Date.now() - started;
+
+    // Result: still a 429 (we don't pretend to succeed) and elapsed time is
+    // bounded by the deadline + one final fetch + a small overhead margin.
+    expect(res.status).toBe(429);
+    // Loose upper bound — deadline + ~250ms slack for fetch + setTimeout drift
+    expect(elapsedMs).toBeLessThan(deadlineMs + 500);
+    // Should have made at least one call but capped by the deadline: 2s sleep
+    // would already exceed a 200ms budget so we expect exactly 1 call (initial
+    // fetch, deadline triggers before the first sleep).
+    expect(calls).toBe(1);
+  });
+
+  it('passes through non-429 responses without retrying', async () => {
+    let calls = 0;
+    global.fetch = vi.fn(async () => {
+      calls++;
+      return mockOk({ ok: true });
+    }) as unknown as typeof fetch;
+
+    const res = await xero.__testing.xeroFetchWithBackoff(
+      'https://api.xero.com/fake',
+      { headers: { Authorization: 'Bearer test' } },
+    );
+    expect(res.status).toBe(200);
+    expect(calls).toBe(1);
+  });
+});
