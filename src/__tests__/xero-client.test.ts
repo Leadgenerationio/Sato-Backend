@@ -430,3 +430,135 @@ describe('xeroFetchWithBackoff — OCT-51 retry deadline', () => {
     expect(calls).toBe(1);
   });
 });
+
+// OCT-54 — the OCT-51 deadline only bounded the retry sleep loop. A single
+// fetch that hung forever (network stall, half-open TCP, slow upstream) would
+// block the caller past the 15s budget because each `await fetch(url, init)`
+// had no signal. The fix wraps every fetch in AbortSignal.timeout(remaining
+// budget) and converts the abort into a synthesized 504. These tests prove
+// the deadline is honest end-to-end, not just for the sleep portion.
+describe('xeroFetchWithBackoff — OCT-54 per-fetch timeout', () => {
+  afterEach(() => {
+    global.fetch = ORIGINAL_FETCH;
+  });
+
+  it('returns a synthesized 504 within the deadline even when fetch hangs forever', async () => {
+    // Mock fetch hangs UNLESS its AbortSignal fires. Without the OCT-54 fix
+    // the signal would never be passed in, so the promise would never resolve
+    // and the test would time out at vitest's 5s default — which is the
+    // regression we're guarding against.
+    let calls = 0;
+    let lastSignalSeen: AbortSignal | undefined;
+    global.fetch = vi.fn((_url: unknown, init?: unknown) => {
+      calls++;
+      const signal = (init as { signal?: AbortSignal } | undefined)?.signal;
+      lastSignalSeen = signal;
+      return new Promise<Response>((_, reject) => {
+        if (!signal) return; // hangs forever — surfaces the regression
+        signal.addEventListener('abort', () => {
+          // DOMException with name 'TimeoutError' is what AbortSignal.timeout
+          // emits in Node ≥18; matches isAbortLikeError().
+          reject(new DOMException('The operation timed out.', 'TimeoutError'));
+        });
+      });
+    }) as unknown as typeof fetch;
+
+    const deadlineMs = 250;
+    const started = Date.now();
+    const res = await xero.__testing.xeroFetchWithBackoff(
+      'https://api.xero.com/hang',
+      { headers: { Authorization: 'Bearer test' } },
+      deadlineMs,
+    );
+    const elapsedMs = Date.now() - started;
+
+    // The fetch is aborted mid-flight → synthesized 504, never reaches
+    // the 429-retry sleep branch.
+    expect(res.status).toBe(504);
+    expect(calls).toBe(1);
+    expect(lastSignalSeen).toBeDefined();
+    // End-to-end elapsed bounded by deadline + small overhead (event loop /
+    // timer drift on Windows). The pre-OCT-54 code would have hung past
+    // vitest's 5s test timeout, so anything well under that proves the fix.
+    expect(elapsedMs).toBeLessThan(deadlineMs + 500);
+  });
+
+  it('passes an AbortSignal through to fetch (composed from caller + per-fetch deadline)', async () => {
+    let signalReceived: AbortSignal | undefined;
+    global.fetch = vi.fn((_url: unknown, init?: unknown) => {
+      signalReceived = (init as { signal?: AbortSignal } | undefined)?.signal;
+      return Promise.resolve(mockOk({ ok: true }));
+    }) as unknown as typeof fetch;
+
+    await xero.__testing.xeroFetchWithBackoff(
+      'https://api.xero.com/ok',
+      { headers: { Authorization: 'Bearer test' } },
+    );
+
+    expect(signalReceived).toBeDefined();
+    // The signal must not already be aborted on the first call — a Date.now()
+    // drift or off-by-one in remaining-budget math could ship an already-dead
+    // signal and would surface as the very first fetch returning a 504.
+    expect(signalReceived!.aborted).toBe(false);
+  });
+
+  it('honours a caller-supplied AbortSignal AND the per-fetch deadline (whichever fires first)', async () => {
+    // getContactById / getContactByEmail pass `signal: AbortSignal.timeout(45_000)`.
+    // The pre-fix code did `{ ...init, signal: ours }` which silently STRIPPED
+    // the caller signal. After composeAbortSignal, the caller's signal is
+    // composed with ours via AbortSignal.any — whichever fires first wins.
+    // We prove this by passing a caller signal that aborts in 50ms; even
+    // though the deadline budget allows 1s and fetch hangs forever, the
+    // caller-side abort still wins.
+    global.fetch = vi.fn((_url: unknown, init?: unknown) => {
+      const signal = (init as { signal?: AbortSignal } | undefined)?.signal;
+      return new Promise<Response>((_, reject) => {
+        if (!signal) return;
+        signal.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      });
+    }) as unknown as typeof fetch;
+
+    const callerSignal = AbortSignal.timeout(50);
+    const started = Date.now();
+    const res = await xero.__testing.xeroFetchWithBackoff(
+      'https://api.xero.com/hang-with-caller-signal',
+      { headers: { Authorization: 'Bearer test' }, signal: callerSignal },
+      1_000, // deadline 1s — much longer than the caller's 50ms
+    );
+    const elapsedMs = Date.now() - started;
+
+    expect(res.status).toBe(504);
+    // If the caller signal was stripped, this would take ~1s (the deadline).
+    // With composition the abort fires at ~50ms.
+    expect(elapsedMs).toBeLessThan(400);
+  });
+
+  it('returns the last 429 when the deadline is exhausted between retries (no extra fetch)', async () => {
+    // Exercises the `remainingMs <= 0` branch at the top of the loop, which
+    // fires AFTER at least one 429 → backoff → would-overshoot bail-out.
+    // Pre-OCT-54 this was already covered by the OCT-51 deadline check, but
+    // OCT-54 moved the check to the iteration top — we need a test that
+    // proves we return the original 429 there (not a synthesized 504).
+    let callCount = 0;
+    global.fetch = vi.fn(async () => {
+      callCount++;
+      // First call returns 429 fast so we enter the retry loop. Second call
+      // shouldn't happen because the deadline check before it should fire.
+      return mockErr(429, { Message: 'rate limited' });
+    }) as unknown as typeof fetch;
+
+    const deadlineMs = 100;
+    const res = await xero.__testing.xeroFetchWithBackoff(
+      'https://api.xero.com/fake',
+      { headers: { Authorization: 'Bearer test' } },
+      deadlineMs,
+    );
+    // We expect to return the real 429 from the first call, not a synth 504
+    // — because that's the closest representation of what happened upstream.
+    expect(res.status).toBe(429);
+    // Single fetch only — the deadline trip prevents the second.
+    expect(callCount).toBe(1);
+  });
+});
