@@ -195,6 +195,21 @@ export async function deletePortalUser(req: Request, res: Response, next: NextFu
   }
 }
 
+export async function updatePortalUserPermissions(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = req.params.userId as string | undefined;
+    if (!userId) {
+      res.status(400).json({ status: 'error', message: 'userId is required' });
+      return;
+    }
+    const { allowedTabs } = req.body ?? {};
+    const user = await portalService.updatePortalUserPermissions(req.user!, userId, allowedTabs ?? null);
+    res.json({ status: 'success', data: { user } });
+  } catch (err) {
+    handlePortalError(err, res, next);
+  }
+}
+
 export async function uploadExternalAgreement(req: Request, res: Response, next: NextFunction) {
   try {
     const { r2Key, fileName, sizeBytes } = req.body ?? {};

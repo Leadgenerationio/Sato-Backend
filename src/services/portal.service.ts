@@ -705,6 +705,12 @@ export async function getAgreement(requester: AuthPayload): Promise<PortalAgreem
 // touch the caller's own client.
 // ─────────────────────────────────────────────────────────────────────
 
+// Sam (2026-05-27): tab slugs a portal user can be restricted to. Dashboard
+// + account are always visible — these are the optional ones the admin
+// toggles per user. Keep the list in sync with PortalLayout's navItems.
+export const PORTAL_TAB_SLUGS = ['leads', 'invoices', 'compliance', 'creatives', 'agreement'] as const;
+export type PortalTabSlug = (typeof PORTAL_TAB_SLUGS)[number];
+
 export interface PortalUserDto {
   id: string;
   email: string;
@@ -713,6 +719,21 @@ export interface PortalUserDto {
   isActive: boolean;
   isYou: boolean;
   createdAt: string;
+  // null = full access. non-null = only these tabs (+ dashboard + account).
+  // Always null for client_admin — admins see everything.
+  allowedTabs: PortalTabSlug[] | null;
+}
+
+function normalizeAllowedTabs(input: unknown): PortalTabSlug[] | null {
+  if (input === null || input === undefined) return null;
+  if (!Array.isArray(input)) return null;
+  const valid = new Set<string>(PORTAL_TAB_SLUGS);
+  const cleaned = input
+    .filter((s): s is string => typeof s === 'string')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => valid.has(s));
+  // Deduplicate.
+  return Array.from(new Set(cleaned)) as PortalTabSlug[];
 }
 
 export async function listPortalUsersForClient(requester: AuthPayload): Promise<PortalUserDto[]> {
@@ -729,6 +750,7 @@ export async function listPortalUsersForClient(requester: AuthPayload): Promise<
       role: users.role,
       isActive: users.isActive,
       createdAt: users.createdAt,
+      allowedTabs: users.allowedTabs,
     })
     .from(users)
     .where(and(
@@ -744,6 +766,8 @@ export async function listPortalUsersForClient(requester: AuthPayload): Promise<
     isActive: r.isActive,
     isYou: r.id === requester.userId,
     createdAt: (r.createdAt ?? new Date()).toISOString(),
+    // client_admin always returns null — admins see everything.
+    allowedTabs: r.role === 'client_admin' ? null : normalizeAllowedTabs(r.allowedTabs),
   }));
 }
 
@@ -752,6 +776,7 @@ export interface CreatePortalUserInput {
   name: string;
   password: string;
   promoteAsClientAdmin: boolean;
+  allowedTabs?: PortalTabSlug[] | null;
 }
 
 export async function createPortalUserForClient(
@@ -771,6 +796,12 @@ export async function createPortalUserForClient(
     throw err;
   }
   const passwordHash = await bcryptjs.hash(input.password, 12);
+  // client_admin ignores allowedTabs — admins always see everything.
+  // For role=client we persist whatever the caller sent (after normalize)
+  // or NULL if not provided (= backward-compat full access).
+  const normalizedTabs = input.promoteAsClientAdmin
+    ? null
+    : normalizeAllowedTabs(input.allowedTabs ?? null);
   const [row] = await db
     .insert(users)
     .values({
@@ -782,10 +813,11 @@ export async function createPortalUserForClient(
       // Portal users have no businessId — that's owner-side.
       businessId: null,
       isActive: true,
+      allowedTabs: normalizedTabs,
     })
     .returning();
   logger.info(
-    { actorUserId: requester.userId, newUserId: row.id, clientId: requester.clientId, role: row.role },
+    { actorUserId: requester.userId, newUserId: row.id, clientId: requester.clientId, role: row.role, allowedTabs: normalizedTabs },
     'portal_user_created',
   );
   return {
@@ -796,6 +828,55 @@ export async function createPortalUserForClient(
     isActive: row.isActive,
     isYou: false,
     createdAt: (row.createdAt ?? new Date()).toISOString(),
+    allowedTabs: row.role === 'client_admin' ? null : normalizeAllowedTabs(row.allowedTabs),
+  };
+}
+
+export async function updatePortalUserPermissions(
+  requester: AuthPayload,
+  targetUserId: string,
+  allowedTabs: PortalTabSlug[] | null,
+): Promise<PortalUserDto> {
+  if (!requester.clientId) {
+    const err = new Error('Portal access requires a client user');
+    err.name = 'PortalAccessError';
+    throw err;
+  }
+  // Scope: target must belong to the requester's client.
+  const [target] = await db
+    .select({ id: users.id, role: users.role })
+    .from(users)
+    .where(and(eq(users.id, targetUserId), eq(users.clientId, requester.clientId)));
+  if (!target || (target.role !== 'client' && target.role !== 'client_admin')) {
+    const err = new Error('User not found in your portal');
+    err.name = 'PortalAccessError';
+    throw err;
+  }
+  // client_admin permissions are not editable — admins always see everything.
+  if (target.role === 'client_admin') {
+    const err = new Error('Admins always see every tab. Demote to User first to set per-tab permissions.');
+    err.name = 'PortalAccessError';
+    throw err;
+  }
+  const normalized = normalizeAllowedTabs(allowedTabs);
+  const [row] = await db
+    .update(users)
+    .set({ allowedTabs: normalized, updatedAt: new Date() })
+    .where(eq(users.id, target.id))
+    .returning();
+  logger.info(
+    { actorUserId: requester.userId, targetUserId: row.id, clientId: requester.clientId, allowedTabs: normalized },
+    'portal_user_permissions_updated',
+  );
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    role: row.role as 'client' | 'client_admin',
+    isActive: row.isActive,
+    isYou: row.id === requester.userId,
+    createdAt: (row.createdAt ?? new Date()).toISOString(),
+    allowedTabs: normalizeAllowedTabs(row.allowedTabs),
   };
 }
 

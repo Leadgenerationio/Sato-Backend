@@ -46,6 +46,9 @@ export interface UserResponse {
   clientId: string | null;
   isActive: boolean;
   isPrimaryOwner: boolean;
+  // Sam 27-May portal meeting: per-portal-user tab visibility. null = full
+  // access. Always null for client_admin (admins see every tab).
+  allowedTabs: string[] | null;
 }
 
 export const updateProfileSchema = z.object({

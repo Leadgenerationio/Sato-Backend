@@ -37,12 +37,22 @@ portalRoutes.post('/creatives/:creativeId/request-changes', portalController.req
 
 portalRoutes.get('/users', portalController.listPortalUsers);
 
+const PORTAL_TAB_VALUES = ['leads', 'invoices', 'compliance', 'creatives', 'agreement'] as const;
+const allowedTabsSchema = z.array(z.enum(PORTAL_TAB_VALUES)).nullable().optional();
+
 const createPortalUserSchema = z.object({
   body: z.object({
     email: z.string().email(),
     name: z.string().min(1).max(200),
     password: z.string().min(6).max(200),
     promoteAsClientAdmin: z.boolean().optional(),
+    allowedTabs: allowedTabsSchema,
+  }),
+});
+
+const updatePermissionsSchema = z.object({
+  body: z.object({
+    allowedTabs: z.array(z.enum(PORTAL_TAB_VALUES)).nullable(),
   }),
 });
 portalRoutes.post(
@@ -53,6 +63,13 @@ portalRoutes.post(
 );
 
 portalRoutes.delete('/users/:userId', requireClientAdmin(), portalController.deletePortalUser);
+
+portalRoutes.put(
+  '/users/:userId/permissions',
+  requireClientAdmin(),
+  validate(updatePermissionsSchema),
+  portalController.updatePortalUserPermissions,
+);
 
 const externalAgreementSchema = z.object({
   body: z.object({

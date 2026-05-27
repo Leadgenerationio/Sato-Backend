@@ -24,6 +24,7 @@ type UserRow = {
   clientId: string | null;
   isActive: boolean;
   isPrimaryOwner: boolean;
+  allowedTabs: string[] | null;
 };
 
 export function generateTokens(payload: AuthPayload): AuthTokens {
@@ -150,6 +151,10 @@ export async function getUserById(userId: string): Promise<UserResponse> {
 }
 
 function toUserResponse(user: UserRow): UserResponse {
+  // client_admin always sees every tab — never expose a restricted list
+  // even if the DB happens to have one (defensive). For role=client, we
+  // return whatever's stored — null is the backward-compat full-access.
+  const allowedTabs = user.role === 'client_admin' ? null : (user.allowedTabs ?? null);
   return {
     id: user.id,
     email: user.email,
@@ -159,5 +164,6 @@ function toUserResponse(user: UserRow): UserResponse {
     clientId: user.clientId,
     isActive: user.isActive,
     isPrimaryOwner: user.isPrimaryOwner ?? false,
+    allowedTabs,
   };
 }

@@ -1,4 +1,4 @@
-import { pgTable, uuid, varchar, timestamp, boolean, jsonb, pgEnum } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, varchar, timestamp, boolean, jsonb, pgEnum, text } from 'drizzle-orm/pg-core';
 import { businesses } from './businesses.js';
 import { clients } from './clients.js';
 
@@ -21,6 +21,10 @@ export const users = pgTable('users', {
   isActive: boolean('is_active').notNull().default(true),
   isPrimaryOwner: boolean('is_primary_owner').notNull().default(false),
   notificationPreferences: jsonb('notification_preferences'),
+  // Sam (2026-05-27 portal meeting): per-portal-user tab visibility.
+  // null = full access (backward compat). non-null = only these tabs +
+  // dashboard + account. client_admin ignores this column.
+  allowedTabs: text('allowed_tabs').array(),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 });
