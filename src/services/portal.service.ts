@@ -7,6 +7,7 @@ import { campaigns } from '../db/schema/campaigns.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { invoices } from '../db/schema/invoices.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
+import { adSpend } from '../db/schema/ad-spend.js';
 import { creatives } from '../db/schema/creatives.js';
 import { landingPages } from '../db/schema/landing-pages.js';
 import { agreements } from '../db/schema/agreements.js';
@@ -33,6 +34,12 @@ async function campaignIdsForClient(clientId: string): Promise<string[]> {
   return rows.map((r) => r.campaignId);
 }
 
+export interface PortalAdSpendPlatform {
+  platform: string;
+  spend: number;
+  currency: string;
+}
+
 export interface PortalDashboard {
   companyName: string;
   clientType: 'managed' | 'ppl';
@@ -44,6 +51,13 @@ export interface PortalDashboard {
   totalOutstanding: number;
   agreementSigned: boolean;
   recentLeads: { date: string; leads: number }[];
+  // Per-platform ad spend for the current month (MTD), surfaced ONLY for
+  // managed clients. PPL clients always get an empty array — they don't see
+  // ad spend in the portal (no regression). Scoped to the client's own
+  // ad_spend rows (client_id) so the figure matches the agency-side
+  // getPnlSummary source of truth. Empty array also when a managed client
+  // simply has no attributed spend this month.
+  adSpendByPlatform: PortalAdSpendPlatform[];
 }
 
 export interface PortalCampaign {
@@ -236,6 +250,43 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
     recentLeads.push({ date: dateStr, leads: deliveryMap.get(dateStr) ?? 0 });
   }
 
+  // Managed clients (bundled retainer) now see their ad spend in the portal.
+  // PPL clients never do — we short-circuit to an empty array without running
+  // the query, so there's zero behaviour change for them. Scope by the
+  // client's own ad_spend rows (client_id) + this-month window so the figure
+  // lines up with the agency-side getPnlSummary's per-client spend total and
+  // the portal's existing "Leads This Month" window.
+  // Group by (platform, currency) — NOT platform alone — so we never sum
+  // across currencies. A client running ads in more than one currency (rare,
+  // but ad_spend.currency is per-row and not constrained to GBP) gets one row
+  // per (platform, currency) pair; the FE renders each with its own symbol
+  // and totals per-currency. Summing mixed currencies into a single figure
+  // would be silently wrong.
+  const adSpendByPlatform: PortalAdSpendPlatform[] =
+    (client.clientType ?? 'ppl') === 'managed'
+      ? (
+          await db
+            .select({
+              platform: adSpend.platform,
+              currency: adSpend.currency,
+              spend: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text`,
+            })
+            .from(adSpend)
+            .where(
+              and(
+                eq(adSpend.clientId, clientId),
+                gte(adSpend.date, monthStart.toISOString().split('T')[0]),
+              ),
+            )
+            .groupBy(adSpend.platform, adSpend.currency)
+            .orderBy(desc(sql`sum(${adSpend.spend}::numeric)`))
+        ).map((r) => ({
+          platform: r.platform,
+          spend: Math.round(Number(r.spend) * 100) / 100,
+          currency: r.currency ?? client.currency ?? 'GBP',
+        }))
+      : [];
+
   return {
     companyName: client.companyName,
     clientType: client.clientType ?? 'ppl',
@@ -247,6 +298,7 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
     totalOutstanding: Math.round(totalOutstanding * 100) / 100,
     agreementSigned: client.agreementSigned ?? false,
     recentLeads,
+    adSpendByPlatform,
   };
 }
 
