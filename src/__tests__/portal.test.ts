@@ -10,6 +10,7 @@ import { creativeApprovals } from '../db/schema/creative-approvals.js';
 import { invoices } from '../db/schema/invoices.js';
 import { agreements } from '../db/schema/agreements.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
+import { adSpend } from '../db/schema/ad-spend.js';
 
 let clientToken: string;
 let ownerToken: string;
@@ -563,6 +564,63 @@ describe('Portal API', () => {
       expect(events[0].action).toBe('approved');
       expect(events[1].action).toBe('rejected');
       expect(events[1].feedback).toBe('Wrong CTA');
+    });
+  });
+
+  // Managed clients now see their ad spend (per-platform, MTD) in the portal.
+  // PPL clients must NOT — that's the no-regression guard. Spend is scoped to
+  // the client's own ad_spend rows (client_id) so it matches the agency-side
+  // per-client total.
+  describe('Ad spend visibility — managed clients only', () => {
+    const FB_SPEND_ID = '00000000-0000-0000-0000-0000000a5001';
+    const GOOGLE_SPEND_ID = '00000000-0000-0000-0000-0000000a5002';
+    const today = new Date().toISOString().split('T')[0];
+
+    beforeAll(async () => {
+      // Two platforms this month for the demo client. Google spend > Facebook
+      // so we can also assert the desc-by-spend ordering.
+      await db
+        .insert(adSpend)
+        .values([
+          { id: FB_SPEND_ID, platform: 'Facebook Ads', authorizationId: 50011, accountId: 'act_portal_fb', campaignId: 'portal-fb', date: today, spend: '120.50', currency: 'GBP', clientId: DEMO_CLIENT_ID },
+          { id: GOOGLE_SPEND_ID, platform: 'Google Ads', authorizationId: 50012, accountId: 'act_portal_google', campaignId: 'portal-google', date: today, spend: '300.00', currency: 'GBP', clientId: DEMO_CLIENT_ID },
+        ])
+        .onConflictDoNothing();
+    });
+
+    afterAll(async () => {
+      await db.delete(adSpend).where(eq(adSpend.id, FB_SPEND_ID));
+      await db.delete(adSpend).where(eq(adSpend.id, GOOGLE_SPEND_ID));
+      // Restore default so other suites aren't surprised.
+      await db.update(clients).set({ clientType: 'ppl' }).where(eq(clients.id, DEMO_CLIENT_ID));
+    });
+
+    it('managed client sees per-platform ad spend, sorted by spend desc', async () => {
+      await db.update(clients).set({ clientType: 'managed' }).where(eq(clients.id, DEMO_CLIENT_ID));
+
+      const res = await request(app).get('/api/v1/portal/dashboard').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+
+      const rows = res.body.data.adSpendByPlatform as Array<{ platform: string; spend: number; currency: string }>;
+      expect(Array.isArray(rows)).toBe(true);
+
+      const byPlatform = Object.fromEntries(rows.map((r) => [r.platform, r.spend]));
+      expect(byPlatform['Facebook Ads']).toBe(120.5);
+      expect(byPlatform['Google Ads']).toBe(300);
+
+      // Google (£300) must sort before Facebook (£120.50).
+      const fbIdx = rows.findIndex((r) => r.platform === 'Facebook Ads');
+      const googleIdx = rows.findIndex((r) => r.platform === 'Google Ads');
+      expect(googleIdx).toBeLessThan(fbIdx);
+    });
+
+    it('PPL client gets an empty adSpendByPlatform array (no regression)', async () => {
+      await db.update(clients).set({ clientType: 'ppl' }).where(eq(clients.id, DEMO_CLIENT_ID));
+
+      const res = await request(app).get('/api/v1/portal/dashboard').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+      // Even though this client HAS ad_spend rows seeded, PPL must not see them.
+      expect(res.body.data.adSpendByPlatform).toEqual([]);
     });
   });
 });
