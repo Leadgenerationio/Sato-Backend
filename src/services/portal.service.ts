@@ -10,7 +10,7 @@ import { landingPages } from '../db/schema/landing-pages.js';
 import { agreements } from '../db/schema/agreements.js';
 import { users } from '../db/schema/users.js';
 import { getApprovalStatesForCreatives } from './creative-approval.service.js';
-import { logClientActivity } from './client-activity.service.js';
+import { clientActivityLog } from '../db/schema/client-activity.js';
 import { computeDaysOverdue, deriveDisplayStatus } from './invoice.service.js';
 import type { AuthPayload } from '../types/index.js';
 
@@ -756,29 +756,38 @@ export async function updateAgreementStatus(
   }
 
   const nowSigned = toStatus === 'signed';
-  await db
-    .update(clients)
-    .set({ agreementSigned: nowSigned, updatedAt: new Date() })
-    .where(eq(clients.id, clientId));
 
-  if (agreementRow) {
-    const patch: Partial<AgreementRow> = { status: toStatus };
-    if (toStatus === 'signed') {
-      patch.signedAt = agreementRow.signedAt ?? new Date();
-    } else if (toStatus === 'sent') {
-      patch.signedAt = null;
-      patch.sentAt = agreementRow.sentAt ?? new Date();
-    } else {
-      patch.signedAt = null;
-      patch.sentAt = null;
+  // All writes + the audit row commit atomically. The audit insert is part of
+  // the transaction (not the fire-and-forget logClientActivity helper, which
+  // swallows errors) — for a status change that drives client-facing state,
+  // we never want the mutation to land without the who/from/to/when record.
+  // If the audit write fails, the whole change rolls back.
+  await db.transaction(async (tx) => {
+    await tx
+      .update(clients)
+      .set({ agreementSigned: nowSigned, updatedAt: new Date() })
+      .where(eq(clients.id, clientId));
+
+    if (agreementRow) {
+      const patch: Partial<AgreementRow> = { status: toStatus };
+      if (toStatus === 'signed') {
+        patch.signedAt = agreementRow.signedAt ?? new Date();
+      } else if (toStatus === 'sent') {
+        patch.signedAt = null;
+        patch.sentAt = agreementRow.sentAt ?? new Date();
+      } else {
+        patch.signedAt = null;
+        patch.sentAt = null;
+      }
+      await tx.update(agreements).set(patch).where(eq(agreements.id, agreementRow.id));
     }
-    await db.update(agreements).set(patch).where(eq(agreements.id, agreementRow.id));
-  }
 
-  await logClientActivity(clientId, requester.userId, 'agreement_status_changed', {
-    from: fromStatus,
-    to: toStatus,
-    source: 'portal_manual_override',
+    await tx.insert(clientActivityLog).values({
+      clientId,
+      actorUserId: requester.userId,
+      eventType: 'agreement_status_changed',
+      payload: { from: fromStatus, to: toStatus, source: 'portal_manual_override' },
+    });
   });
 
   return { agreementStatus: toStatus, agreementSigned: nowSigned };
