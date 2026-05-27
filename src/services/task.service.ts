@@ -1,4 +1,4 @@
-import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { tasks, taskComments, taskTemplates } from '../db/schema/tasks.js';
 import { logActivity, listActivityForTask, type TaskActivityEvent } from './task-activity.service.js';
@@ -41,6 +41,12 @@ export interface Task {
   timeBlockMinutes?: number | null;
   linkedSopId?: string | null;
   parentTaskId?: string | null;
+  // Sam-Loom #2 follow-up — parent task's title surfaced on every child so
+  // the FE can render the "↪ Parent: X" hint even when the parent lives on
+  // a different page of the result set (otherwise pagination silently breaks
+  // the parent/child grouping). Null when the task is top-level OR when the
+  // parent has been deleted (parent_task_id is `set null` on parent delete).
+  parentTitle?: string | null;
   recurrenceCron?: string | null;
   recurrenceNextRun?: string | null;
   subtasks?: TaskSubtask[];
@@ -94,7 +100,7 @@ function commentToDto(row: CommentRow): TaskComment {
 function taskToDto(
   row: TaskRow,
   comments: TaskComment[],
-  extras?: { subtasks?: TaskSubtask[]; attachments?: TaskAttachment[]; activity?: TaskActivityEvent[] },
+  extras?: { subtasks?: TaskSubtask[]; attachments?: TaskAttachment[]; activity?: TaskActivityEvent[]; parentTitle?: string | null },
 ): Task {
   return {
     id: row.id,
@@ -112,6 +118,7 @@ function taskToDto(
     timeBlockMinutes: row.timeBlockMinutes ?? null,
     linkedSopId: row.linkedSopId ?? null,
     parentTaskId: row.parentTaskId ?? null,
+    parentTitle: extras?.parentTitle ?? null,
     recurrenceCron: row.recurrenceCron ?? null,
     recurrenceNextRun: row.recurrenceNextRun ? row.recurrenceNextRun.toISOString() : null,
     subtasks: extras?.subtasks,
@@ -178,22 +185,51 @@ export async function listTasks(requester: AuthPayload, filters?: TaskFilters): 
     .where(conditions.length ? and(...conditions) : undefined)
     .orderBy(desc(tasks.createdAt));
 
+  // Sam-Loom #2 follow-up — fetch parent titles for every child in the page,
+  // even when the parent lives on a different page. Without this, paginating
+  // at >50 tasks would orphan children visually (child appears top-level
+  // because its parent wasn't loaded). Single batched query keyed on the
+  // distinct parent_task_ids — bounded by page size.
+  const parentTitleById = await loadParentTitles(rows);
+
   const commentsMap = await loadCommentsForTasks(rows.map((r) => r.id));
-  return rows.map((r) => taskToDto(r, commentsMap.get(r.id) ?? []));
+  return rows.map((r) => taskToDto(r, commentsMap.get(r.id) ?? [], {
+    parentTitle: r.parentTaskId ? (parentTitleById.get(r.parentTaskId) ?? null) : null,
+  }));
+}
+
+async function loadParentTitles(rows: TaskRow[]): Promise<Map<string, string>> {
+  const parentIds = Array.from(
+    new Set(rows.map((r) => r.parentTaskId).filter((id): id is string => !!id)),
+  );
+  if (parentIds.length === 0) return new Map();
+  const parents = await db
+    .select({ id: tasks.id, title: tasks.title })
+    .from(tasks)
+    .where(inArray(tasks.id, parentIds));
+  return new Map(parents.map((p) => [p.id, p.title]));
 }
 
 export async function getTask(id: string): Promise<Task | null> {
   const [row] = await db.select().from(tasks).where(eq(tasks.id, id));
   if (!row) return null;
   // Slice 5: pull comments + subtasks + attachments + activity feed in
-  // parallel so the detail endpoint stays one round-trip.
-  const [commentsMap, subtasks, attachments, activity] = await Promise.all([
+  // parallel so the detail endpoint stays one round-trip. Sam-Loom #2
+  // follow-up — also resolve the parent title so the detail page can
+  // render the back-link to the parent.
+  const [commentsMap, subtasks, attachments, activity, parentTitleById] = await Promise.all([
     loadCommentsForTasks([id]),
     loadSubtasksForTask(id),
     loadAttachmentsForTask(id),
     listActivityForTask(id),
+    loadParentTitles([row]),
   ]);
-  return taskToDto(row, commentsMap.get(id) ?? [], { subtasks, attachments, activity });
+  return taskToDto(row, commentsMap.get(id) ?? [], {
+    subtasks,
+    attachments,
+    activity,
+    parentTitle: row.parentTaskId ? (parentTitleById.get(row.parentTaskId) ?? null) : null,
+  });
 }
 
 export async function createTask(data: Partial<Task>, requester: AuthPayload): Promise<Task> {
