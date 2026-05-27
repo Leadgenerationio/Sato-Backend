@@ -5,17 +5,21 @@ export interface PermissionEntry {
   access: Record<UserRole, boolean>;
 }
 
-// Default permissions — owner can change these at runtime
+// Default permissions — owner can change these at runtime.
+// Sam (2026-05-27 portal meeting): client_admin = client + ability to
+// manage their own portal users + upload externally-signed agreement.
+// Mirrors 'client' for read permissions; gets 'Manage Users' true
+// (scoped server-side to their own clientId in portal.service).
 const permissions: PermissionEntry[] = [
-  { permission: 'View Dashboard', access: { owner: true, finance_admin: true, ops_manager: true, client: true, readonly: true } },
-  { permission: 'Manage Users', access: { owner: true, finance_admin: false, ops_manager: false, client: false, readonly: false } },
-  { permission: 'View Finance', access: { owner: true, finance_admin: true, ops_manager: false, client: false, readonly: true } },
-  { permission: 'Manage Invoices', access: { owner: true, finance_admin: true, ops_manager: false, client: false, readonly: false } },
-  { permission: 'Manage Campaigns', access: { owner: true, finance_admin: false, ops_manager: true, client: false, readonly: false } },
-  { permission: 'View Reports', access: { owner: true, finance_admin: true, ops_manager: true, client: false, readonly: true } },
-  { permission: 'Manage Clients', access: { owner: true, finance_admin: true, ops_manager: true, client: false, readonly: false } },
-  { permission: 'View Portal', access: { owner: false, finance_admin: false, ops_manager: false, client: true, readonly: false } },
-  { permission: 'System Settings', access: { owner: true, finance_admin: true, ops_manager: true, client: false, readonly: false } },
+  { permission: 'View Dashboard', access: { owner: true, finance_admin: true, ops_manager: true, client: true, client_admin: true, readonly: true } },
+  { permission: 'Manage Users', access: { owner: true, finance_admin: false, ops_manager: false, client: false, client_admin: true, readonly: false } },
+  { permission: 'View Finance', access: { owner: true, finance_admin: true, ops_manager: false, client: false, client_admin: false, readonly: true } },
+  { permission: 'Manage Invoices', access: { owner: true, finance_admin: true, ops_manager: false, client: false, client_admin: false, readonly: false } },
+  { permission: 'Manage Campaigns', access: { owner: true, finance_admin: false, ops_manager: true, client: false, client_admin: false, readonly: false } },
+  { permission: 'View Reports', access: { owner: true, finance_admin: true, ops_manager: true, client: false, client_admin: false, readonly: true } },
+  { permission: 'Manage Clients', access: { owner: true, finance_admin: true, ops_manager: true, client: false, client_admin: false, readonly: false } },
+  { permission: 'View Portal', access: { owner: false, finance_admin: false, ops_manager: false, client: true, client_admin: true, readonly: false } },
+  { permission: 'System Settings', access: { owner: true, finance_admin: true, ops_manager: true, client: false, client_admin: false, readonly: false } },
 ];
 
 export function getPermissions(): PermissionEntry[] {

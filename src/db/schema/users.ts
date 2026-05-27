@@ -2,8 +2,12 @@ import { pgTable, uuid, varchar, timestamp, boolean, jsonb, pgEnum } from 'drizz
 import { businesses } from './businesses.js';
 import { clients } from './clients.js';
 
+// Sam (2026-05-27 portal meeting): 'client_admin' added so each client's
+// own admin can manage their portal users + mark agreements signed
+// externally — replaces Sam being the bottleneck. Day-1 default: the
+// earliest portal user per client is auto-promoted (see migration 0035).
 export const userRoleEnum = pgEnum('user_role', [
-  'owner', 'finance_admin', 'ops_manager', 'client', 'readonly',
+  'owner', 'finance_admin', 'ops_manager', 'client', 'client_admin', 'readonly',
 ]);
 
 export const users = pgTable('users', {

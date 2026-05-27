@@ -153,3 +153,43 @@ export async function creatives(req: Request, res: Response, next: NextFunction)
     handlePortalError(err, res, next);
   }
 }
+
+// ─── Sam (2026-05-27 portal meeting) ─────────────────────────────────
+// Client-side self-service routes. client_admin manages portal users +
+// uploads externally-signed agreements without Sam being involved.
+// Every action is scoped server-side to req.user.clientId.
+// ─────────────────────────────────────────────────────────────────────
+
+export async function listPortalUsers(req: Request, res: Response, next: NextFunction) {
+  try {
+    const users = await portalService.listPortalUsersForClient(req.user!);
+    res.json({ status: 'success', data: { users } });
+  } catch (err) {
+    handlePortalError(err, res, next);
+  }
+}
+
+export async function createPortalUser(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { email, name, password, promoteAsClientAdmin } = req.body ?? {};
+    const user = await portalService.createPortalUserForClient(req.user!, {
+      email, name, password, promoteAsClientAdmin: !!promoteAsClientAdmin,
+    });
+    res.status(201).json({ status: 'success', data: { user } });
+  } catch (err) {
+    handlePortalError(err, res, next);
+  }
+}
+
+export async function uploadExternalAgreement(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { r2Key, fileName, sizeBytes } = req.body ?? {};
+    const { ipAddress, userAgent } = captureRequestMetadata(req);
+    const result = await portalService.uploadExternalAgreement(req.user!, {
+      r2Key, fileName, sizeBytes: sizeBytes ?? null, ipAddress, userAgent,
+    });
+    res.status(201).json({ status: 'success', data: result });
+  } catch (err) {
+    handlePortalError(err, res, next);
+  }
+}

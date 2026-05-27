@@ -1,6 +1,8 @@
 import { and, desc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
+import bcryptjs from 'bcryptjs';
 import { db } from '../config/database.js';
 import { clients } from '../db/schema/clients.js';
+import { users } from '../db/schema/users.js';
 import { campaigns } from '../db/schema/campaigns.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { invoices } from '../db/schema/invoices.js';
@@ -10,6 +12,7 @@ import { landingPages } from '../db/schema/landing-pages.js';
 import { agreements } from '../db/schema/agreements.js';
 import { getApprovalStatesForCreatives } from './creative-approval.service.js';
 import { computeDaysOverdue, deriveDisplayStatus } from './invoice.service.js';
+import { logger } from '../utils/logger.js';
 import type { AuthPayload } from '../types/index.js';
 
 /**
@@ -635,5 +638,174 @@ export async function getAgreement(requester: AuthPayload): Promise<PortalAgreem
     documentUrl: row.documentUrl,
     clientName: client.companyName,
     terms: `Lead Generation Service Agreement between leadgeneration.io and ${client.companyName}. Lead price: £${client.leadPrice ?? '0.00'} per valid lead. Payment terms: ${client.paymentTermsDays ?? 30} days.`,
+  };
+}
+
+// ─── Sam (2026-05-27 portal meeting) — client-side self-service ──────
+// client_admin manages their own portal users + uploads externally-signed
+// agreements without Sam being involved. Every function below is scoped
+// server-side to req.user.clientId — even a forged request body can only
+// touch the caller's own client.
+// ─────────────────────────────────────────────────────────────────────
+
+export interface PortalUserDto {
+  id: string;
+  email: string;
+  name: string;
+  role: 'client' | 'client_admin';
+  isActive: boolean;
+  isYou: boolean;
+  createdAt: string;
+}
+
+export async function listPortalUsersForClient(requester: AuthPayload): Promise<PortalUserDto[]> {
+  if (!requester.clientId) {
+    const err = new Error('Portal access requires a client user');
+    err.name = 'PortalAccessError';
+    throw err;
+  }
+  const rows = await db
+    .select({
+      id: users.id,
+      email: users.email,
+      name: users.name,
+      role: users.role,
+      isActive: users.isActive,
+      createdAt: users.createdAt,
+    })
+    .from(users)
+    .where(and(
+      eq(users.clientId, requester.clientId),
+      inArray(users.role, ['client', 'client_admin']),
+    ))
+    .orderBy(users.createdAt);
+  return rows.map((r) => ({
+    id: r.id,
+    email: r.email,
+    name: r.name,
+    role: r.role as 'client' | 'client_admin',
+    isActive: r.isActive,
+    isYou: r.id === requester.userId,
+    createdAt: (r.createdAt ?? new Date()).toISOString(),
+  }));
+}
+
+export interface CreatePortalUserInput {
+  email: string;
+  name: string;
+  password: string;
+  promoteAsClientAdmin: boolean;
+}
+
+export async function createPortalUserForClient(
+  requester: AuthPayload,
+  input: CreatePortalUserInput,
+): Promise<PortalUserDto> {
+  if (!requester.clientId) {
+    const err = new Error('Portal access requires a client user');
+    err.name = 'PortalAccessError';
+    throw err;
+  }
+  // Email uniqueness — same constraint as the admin /users endpoint.
+  const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.email, input.email.toLowerCase().trim()));
+  if (existing) {
+    const err = new Error('A user with this email already exists');
+    err.name = 'PortalAccessError';
+    throw err;
+  }
+  const passwordHash = await bcryptjs.hash(input.password, 12);
+  const [row] = await db
+    .insert(users)
+    .values({
+      email: input.email.toLowerCase().trim(),
+      name: input.name.trim(),
+      passwordHash,
+      role: input.promoteAsClientAdmin ? 'client_admin' : 'client',
+      clientId: requester.clientId,
+      // Portal users have no businessId — that's owner-side.
+      businessId: null,
+      isActive: true,
+    })
+    .returning();
+  logger.info(
+    { actorUserId: requester.userId, newUserId: row.id, clientId: requester.clientId, role: row.role },
+    'portal_user_created',
+  );
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    role: row.role as 'client' | 'client_admin',
+    isActive: row.isActive,
+    isYou: false,
+    createdAt: (row.createdAt ?? new Date()).toISOString(),
+  };
+}
+
+export interface ExternalAgreementInput {
+  r2Key: string;
+  fileName: string;
+  sizeBytes: number | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+}
+
+export async function uploadExternalAgreement(
+  requester: AuthPayload,
+  input: ExternalAgreementInput,
+): Promise<{ agreementSigned: true; documentUrl: string; uploadedAt: string }> {
+  if (!requester.clientId) {
+    const err = new Error('Portal access requires a client user');
+    err.name = 'PortalAccessError';
+    throw err;
+  }
+  const now = new Date();
+  // Flip agreementSigned + bump onboardingStatus past 'pending' so the
+  // dashboard "Action needed" banner clears. Also persist the R2 key as
+  // the agreement document URL so the agreement tab can render the file.
+  const [row] = await db
+    .update(clients)
+    .set({
+      agreementSigned: true,
+      agreementDocumentUrl: input.r2Key,
+      // Only bump status if it's still at 'pending'. Anything further
+      // along (documents_received / agreement_signed / active) means
+      // someone else got there first — don't roll it back.
+      onboardingStatus: sql`CASE WHEN ${clients.onboardingStatus} = 'pending' THEN 'agreement_signed'::onboarding_status ELSE ${clients.onboardingStatus} END`,
+      updatedAt: now,
+    })
+    .where(eq(clients.id, requester.clientId))
+    .returning({
+      id: clients.id,
+      agreementDocumentUrl: clients.agreementDocumentUrl,
+    });
+  if (!row) {
+    const err = new Error('Client not found');
+    err.name = 'PortalAccessError';
+    throw err;
+  }
+  // Audit log — IP + UA + uploader + filename + timestamp. Lines up with
+  // the same shape we already capture for creative approvals so external
+  // auditors get one consistent record. logger.info is the right vehicle
+  // because Railway aggregates logs into searchable history; a dedicated
+  // audit table can come later if/when compliance requires it.
+  logger.info(
+    {
+      actorUserId: requester.userId,
+      actorEmail: requester.email,
+      clientId: requester.clientId,
+      r2Key: input.r2Key,
+      fileName: input.fileName,
+      sizeBytes: input.sizeBytes,
+      ipAddress: input.ipAddress,
+      userAgent: input.userAgent,
+      at: now.toISOString(),
+    },
+    'external_agreement_uploaded',
+  );
+  return {
+    agreementSigned: true,
+    documentUrl: row.agreementDocumentUrl ?? input.r2Key,
+    uploadedAt: now.toISOString(),
   };
 }

@@ -1,7 +1,10 @@
 import { z } from 'zod';
 
 // ─── Roles ───
-export type UserRole = 'owner' | 'finance_admin' | 'ops_manager' | 'client' | 'readonly';
+// Sam (2026-05-27 portal meeting): 'client_admin' added so each client's
+// own admin can self-serve user management + agreement upload from inside
+// /portal without Sam needing to be involved.
+export type UserRole = 'owner' | 'finance_admin' | 'ops_manager' | 'client' | 'client_admin' | 'readonly';
 
 // ─── Auth Schemas ───
 export const loginSchema = z.object({
