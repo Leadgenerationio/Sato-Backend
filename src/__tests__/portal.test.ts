@@ -575,18 +575,23 @@ describe('Portal API', () => {
     const FB_SPEND_ID = '00000000-0000-0000-0000-0000000a5001';
     const GOOGLE_SPEND_ID = '00000000-0000-0000-0000-0000000a5002';
     const FB_USD_SPEND_ID = '00000000-0000-0000-0000-0000000a5003';
+    const BAD_CCY_SPEND_ID = '00000000-0000-0000-0000-0000000a5004';
     const today = new Date().toISOString().split('T')[0];
 
     beforeAll(async () => {
       // Two GBP platforms (Google > Facebook so we can assert desc ordering)
       // plus a USD Facebook row so we can assert (platform, currency) grouping
-      // never sums across currencies.
+      // never sums across currencies. The Taboola row carries an EMPTY currency
+      // (''), reproducing the Catchr data that crashed production: `'' ?? 'GBP'`
+      // at ingest doesn't catch empty strings, and the FE fed it straight into
+      // Intl.NumberFormat → RangeError.
       await db
         .insert(adSpend)
         .values([
           { id: FB_SPEND_ID, platform: 'Facebook Ads', authorizationId: 50011, accountId: 'act_portal_fb', campaignId: 'portal-fb', date: today, spend: '120.50', currency: 'GBP', clientId: DEMO_CLIENT_ID },
           { id: GOOGLE_SPEND_ID, platform: 'Google Ads', authorizationId: 50012, accountId: 'act_portal_google', campaignId: 'portal-google', date: today, spend: '300.00', currency: 'GBP', clientId: DEMO_CLIENT_ID },
           { id: FB_USD_SPEND_ID, platform: 'Facebook Ads', authorizationId: 50013, accountId: 'act_portal_fb_us', campaignId: 'portal-fb-us', date: today, spend: '50.00', currency: 'USD', clientId: DEMO_CLIENT_ID },
+          { id: BAD_CCY_SPEND_ID, platform: 'Taboola', authorizationId: 50014, accountId: 'act_portal_taboola', campaignId: 'portal-taboola', date: today, spend: '10.00', currency: '', clientId: DEMO_CLIENT_ID },
         ])
         .onConflictDoNothing();
     });
@@ -595,6 +600,7 @@ describe('Portal API', () => {
       await db.delete(adSpend).where(eq(adSpend.id, FB_SPEND_ID));
       await db.delete(adSpend).where(eq(adSpend.id, GOOGLE_SPEND_ID));
       await db.delete(adSpend).where(eq(adSpend.id, FB_USD_SPEND_ID));
+      await db.delete(adSpend).where(eq(adSpend.id, BAD_CCY_SPEND_ID));
       // Restore default so other suites aren't surprised.
       await db.update(clients).set({ clientType: 'ppl' }).where(eq(clients.id, DEMO_CLIENT_ID));
     });
@@ -637,6 +643,28 @@ describe('Portal API', () => {
       expect(res.status).toBe(200);
       // Even though this client HAS ad_spend rows seeded, PPL must not see them.
       expect(res.body.data.adSpendByPlatform).toEqual([]);
+    });
+
+    // Regression for the 2026-05-27 production incident: a Catchr row with an
+    // empty/invalid currency must NOT surface a malformed code (the FE feeds
+    // it into Intl.NumberFormat, which throws RangeError on a bad code).
+    it('sanitizes an empty/invalid currency to a valid 3-letter code', async () => {
+      await db.update(clients).set({ clientType: 'managed' }).where(eq(clients.id, DEMO_CLIENT_ID));
+      const res = await request(app).get('/api/v1/portal/dashboard').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+
+      const rows = res.body.data.adSpendByPlatform as Array<{ platform: string; currency: string }>;
+      const taboola = rows.find((r) => r.platform === 'Taboola');
+      expect(taboola).toBeDefined();
+      // Empty currency collapses to a valid ISO-4217 code (client currency → GBP),
+      // never '' / null, so Intl.NumberFormat can't throw on it client-side.
+      expect(taboola!.currency).toMatch(/^[A-Z]{3}$/);
+
+      // Every returned currency is a well-formed code — Intl.NumberFormat
+      // accepts all of them, so the dashboard can never crash on this data.
+      for (const r of rows) {
+        expect(() => new Intl.NumberFormat('en-GB', { style: 'currency', currency: r.currency })).not.toThrow();
+      }
     });
   });
 });

@@ -40,6 +40,32 @@ export interface PortalAdSpendPlatform {
   currency: string;
 }
 
+// Catchr writes ad_spend.currency straight from its API and the `?? 'GBP'`
+// guard at ingest only catches null/undefined — an empty string or a
+// non-ISO-4217 value flows through. The FE feeds this into
+// Intl.NumberFormat({ style: 'currency' }), which throws RangeError on a
+// bad code and previously crashed the whole managed-client dashboard (the
+// 2026-05-27 production incident). Normalise to a valid 3-letter code here,
+// falling back to the client's own currency then GBP. The FE also guards
+// defensively, but emitting clean data is the right fix at the source.
+function safeCurrencyCode(raw: string | null | undefined, fallback: string): string {
+  const code = (raw ?? '').trim().toUpperCase();
+  const safeFallback = /^[A-Z]{3}$/.test((fallback ?? '').trim().toUpperCase())
+    ? fallback.trim().toUpperCase()
+    : 'GBP';
+  // The crash class is MALFORMED codes (empty, whitespace, wrong length,
+  // non-letters) — Intl.NumberFormat throws RangeError on those. Well-formed
+  // 3-letter codes (even unknown ones) don't throw, so the regex is the real
+  // guard; the try/catch is belt-and-suspenders for any ICU edge case.
+  if (!/^[A-Z]{3}$/.test(code)) return safeFallback;
+  try {
+    new Intl.NumberFormat('en-GB', { style: 'currency', currency: code });
+    return code;
+  } catch {
+    return safeFallback;
+  }
+}
+
 export interface PortalDashboard {
   companyName: string;
   clientType: 'managed' | 'ppl';
@@ -283,7 +309,7 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
         ).map((r) => ({
           platform: r.platform,
           spend: Math.round(Number(r.spend) * 100) / 100,
-          currency: r.currency ?? client.currency ?? 'GBP',
+          currency: safeCurrencyCode(r.currency, client.currency ?? 'GBP'),
         }))
       : [];
 
