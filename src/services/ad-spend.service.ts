@@ -10,6 +10,7 @@ import {
 } from '../integrations/catchr/index.js';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { normalizeCurrencyCode } from '../utils/currency.js';
 
 export interface AdSpendSyncResult {
   startedAt: string;
@@ -209,7 +210,12 @@ export async function syncAll(deps?: { db?: typeof db }): Promise<AdSpendSyncRes
             campaignName: (row[map.campaignName] as string) ?? null,
             date: d,
             spend: spendValue.toString(),
-            currency: (row[map.accountCurrency] as string) ?? 'GBP',
+            // Normalise at write time — Catchr can emit an empty/malformed
+            // currency, and the old `?? 'GBP'` only caught null/undefined.
+            // Storing a bad code here is what crashed the portal dashboard
+            // (Intl.NumberFormat RangeError). Reject it at the boundary so no
+            // ad_spend consumer inherits the landmine.
+            currency: normalizeCurrencyCode(row[map.accountCurrency] as string | null | undefined),
           };
           // Deduplicate within-batch on the same key the unique index uses.
           // If two response rows collapse to the same (platform, auth, account,

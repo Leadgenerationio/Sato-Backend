@@ -14,6 +14,7 @@ import { agreements } from '../db/schema/agreements.js';
 import { getApprovalStatesForCreatives } from './creative-approval.service.js';
 import { computeDaysOverdue, deriveDisplayStatus } from './invoice.service.js';
 import { logger } from '../utils/logger.js';
+import { normalizeCurrencyCode } from '../utils/currency.js';
 import type { AuthPayload } from '../types/index.js';
 
 /**
@@ -40,31 +41,9 @@ export interface PortalAdSpendPlatform {
   currency: string;
 }
 
-// Catchr writes ad_spend.currency straight from its API and the `?? 'GBP'`
-// guard at ingest only catches null/undefined — an empty string or a
-// non-ISO-4217 value flows through. The FE feeds this into
-// Intl.NumberFormat({ style: 'currency' }), which throws RangeError on a
-// bad code and previously crashed the whole managed-client dashboard (the
-// 2026-05-27 production incident). Normalise to a valid 3-letter code here,
-// falling back to the client's own currency then GBP. The FE also guards
-// defensively, but emitting clean data is the right fix at the source.
-function safeCurrencyCode(raw: string | null | undefined, fallback: string): string {
-  const code = (raw ?? '').trim().toUpperCase();
-  const safeFallback = /^[A-Z]{3}$/.test((fallback ?? '').trim().toUpperCase())
-    ? fallback.trim().toUpperCase()
-    : 'GBP';
-  // The crash class is MALFORMED codes (empty, whitespace, wrong length,
-  // non-letters) — Intl.NumberFormat throws RangeError on those. Well-formed
-  // 3-letter codes (even unknown ones) don't throw, so the regex is the real
-  // guard; the try/catch is belt-and-suspenders for any ICU edge case.
-  if (!/^[A-Z]{3}$/.test(code)) return safeFallback;
-  try {
-    new Intl.NumberFormat('en-GB', { style: 'currency', currency: code });
-    return code;
-  } catch {
-    return safeFallback;
-  }
-}
+// Read-path guard for the currency a managed client sees. ad_spend rows
+// ingested before the write-time fix may still hold a malformed code, so we
+// normalise on the way out too (defence in depth) — see normalizeCurrencyCode.
 
 export interface PortalDashboard {
   companyName: string;
@@ -309,7 +288,7 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
         ).map((r) => ({
           platform: r.platform,
           spend: Math.round(Number(r.spend) * 100) / 100,
-          currency: safeCurrencyCode(r.currency, client.currency ?? 'GBP'),
+          currency: normalizeCurrencyCode(r.currency, client.currency ?? 'GBP'),
         }))
       : [];
 
