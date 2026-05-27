@@ -14,6 +14,7 @@ import { getActiveProvider } from '../integrations/credit-check/index.js';
 import { isResendConfigured } from '../integrations/resend/resend-client.js';
 import { isSignNowConfigured } from '../integrations/signnow/signnow-client.js';
 import { isR2Configured } from '../integrations/r2/r2-client.js';
+import { isAnthropicConfigured } from '../integrations/anthropic/anthropic-client.js';
 import {
   isCatchrConfigured,
   listSources as listCatchrSources,
@@ -833,6 +834,13 @@ async function buildOverview() {
       configured: creditProvider !== 'mock',
       provider: creditProvider,
       checksRun: creditCheckCountRow[0]?.count ?? 0,
+    },
+    // Sam-Loom (jam-video #10): "AI generate of AI task for AI suggestions,
+    // not configure for the environment". Surfacing the configured flag in
+    // /integrations so the operator can see at a glance whether the key is
+    // wired up rather than discovering it via the new-task flow.
+    anthropic: {
+      configured: isAnthropicConfigured(),
     },
   };
 }

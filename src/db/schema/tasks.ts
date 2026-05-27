@@ -32,6 +32,10 @@ export const tasks = pgTable('tasks', {
   auditLog: jsonb('audit_log').default([]),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
+  // Sam-Loom (jam-video #7): set whenever status transitions to 'completed',
+  // cleared when transitioning away. Drives the "Show archived" filter on
+  // the tasks page so older completed work folds out of the default view.
+  completedAt: timestamp('completed_at'),
 }, (table) => [
   index('tasks_business_idx').on(table.businessId),
   index('tasks_status_idx').on(table.status),

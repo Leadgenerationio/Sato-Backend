@@ -70,6 +70,11 @@ export interface TaskFilters {
   priority?: string;
   assignee?: string;
   search?: string;
+  // Sam-Loom #7 — 'today' (default): hide completed tasks completed before
+  // today; 'all': everything; 'archive': only completed tasks completed
+  // before today. Lets the FE render the default un-cluttered view while
+  // still exposing the archived rows for performance review later.
+  archive?: 'today' | 'all' | 'archive';
 }
 
 type TaskRow = typeof tasks.$inferSelect;
@@ -151,6 +156,20 @@ export async function listTasks(requester: AuthPayload, filters?: TaskFilters): 
   if (filters?.search) {
     const q = `%${filters.search}%`;
     conditions.push(or(ilike(tasks.title, q), ilike(tasks.description, q))!);
+  }
+
+  // Sam-Loom #7 — archive split. Default ('today' or missing): hide
+  // completed tasks completed before today so the active board stays
+  // legible. 'archive' inverts: only completed-before-today rows. 'all'
+  // disables the filter entirely (used by stats + reports).
+  const archive = filters?.archive ?? 'today';
+  if (archive === 'today') {
+    conditions.push(
+      sql`(${tasks.status} != 'completed' OR ${tasks.completedAt} IS NULL OR ${tasks.completedAt} >= CURRENT_DATE)`,
+    );
+  } else if (archive === 'archive') {
+    conditions.push(eq(tasks.status, 'completed'));
+    conditions.push(sql`${tasks.completedAt} < CURRENT_DATE`);
   }
 
   const rows = await db
@@ -286,9 +305,24 @@ export async function updateTaskStatus(
     timestamp: new Date().toISOString(),
   });
 
+  // Sam-Loom #7 — track when a task was completed so the archive filter
+  // can hide it after today rolls over. Clear the stamp when transitioning
+  // away from 'completed' (reopen) so the row reappears in the active set.
+  const completedAt =
+    status === 'completed' && existing.status !== 'completed'
+      ? new Date()
+      : status !== 'completed' && existing.status === 'completed'
+        ? null
+        : undefined;
+
   const [row] = await db
     .update(tasks)
-    .set({ status, auditLog, updatedAt: new Date() })
+    .set({
+      status,
+      auditLog,
+      updatedAt: new Date(),
+      ...(completedAt !== undefined ? { completedAt } : {}),
+    })
     .where(eq(tasks.id, id))
     .returning();
   if (!row) return null;

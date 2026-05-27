@@ -5,13 +5,19 @@ import * as attachmentsService from '../services/task-attachments.service.js';
 import * as activityService from '../services/task-activity.service.js';
 
 export async function listTasks(req: Request, res: Response) {
-  const { status, priority, assignee, search } = req.query;
+  const { status, priority, assignee, search, archive } = req.query;
 
   const filters: taskService.TaskFilters = {};
   if (status) filters.status = status as string;
   if (priority) filters.priority = priority as string;
   if (assignee) filters.assignee = assignee as string;
   if (search) filters.search = search as string;
+  // Sam-Loom #7 — archive split. Defaults to 'today' so the FE doesn't
+  // have to opt in; pass ?archive=archive for the archived view and
+  // ?archive=all to disable the filter (used by stats / cross-cutting reports).
+  if (archive === 'today' || archive === 'all' || archive === 'archive') {
+    filters.archive = archive;
+  }
 
   const tasks = await taskService.listTasks(req.user!, filters);
 
