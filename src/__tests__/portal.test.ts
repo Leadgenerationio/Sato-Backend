@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import request from 'supertest';
 import app from '../index.js';
 import { db } from '../config/database.js';
@@ -11,6 +11,7 @@ import { invoices } from '../db/schema/invoices.js';
 import { agreements } from '../db/schema/agreements.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { adSpend } from '../db/schema/ad-spend.js';
+import { trafficSources } from '../db/schema/traffic-sources.js';
 
 let clientToken: string;
 let ownerToken: string;
@@ -571,7 +572,19 @@ describe('Portal API', () => {
   // PPL clients must NOT — that's the no-regression guard. Spend is scoped to
   // the client's own ad_spend rows (client_id) so it matches the agency-side
   // per-client total.
-  describe('Ad spend visibility — managed clients only', () => {
+  // Attribution goes through traffic_sources, NOT ad_spend.client_id (which
+  // is never populated — that's why the first cut showed empty in prod).
+  // Seed: a campaign linked to the demo client, traffic_sources mapping the
+  // Catchr accounts to it (FE-style platform names: 'facebook'/'google'),
+  // and ad_spend rows on the Catchr-style names ('facebook-ads'/'google-ads')
+  // with matching account_ids + NO client_id. The canonical-platform join
+  // bridges the two naming schemes.
+  describe('Ad spend visibility — managed clients only (traffic_sources attribution)', () => {
+    const CAMPAIGN_ID = '00000000-0000-0000-0000-0000000a5100';
+    const TS_FB = '00000000-0000-0000-0000-0000000a5101';
+    const TS_GOOGLE = '00000000-0000-0000-0000-0000000a5102';
+    const TS_FB_US = '00000000-0000-0000-0000-0000000a5103';
+    const TS_TABOOLA = '00000000-0000-0000-0000-0000000a5104';
     const FB_SPEND_ID = '00000000-0000-0000-0000-0000000a5001';
     const GOOGLE_SPEND_ID = '00000000-0000-0000-0000-0000000a5002';
     const FB_USD_SPEND_ID = '00000000-0000-0000-0000-0000000a5003';
@@ -579,33 +592,44 @@ describe('Portal API', () => {
     const today = new Date().toISOString().split('T')[0];
 
     beforeAll(async () => {
-      // Two GBP platforms (Google > Facebook so we can assert desc ordering)
-      // plus a USD Facebook row so we can assert (platform, currency) grouping
-      // never sums across currencies. The Taboola row carries an EMPTY currency
-      // (''), reproducing the Catchr data that crashed production: `'' ?? 'GBP'`
-      // at ingest doesn't catch empty strings, and the FE fed it straight into
-      // Intl.NumberFormat → RangeError.
+      await db.insert(campaigns).values({
+        id: CAMPAIGN_ID, name: 'Portal ad-spend test campaign', vertical: 'Solar Panels', status: 'active',
+      }).onConflictDoNothing();
+      await db.insert(clientCampaigns).values({ campaignId: CAMPAIGN_ID, clientId: DEMO_CLIENT_ID }).onConflictDoNothing();
+
+      // traffic_sources link the Catchr accounts to the client's campaign.
+      // Platform names are the FE-picker style; the canonical join maps them
+      // to the Catchr-style names on ad_spend.
+      await db.insert(trafficSources).values([
+        { id: TS_FB, campaignId: CAMPAIGN_ID, name: 'FB source', platform: 'facebook', accountId: 'act_portal_fb', accountIds: [], isActive: true },
+        { id: TS_GOOGLE, campaignId: CAMPAIGN_ID, name: 'Google source', platform: 'google', accountId: 'act_portal_google', accountIds: [], isActive: true },
+        { id: TS_FB_US, campaignId: CAMPAIGN_ID, name: 'FB US source', platform: 'facebook', accountId: 'act_portal_fb_us', accountIds: [], isActive: true },
+        { id: TS_TABOOLA, campaignId: CAMPAIGN_ID, name: 'Taboola source', platform: 'taboola', accountId: 'act_portal_taboola', accountIds: [], isActive: true },
+      ]).onConflictDoNothing();
+
+      // ad_spend on the Catchr-style platform names, matching account_ids, and
+      // crucially NO client_id. The Taboola row carries an EMPTY currency,
+      // reproducing the Catchr data that crashed production.
       await db
         .insert(adSpend)
         .values([
-          { id: FB_SPEND_ID, platform: 'Facebook Ads', authorizationId: 50011, accountId: 'act_portal_fb', campaignId: 'portal-fb', date: today, spend: '120.50', currency: 'GBP', clientId: DEMO_CLIENT_ID },
-          { id: GOOGLE_SPEND_ID, platform: 'Google Ads', authorizationId: 50012, accountId: 'act_portal_google', campaignId: 'portal-google', date: today, spend: '300.00', currency: 'GBP', clientId: DEMO_CLIENT_ID },
-          { id: FB_USD_SPEND_ID, platform: 'Facebook Ads', authorizationId: 50013, accountId: 'act_portal_fb_us', campaignId: 'portal-fb-us', date: today, spend: '50.00', currency: 'USD', clientId: DEMO_CLIENT_ID },
-          { id: BAD_CCY_SPEND_ID, platform: 'Taboola', authorizationId: 50014, accountId: 'act_portal_taboola', campaignId: 'portal-taboola', date: today, spend: '10.00', currency: '', clientId: DEMO_CLIENT_ID },
+          { id: FB_SPEND_ID, platform: 'facebook-ads', authorizationId: 50011, accountId: 'act_portal_fb', campaignId: 'portal-fb', date: today, spend: '120.50', currency: 'GBP' },
+          { id: GOOGLE_SPEND_ID, platform: 'google-ads', authorizationId: 50012, accountId: 'act_portal_google', campaignId: 'portal-google', date: today, spend: '300.00', currency: 'GBP' },
+          { id: FB_USD_SPEND_ID, platform: 'facebook-ads', authorizationId: 50013, accountId: 'act_portal_fb_us', campaignId: 'portal-fb-us', date: today, spend: '50.00', currency: 'USD' },
+          { id: BAD_CCY_SPEND_ID, platform: 'taboola', authorizationId: 50014, accountId: 'act_portal_taboola', campaignId: 'portal-taboola', date: today, spend: '10.00', currency: '' },
         ])
         .onConflictDoNothing();
     });
 
     afterAll(async () => {
-      await db.delete(adSpend).where(eq(adSpend.id, FB_SPEND_ID));
-      await db.delete(adSpend).where(eq(adSpend.id, GOOGLE_SPEND_ID));
-      await db.delete(adSpend).where(eq(adSpend.id, FB_USD_SPEND_ID));
-      await db.delete(adSpend).where(eq(adSpend.id, BAD_CCY_SPEND_ID));
-      // Restore default so other suites aren't surprised.
+      await db.delete(adSpend).where(inArray(adSpend.id, [FB_SPEND_ID, GOOGLE_SPEND_ID, FB_USD_SPEND_ID, BAD_CCY_SPEND_ID]));
+      await db.delete(trafficSources).where(inArray(trafficSources.id, [TS_FB, TS_GOOGLE, TS_FB_US, TS_TABOOLA]));
+      await db.delete(clientCampaigns).where(eq(clientCampaigns.campaignId, CAMPAIGN_ID));
+      await db.delete(campaigns).where(eq(campaigns.id, CAMPAIGN_ID));
       await db.update(clients).set({ clientType: 'ppl' }).where(eq(clients.id, DEMO_CLIENT_ID));
     });
 
-    it('managed client sees per-(platform, currency) ad spend, sorted by spend desc', async () => {
+    it('attributes per-(platform, currency) spend via traffic_sources, sorted by spend desc', async () => {
       await db.update(clients).set({ clientType: 'managed' }).where(eq(clients.id, DEMO_CLIENT_ID));
 
       const res = await request(app).get('/api/v1/portal/dashboard').set('Authorization', `Bearer ${clientToken}`);
@@ -614,23 +638,27 @@ describe('Portal API', () => {
       const rows = res.body.data.adSpendByPlatform as Array<{ platform: string; spend: number; currency: string }>;
       expect(Array.isArray(rows)).toBe(true);
 
-      // Key by (platform, currency) since a platform can appear in >1 currency.
+      // Display uses the raw ad_spend.platform (Catchr-style). Keyed by
+      // (platform, currency) since a platform can appear in >1 currency.
       const byKey = Object.fromEntries(rows.map((r) => [`${r.platform}|${r.currency}`, r.spend]));
-      expect(byKey['Facebook Ads|GBP']).toBe(120.5);
-      expect(byKey['Google Ads|GBP']).toBe(300);
+      expect(byKey['facebook-ads|GBP']).toBe(120.5);
+      expect(byKey['google-ads|GBP']).toBe(300);
       // The USD Facebook spend is a SEPARATE row — never summed into the GBP one.
-      expect(byKey['Facebook Ads|USD']).toBe(50);
+      expect(byKey['facebook-ads|USD']).toBe(50);
 
-      // Google (£300) — the largest single bucket — sorts first.
-      expect(rows[0].platform).toBe('Google Ads');
-      expect(rows[0].currency).toBe('GBP');
+      // google-ads (£300) sorts before facebook-ads GBP (£120.50). Assert the
+      // relative order of our known rows (robust to any unrelated dev rows).
+      const gIdx = rows.findIndex((r) => r.platform === 'google-ads' && r.currency === 'GBP');
+      const fIdx = rows.findIndex((r) => r.platform === 'facebook-ads' && r.currency === 'GBP');
+      expect(gIdx).toBeGreaterThanOrEqual(0);
+      expect(fIdx).toBeGreaterThan(gIdx);
     });
 
     it('does NOT sum spend across currencies (Facebook GBP and USD stay distinct)', async () => {
       await db.update(clients).set({ clientType: 'managed' }).where(eq(clients.id, DEMO_CLIENT_ID));
       const res = await request(app).get('/api/v1/portal/dashboard').set('Authorization', `Bearer ${clientToken}`);
       const rows = res.body.data.adSpendByPlatform as Array<{ platform: string; spend: number; currency: string }>;
-      const fbRows = rows.filter((r) => r.platform === 'Facebook Ads');
+      const fbRows = rows.filter((r) => r.platform === 'facebook-ads');
       // Two distinct rows, not one £170.50 mega-row.
       expect(fbRows).toHaveLength(2);
       expect(fbRows.some((r) => r.spend === 170.5)).toBe(false);
@@ -641,27 +669,38 @@ describe('Portal API', () => {
 
       const res = await request(app).get('/api/v1/portal/dashboard').set('Authorization', `Bearer ${clientToken}`);
       expect(res.status).toBe(200);
-      // Even though this client HAS ad_spend rows seeded, PPL must not see them.
+      // The data exists + is linked, but PPL must never see it.
       expect(res.body.data.adSpendByPlatform).toEqual([]);
     });
 
-    // Regression for the 2026-05-27 production incident: a Catchr row with an
-    // empty/invalid currency must NOT surface a malformed code (the FE feeds
-    // it into Intl.NumberFormat, which throws RangeError on a bad code).
+    it('does NOT attribute spend whose Catchr account is not linked via traffic_sources', async () => {
+      // Deactivate the Google traffic source — its spend must drop out, proving
+      // attribution is link-driven (not client_id / not "all spend").
+      await db.update(clients).set({ clientType: 'managed' }).where(eq(clients.id, DEMO_CLIENT_ID));
+      await db.update(trafficSources).set({ isActive: false }).where(eq(trafficSources.id, TS_GOOGLE));
+      try {
+        const res = await request(app).get('/api/v1/portal/dashboard').set('Authorization', `Bearer ${clientToken}`);
+        const rows = res.body.data.adSpendByPlatform as Array<{ platform: string; currency: string }>;
+        expect(rows.find((r) => r.platform === 'google-ads')).toBeUndefined();
+        // Facebook (still linked) remains.
+        expect(rows.find((r) => r.platform === 'facebook-ads')).toBeDefined();
+      } finally {
+        await db.update(trafficSources).set({ isActive: true }).where(eq(trafficSources.id, TS_GOOGLE));
+      }
+    });
+
+    // Regression for the 2026-05-27 production incident: an empty/invalid
+    // Catchr currency must surface as a valid code (the FE feeds it into
+    // Intl.NumberFormat, which throws RangeError on a bad code).
     it('sanitizes an empty/invalid currency to a valid 3-letter code', async () => {
       await db.update(clients).set({ clientType: 'managed' }).where(eq(clients.id, DEMO_CLIENT_ID));
       const res = await request(app).get('/api/v1/portal/dashboard').set('Authorization', `Bearer ${clientToken}`);
       expect(res.status).toBe(200);
 
       const rows = res.body.data.adSpendByPlatform as Array<{ platform: string; currency: string }>;
-      const taboola = rows.find((r) => r.platform === 'Taboola');
+      const taboola = rows.find((r) => r.platform === 'taboola');
       expect(taboola).toBeDefined();
-      // Empty currency collapses to a valid ISO-4217 code (client currency → GBP),
-      // never '' / null, so Intl.NumberFormat can't throw on it client-side.
       expect(taboola!.currency).toMatch(/^[A-Z]{3}$/);
-
-      // Every returned currency is a well-formed code — Intl.NumberFormat
-      // accepts all of them, so the dashboard can never crash on this data.
       for (const r of rows) {
         expect(() => new Intl.NumberFormat('en-GB', { style: 'currency', currency: r.currency })).not.toThrow();
       }
