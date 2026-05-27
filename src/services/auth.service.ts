@@ -24,6 +24,7 @@ type UserRow = {
   clientId: string | null;
   isActive: boolean;
   isPrimaryOwner: boolean;
+  isClientAdmin: boolean;
 };
 
 export function generateTokens(payload: AuthPayload): AuthTokens {
@@ -129,6 +130,7 @@ export async function loginUser(
     role: user.role,
     businessId: user.businessId ?? undefined,
     clientId: user.clientId ?? undefined,
+    isClientAdmin: user.isClientAdmin ?? false,
   };
 
   const tokens = generateTokens(tokenPayload);
@@ -159,5 +161,6 @@ function toUserResponse(user: UserRow): UserResponse {
     clientId: user.clientId,
     isActive: user.isActive,
     isPrimaryOwner: user.isPrimaryOwner ?? false,
+    isClientAdmin: user.isClientAdmin ?? false,
   };
 }

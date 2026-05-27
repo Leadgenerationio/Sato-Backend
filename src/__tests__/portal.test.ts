@@ -10,6 +10,8 @@ import { creativeApprovals } from '../db/schema/creative-approvals.js';
 import { invoices } from '../db/schema/invoices.js';
 import { agreements } from '../db/schema/agreements.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
+import { users } from '../db/schema/users.js';
+import { clientActivityLog } from '../db/schema/client-activity.js';
 
 let clientToken: string;
 let ownerToken: string;
@@ -436,6 +438,90 @@ describe('Portal API', () => {
   it('unauthenticated cannot access portal', async () => {
     const res = await request(app).get('/api/v1/portal/dashboard');
     expect(res.status).toBe(401);
+  });
+
+  // Manual agreement-status override (launch-blocker). Client admins can
+  // correct the misleading "action needed" alert; non-admin client users
+  // cannot. Audit + alert-suppression are the load-bearing behaviours.
+  describe('Agreement status manual override', () => {
+    let clientUserId: string;
+    let adminToken: string;
+
+    beforeAll(async () => {
+      const [u] = await db.select({ id: users.id }).from(users).where(eq(users.email, 'client@stato.app'));
+      clientUserId = u.id;
+    });
+
+    afterAll(async () => {
+      // Reset the admin flag + agreement state so other suites aren't surprised.
+      await db.update(users).set({ isClientAdmin: false }).where(eq(users.id, clientUserId));
+      await db.update(clients).set({ agreementSigned: false }).where(eq(clients.id, DEMO_CLIENT_ID));
+    });
+
+    it('non-admin client user is forbidden from changing status (403)', async () => {
+      await db.update(users).set({ isClientAdmin: false }).where(eq(users.id, clientUserId));
+      const res = await request(app)
+        .patch('/api/v1/portal/agreement/status')
+        .set('Authorization', `Bearer ${clientToken}`)
+        .send({ status: 'signed' });
+      expect(res.status).toBe(403);
+    });
+
+    it('dashboard exposes canManageAgreement=false for a non-admin', async () => {
+      await db.update(users).set({ isClientAdmin: false }).where(eq(users.id, clientUserId));
+      // Re-login so the JWT display claim reflects the flag.
+      const login = await request(app).post('/api/v1/auth/login').send({ email: 'client@stato.app', password: 'client123' });
+      const token = login.body.data.tokens.accessToken;
+      const res = await request(app).get('/api/v1/portal/dashboard').set('Authorization', `Bearer ${token}`);
+      expect(res.body.data.canManageAgreement).toBe(false);
+      expect(typeof res.body.data.agreementStatus).toBe('string');
+    });
+
+    it('client admin can set status to signed — suppresses the alert + writes an audit row', async () => {
+      // Flag the user as a client admin + re-login so the JWT carries the claim.
+      await db.update(users).set({ isClientAdmin: true }).where(eq(users.id, clientUserId));
+      await db.update(clients).set({ agreementSigned: false }).where(eq(clients.id, DEMO_CLIENT_ID));
+      const login = await request(app).post('/api/v1/auth/login').send({ email: 'client@stato.app', password: 'client123' });
+      adminToken = login.body.data.tokens.accessToken;
+
+      const before = Date.now();
+      const res = await request(app)
+        .patch('/api/v1/portal/agreement/status')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ status: 'signed' });
+      expect(res.status).toBe(200);
+      expect(res.body.data.agreementStatus).toBe('signed');
+      expect(res.body.data.agreementSigned).toBe(true);
+
+      // AC #6: the dashboard "action needed" alert is now suppressed.
+      const dash = await request(app).get('/api/v1/portal/dashboard').set('Authorization', `Bearer ${adminToken}`);
+      expect(dash.body.data.agreementSigned).toBe(true);
+      expect(dash.body.data.agreementStatus).toBe('signed');
+      expect(dash.body.data.canManageAgreement).toBe(true);
+
+      // AC #5: audit row captures actor + from/to.
+      const events = await db
+        .select()
+        .from(clientActivityLog)
+        .where(eq(clientActivityLog.clientId, DEMO_CLIENT_ID));
+      const change = events.find(
+        (e) => e.eventType === 'agreement_status_changed' &&
+          (e.payload as { to?: string } | null)?.to === 'signed' &&
+          new Date(e.createdAt ?? 0).getTime() >= before - 1000,
+      );
+      expect(change).toBeDefined();
+      expect(change!.actorUserId).toBe(clientUserId);
+      expect((change!.payload as { to?: string }).to).toBe('signed');
+    });
+
+    it('rejects an invalid status value (400)', async () => {
+      await db.update(users).set({ isClientAdmin: true }).where(eq(users.id, clientUserId));
+      const res = await request(app)
+        .patch('/api/v1/portal/agreement/status')
+        .set('Authorization', `Bearer ${clientToken}`)
+        .send({ status: 'totally-not-a-status' });
+      expect(res.status).toBe(400);
+    });
   });
 
   // ─── Asset approval (Roadmap C — solicitor compliance) ───

@@ -16,6 +16,10 @@ export const users = pgTable('users', {
   clientId: uuid('client_id').references(() => clients.id),
   isActive: boolean('is_active').notNull().default(true),
   isPrimaryOwner: boolean('is_primary_owner').notNull().default(false),
+  // Portal-side admin. Only client users with this flag may change the
+  // agreement status from their dashboard (others see it read-only). The
+  // role enum has no client-admin tier, so this per-user flag fills that gap.
+  isClientAdmin: boolean('is_client_admin').notNull().default(false),
   notificationPreferences: jsonb('notification_preferences'),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),

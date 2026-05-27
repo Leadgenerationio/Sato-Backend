@@ -7,6 +7,10 @@ function handlePortalError(err: unknown, res: Response, next: NextFunction) {
     res.status(403).json({ status: 'error', message: err.message });
     return;
   }
+  if (err instanceof Error && err.name === 'PortalValidationError') {
+    res.status(400).json({ status: 'error', message: err.message });
+    return;
+  }
   if (err instanceof approvalService.CreativeApprovalError) {
     const statusByCode: Record<string, number> = {
       NOT_FOUND: 404,
@@ -71,6 +75,20 @@ export async function agreement(req: Request, res: Response, next: NextFunction)
   try {
     const agreement = await portalService.getAgreement(req.user!);
     res.json({ status: 'success', data: { agreement } });
+  } catch (err) {
+    handlePortalError(err, res, next);
+  }
+}
+
+export async function updateAgreementStatus(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { status } = (req.body ?? {}) as { status?: unknown };
+    if (typeof status !== 'string') {
+      res.status(400).json({ status: 'error', message: 'Body must include a string "status".' });
+      return;
+    }
+    const result = await portalService.updateAgreementStatus(req.user!, status);
+    res.json({ status: 'success', data: result });
   } catch (err) {
     handlePortalError(err, res, next);
   }

@@ -27,6 +27,10 @@ export interface AuthPayload {
   role: UserRole;
   businessId?: string;
   clientId?: string;
+  // Portal-side admin (client users only). Carried in the JWT for cheap
+  // display-gating; mutations re-verify against the DB rather than trusting
+  // this claim. Optional so tokens issued before this field still parse.
+  isClientAdmin?: boolean;
 }
 
 export interface AuthTokens {
@@ -43,6 +47,7 @@ export interface UserResponse {
   clientId: string | null;
   isActive: boolean;
   isPrimaryOwner: boolean;
+  isClientAdmin: boolean;
 }
 
 export const updateProfileSchema = z.object({

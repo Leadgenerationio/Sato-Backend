@@ -8,7 +8,9 @@ import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { creatives } from '../db/schema/creatives.js';
 import { landingPages } from '../db/schema/landing-pages.js';
 import { agreements } from '../db/schema/agreements.js';
+import { users } from '../db/schema/users.js';
 import { getApprovalStatesForCreatives } from './creative-approval.service.js';
+import { logClientActivity } from './client-activity.service.js';
 import { computeDaysOverdue, deriveDisplayStatus } from './invoice.service.js';
 import type { AuthPayload } from '../types/index.js';
 
@@ -40,6 +42,13 @@ export interface PortalDashboard {
   overdueInvoices: number;
   totalOutstanding: number;
   agreementSigned: boolean;
+  // The effective agreement status shown on the dashboard. Derived from the
+  // signed flag + the latest visible agreement row. Manual overrides set it
+  // via PATCH /portal/agreement/status.
+  agreementStatus: PortalAgreementStatus;
+  // True only for client users flagged is_client_admin — drives whether the
+  // FE renders the editable status control vs a read-only badge.
+  canManageAgreement: boolean;
   recentLeads: { date: string; leads: number }[];
 }
 
@@ -92,9 +101,15 @@ export interface PortalCompliance {
   landingPages: { id: string; url: string; screenshotUrl: string | null; lastChecked: string }[];
 }
 
+// The client-facing agreement status set. Manual overrides (AC #3) may only
+// move between these values — they intentionally exclude the internal
+// workflow states (draft/cancelled/voided/deleted).
+export type PortalAgreementStatus = 'pending' | 'sent' | 'signed';
+export const PORTAL_AGREEMENT_STATUSES: readonly PortalAgreementStatus[] = ['pending', 'sent', 'signed'];
+
 export interface PortalAgreement {
   id: string;
-  status: 'pending' | 'sent' | 'signed';
+  status: PortalAgreementStatus;
   signedAt: string | null;
   documentUrl: string | null;
   clientName: string;
@@ -105,6 +120,13 @@ class PortalAccessError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'PortalAccessError';
+  }
+}
+
+export class PortalValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PortalValidationError';
   }
 }
 
@@ -136,6 +158,38 @@ async function loadClientOrThrow(clientId: string) {
   const [row] = await db.select().from(clients).where(eq(clients.id, clientId));
   if (!row) throw new PortalAccessError('Client not found');
   return row;
+}
+
+type ClientRow = Awaited<ReturnType<typeof loadClientOrThrow>>;
+type AgreementRow = typeof agreements.$inferSelect;
+
+// The single source of truth for the status shown to the client. The signed
+// flag on `clients` is what drives the "action needed" alert, so it wins; the
+// agreement row's timestamps distinguish sent vs pending when not yet signed.
+// Clients who signed outside Stato have no agreement row at all — they still
+// resolve correctly via the flag.
+function deriveAgreementStatus(client: ClientRow, agreementRow?: AgreementRow): PortalAgreementStatus {
+  if (client.agreementSigned) return 'signed';
+  if (agreementRow?.signedAt) return 'signed';
+  if (agreementRow?.sentAt) return 'sent';
+  return 'pending';
+}
+
+// Latest agreement row the client is allowed to see (excludes internal
+// workflow rows), most-progressed first — same selection getAgreement uses.
+async function latestVisibleAgreement(clientId: string): Promise<AgreementRow | undefined> {
+  const rows = await db
+    .select()
+    .from(agreements)
+    .where(eq(agreements.clientId, clientId))
+    .orderBy(desc(agreements.createdAt));
+  const visible = rows.filter(
+    (r) => !PORTAL_AGREEMENT_HIDDEN_STATUSES.has((r.status ?? 'pending').toLowerCase()),
+  );
+  if (visible.length === 0) return undefined;
+  const rank = (r: AgreementRow) => (r.signedAt ? 2 : r.sentAt ? 1 : 0);
+  visible.sort((a, b) => rank(b) - rank(a) || (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+  return visible[0];
 }
 
 export async function getDashboard(requester: AuthPayload): Promise<PortalDashboard> {
@@ -233,6 +287,8 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
     recentLeads.push({ date: dateStr, leads: deliveryMap.get(dateStr) ?? 0 });
   }
 
+  const agreementRow = await latestVisibleAgreement(clientId);
+
   return {
     companyName: client.companyName,
     clientType: client.clientType ?? 'ppl',
@@ -243,6 +299,10 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
     overdueInvoices,
     totalOutstanding: Math.round(totalOutstanding * 100) / 100,
     agreementSigned: client.agreementSigned ?? false,
+    agreementStatus: deriveAgreementStatus(client, agreementRow),
+    // Display-gate only — the JWT claim is enough to decide whether to render
+    // the control. The mutation endpoint re-checks against the DB.
+    canManageAgreement: requester.isClientAdmin === true,
     recentLeads,
   };
 }
@@ -636,4 +696,90 @@ export async function getAgreement(requester: AuthPayload): Promise<PortalAgreem
     clientName: client.companyName,
     terms: `Lead Generation Service Agreement between leadgeneration.io and ${client.companyName}. Lead price: £${client.leadPrice ?? '0.00'} per valid lead. Payment terms: ${client.paymentTermsDays ?? 30} days.`,
   };
+}
+
+export interface AgreementStatusUpdateResult {
+  agreementStatus: PortalAgreementStatus;
+  agreementSigned: boolean;
+}
+
+/**
+ * Manual agreement-status override from the client dashboard (launch-blocker).
+ * Lets a client admin correct the misleading "pending agreement, action
+ * needed" alert for agreements completed outside Stato.
+ *
+ * Authorisation (AC #2): the requester must be a client user flagged
+ * is_client_admin. We re-check that flag against the DB rather than trusting
+ * the JWT claim — a revoked admin must lose the capability immediately, not
+ * at token expiry. The admin must also belong to the client being edited.
+ *
+ * Effect (AC #6): sets clients.agreement_signed from the chosen status, which
+ * is what the dashboard "action needed" alert reads. If the client has a
+ * visible agreement row, its status + timestamps are stamped to match so the
+ * Agreement page stays consistent; a genuine signedAt is preserved rather
+ * than overwritten. Clients who signed outside Stato have no agreement row —
+ * the flag alone resolves their alert.
+ *
+ * Audit (AC #5): records who/from/to/when in client_activity_log.
+ */
+export async function updateAgreementStatus(
+  requester: AuthPayload,
+  targetStatus: string,
+): Promise<AgreementStatusUpdateResult> {
+  const clientId = requireClientId(requester);
+
+  const [actor] = await db
+    .select({ id: users.id, isClientAdmin: users.isClientAdmin, clientId: users.clientId })
+    .from(users)
+    .where(eq(users.id, requester.userId));
+  if (!actor || !actor.isClientAdmin) {
+    throw new PortalAccessError('Only a client admin can change the agreement status');
+  }
+  if (actor.clientId !== clientId) {
+    throw new PortalAccessError('Cannot change agreement status for a different client');
+  }
+
+  if (!PORTAL_AGREEMENT_STATUSES.includes(targetStatus as PortalAgreementStatus)) {
+    throw new PortalValidationError(
+      `Invalid agreement status "${targetStatus}". Allowed: ${PORTAL_AGREEMENT_STATUSES.join(', ')}.`,
+    );
+  }
+  const toStatus = targetStatus as PortalAgreementStatus;
+
+  const client = await loadClientOrThrow(clientId);
+  const agreementRow = await latestVisibleAgreement(clientId);
+  const fromStatus = deriveAgreementStatus(client, agreementRow);
+
+  // No-op: nothing to persist or audit if the status is unchanged.
+  if (fromStatus === toStatus) {
+    return { agreementStatus: toStatus, agreementSigned: client.agreementSigned ?? false };
+  }
+
+  const nowSigned = toStatus === 'signed';
+  await db
+    .update(clients)
+    .set({ agreementSigned: nowSigned, updatedAt: new Date() })
+    .where(eq(clients.id, clientId));
+
+  if (agreementRow) {
+    const patch: Partial<AgreementRow> = { status: toStatus };
+    if (toStatus === 'signed') {
+      patch.signedAt = agreementRow.signedAt ?? new Date();
+    } else if (toStatus === 'sent') {
+      patch.signedAt = null;
+      patch.sentAt = agreementRow.sentAt ?? new Date();
+    } else {
+      patch.signedAt = null;
+      patch.sentAt = null;
+    }
+    await db.update(agreements).set(patch).where(eq(agreements.id, agreementRow.id));
+  }
+
+  await logClientActivity(clientId, requester.userId, 'agreement_status_changed', {
+    from: fromStatus,
+    to: toStatus,
+    source: 'portal_manual_override',
+  });
+
+  return { agreementStatus: toStatus, agreementSigned: nowSigned };
 }
