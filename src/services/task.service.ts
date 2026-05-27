@@ -57,7 +57,16 @@ export interface Task {
 export interface TaskStats {
   total: number;
   completed: number;
+  // Sam — 27 May 2026: dashboard widget reads camelCase but the BE was
+  // only emitting snake_case + an all-time `completed` count, so the In
+  // Progress / Completed Today tiles silently rendered empty. Also no
+  // On Hold count at all. Adding camelCase aliases + completedToday
+  // (today-only) + onHold. snake_case keys retained for BC with the
+  // existing test that asserts `in_progress`.
+  inProgress: number;
   in_progress: number;
+  onHold: number;
+  completedToday: number;
   overdue: number;
   by_priority: { low: number; medium: number; high: number; urgent: number };
 }
@@ -458,10 +467,17 @@ export async function getTaskStats(requester: AuthPayload): Promise<TaskStats> {
     .from(tasks)
     .where(conditions.length ? and(...conditions) : undefined);
   const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const inProgressCount = rows.filter((t) => t.status === 'in_progress').length;
   return {
     total: rows.length,
     completed: rows.filter((t) => t.status === 'completed').length,
-    in_progress: rows.filter((t) => t.status === 'in_progress').length,
+    inProgress: inProgressCount,
+    in_progress: inProgressCount,
+    onHold: rows.filter((t) => t.status === 'on_hold').length,
+    completedToday: rows.filter(
+      (t) => t.status === 'completed' && t.completedAt && t.completedAt >= todayStart,
+    ).length,
     overdue: rows.filter((t) => t.status !== 'completed' && t.dueDate && t.dueDate < now).length,
     by_priority: {
       low: rows.filter((t) => t.priority === 'low').length,
