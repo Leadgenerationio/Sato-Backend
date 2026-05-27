@@ -181,6 +181,20 @@ export async function createPortalUser(req: Request, res: Response, next: NextFu
   }
 }
 
+export async function deletePortalUser(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = req.params.userId as string | undefined;
+    if (!userId) {
+      res.status(400).json({ status: 'error', message: 'userId is required' });
+      return;
+    }
+    const removed = await portalService.deletePortalUserForClient(req.user!, userId);
+    res.json({ status: 'success', data: { removed } });
+  } catch (err) {
+    handlePortalError(err, res, next);
+  }
+}
+
 export async function uploadExternalAgreement(req: Request, res: Response, next: NextFunction) {
   try {
     const { r2Key, fileName, sizeBytes } = req.body ?? {};

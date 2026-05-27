@@ -52,6 +52,8 @@ portalRoutes.post(
   portalController.createPortalUser,
 );
 
+portalRoutes.delete('/users/:userId', requireClientAdmin(), portalController.deletePortalUser);
+
 const externalAgreementSchema = z.object({
   body: z.object({
     r2Key: z.string().min(1).max(500),

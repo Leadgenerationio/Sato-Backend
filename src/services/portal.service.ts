@@ -742,6 +742,46 @@ export async function createPortalUserForClient(
   };
 }
 
+export async function deletePortalUserForClient(
+  requester: AuthPayload,
+  targetUserId: string,
+): Promise<{ id: string; email: string }> {
+  if (!requester.clientId) {
+    const err = new Error('Portal access requires a client user');
+    err.name = 'PortalAccessError';
+    throw err;
+  }
+  if (targetUserId === requester.userId) {
+    const err = new Error('You cannot remove your own account');
+    err.name = 'PortalAccessError';
+    throw err;
+  }
+  // Scope: target must belong to the requester's client. A forged userId
+  // for someone else's client returns 404 even though the row exists.
+  const [target] = await db
+    .select({ id: users.id, email: users.email, role: users.role })
+    .from(users)
+    .where(and(eq(users.id, targetUserId), eq(users.clientId, requester.clientId)));
+  if (!target) {
+    const err = new Error('User not found in your portal');
+    err.name = 'PortalAccessError';
+    throw err;
+  }
+  if (target.role !== 'client' && target.role !== 'client_admin') {
+    // Defensive — staff users should never have a clientId, but if a row is
+    // misconfigured the portal must not be able to delete a staff account.
+    const err = new Error('User not found in your portal');
+    err.name = 'PortalAccessError';
+    throw err;
+  }
+  await db.delete(users).where(eq(users.id, target.id));
+  logger.info(
+    { actorUserId: requester.userId, removedUserId: target.id, clientId: requester.clientId },
+    'portal_user_deleted',
+  );
+  return { id: target.id, email: target.email };
+}
+
 export interface ExternalAgreementInput {
   r2Key: string;
   fileName: string;
