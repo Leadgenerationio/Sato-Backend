@@ -28,7 +28,7 @@ export interface Task {
   description: string;
   assignee: string;
   priority: 'low' | 'medium' | 'high' | 'urgent';
-  status: 'todo' | 'in_progress' | 'completed' | 'blocked';
+  status: 'todo' | 'in_progress' | 'completed' | 'on_hold';
   dueDate: string;
   category: string;
   createdBy: string;
@@ -278,7 +278,7 @@ export async function updateTaskStatus(
   const [existing] = await db.select().from(tasks).where(eq(tasks.id, id));
   if (!existing) return null;
   const statusLabels: Record<string, string> = {
-    todo: 'To Do', in_progress: 'In Progress', completed: 'Completed', blocked: 'Blocked',
+    todo: 'To Do', in_progress: 'In Progress', completed: 'Completed', on_hold: 'On Hold',
   };
   const auditLog = ((existing.auditLog as AuditEntry[] | null) ?? []).concat({
     action: `Status changed to ${statusLabels[status] || status}`,
