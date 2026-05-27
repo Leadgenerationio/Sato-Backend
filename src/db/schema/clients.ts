@@ -13,10 +13,8 @@ export const billingWorkflowEnum = pgEnum('billing_workflow', [
   'weekly_auto', 'monthly_validated', 'custom',
 ]);
 
-// `managed` = bundled monthly retainer (no per-lead pricing). As of the
-// 2026-05-27 portal change, managed clients DO see their ad spend in the
-// portal (per-platform, MTD) — previously hidden. `ppl` = pay-per-lead
-// (default) and does NOT see ad spend. Drives portal widget/tab visibility.
+// `managed` = bundled monthly retainer (no per-lead pricing, no ad-spend visible).
+// `ppl` = pay-per-lead (default). Drives portal widget/tab visibility.
 export const clientTypeEnum = pgEnum('client_type', ['managed', 'ppl']);
 
 export const clients = pgTable('clients', {
