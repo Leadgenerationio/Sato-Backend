@@ -59,10 +59,23 @@ export async function updateTask(req: Request, res: Response) {
   res.json({ status: 'success', data: { task } });
 }
 
+// Sam-Loom (jam-video #5) — autocomplete source for the create form.
+export async function listCategories(req: Request, res: Response) {
+  const categories = await taskService.listDistinctCategories(req.user!);
+  res.json({ status: 'success', data: { categories } });
+}
+
 export async function deleteTask(req: Request, res: Response) {
-  const ok = await taskService.deleteTask(req.params.id as string, req.user!);
-  if (!ok) {
+  const result = await taskService.deleteTask(req.params.id as string, req.user!);
+  if (result === 'not_found') {
     res.status(404).json({ status: 'error', message: 'Task not found' });
+    return;
+  }
+  if (result === 'forbidden') {
+    // Sam-Loom (jam-video #10): "only the person that made the task can
+    // delete it." Surface a distinct 403 so the FE can toast a clear
+    // "creator only" message instead of conflating with 404 / 500.
+    res.status(403).json({ status: 'error', message: 'Only the task creator can delete this task' });
     return;
   }
   res.json({ status: 'success', data: { deleted: true } });

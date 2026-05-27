@@ -101,6 +101,9 @@ const internalRoles = requireRole('owner', 'ops_manager', 'finance_admin');
 taskRoutes.get('/', internalRoles, taskController.listTasks);
 taskRoutes.get('/stats', internalRoles, taskController.getTaskStats);
 taskRoutes.get('/templates', internalRoles, taskController.listTemplates);
+// Sam-Loom (jam-video #5) — distinct categories endpoint. Must be
+// registered before `/:id` or Express will treat 'categories' as a task id.
+taskRoutes.get('/categories', internalRoles, taskController.listCategories);
 taskRoutes.post('/templates/:id/create', internalRoles, validate(createFromTemplateSchema), taskController.createFromTemplate);
 // FE alias: POST /from-template with { templateId, assignee?, dueDate? } in body.
 taskRoutes.post('/from-template', internalRoles, validate(createFromTemplateSchema), taskController.createFromTemplate);

@@ -371,29 +371,57 @@ export async function updateTaskStatus(
 }
 
 /**
+ * Sam-Loom (jam-video #5) — "save categories as we make them so we've got
+ * them for the future." Returns the workspace's distinct non-empty
+ * categories sorted alphabetically so the create form can offer them as
+ * autocomplete suggestions. Scoped by businessId when the requester has
+ * one so a client-side business isolation matches the rest of the API.
+ */
+export async function listDistinctCategories(requester: AuthPayload): Promise<string[]> {
+  const conditions = [
+    sql`${tasks.category} IS NOT NULL`,
+    sql`${tasks.category} <> ''`,
+  ];
+  if (requester.businessId) {
+    conditions.push(eq(tasks.businessId, requester.businessId));
+  }
+  const rows = await db
+    .selectDistinct({ category: tasks.category })
+    .from(tasks)
+    .where(and(...conditions))
+    .orderBy(tasks.category);
+  return rows
+    .map((r) => r.category)
+    .filter((c): c is string => typeof c === 'string' && c.trim() !== '');
+}
+
+/**
  * Hard-delete a task and its dependants.
  *
- * Sam (2026-05-15 Loom): "there's no delete button" — soft-delete would have
- * been the safer default but the existing schema has no `deleted_at` column
- * and Sam wants the row truly gone (he's pruning the noise from old test
- * tasks, not archiving). FKs on subtasks / attachments / comments / activity
- * cascade; `parent_task_id` is `set null` so child-task rows survive an
- * accidental parent-delete and surface as top-level instead of orphaning.
- *
- * Returns `false` when the row doesn't exist so the controller can 404
- * cleanly without a separate read.
+ * Sam (2026-05-15 Loom): "there's no delete button" → first iteration added
+ * the route. Sam (jam-video, 2026-05-27): "only the person that made the
+ * task can delete it" → permission tightened so a non-creator now gets
+ * `forbidden` instead of silently destroying someone else's row. FKs on
+ * subtasks / attachments / comments / activity cascade; `parent_task_id`
+ * is `set null` so child-task rows survive an accidental parent-delete and
+ * surface as top-level instead of orphaning.
  */
-export async function deleteTask(id: string, requester?: AuthPayload): Promise<boolean> {
-  const result = await db.delete(tasks).where(eq(tasks.id, id)).returning({ id: tasks.id });
-  if (result.length === 0) return false;
+export type DeleteTaskResult = 'deleted' | 'not_found' | 'forbidden';
+
+export async function deleteTask(id: string, requester: AuthPayload): Promise<DeleteTaskResult> {
+  const [existing] = await db
+    .select({ createdBy: tasks.createdBy })
+    .from(tasks)
+    .where(eq(tasks.id, id));
+  if (!existing) return 'not_found';
+  if (existing.createdBy !== requester.email) return 'forbidden';
+
+  await db.delete(tasks).where(eq(tasks.id, id));
   // logActivity targets the deleted row's id which is now gone — emit a
   // workspace-level audit line via the logger instead. Activity table FK
   // would otherwise CASCADE this away.
-  logger.info(
-    { taskId: id, userId: requester?.userId ?? null },
-    'task_deleted',
-  );
-  return true;
+  logger.info({ taskId: id, userId: requester.userId }, 'task_deleted');
+  return 'deleted';
 }
 
 export async function addComment(

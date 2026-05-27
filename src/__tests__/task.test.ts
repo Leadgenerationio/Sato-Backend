@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 import app from '../index.js';
+import * as taskService from '../services/task.service.js';
+import type { AuthPayload } from '../types/index.js';
 
 let ownerToken: string;
 let seededTaskId: string;
@@ -164,6 +166,62 @@ describe('Task API', () => {
         .set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(404);
     });
+
+    // Sam-Loom (jam-video #10) — "only the person that made the task can
+    // delete it." The service must return 'forbidden' when the requester's
+    // email doesn't match the task's createdBy, and the row must still
+    // exist after. Tested at the service layer because the per-user login
+    // path is brittle against stale dev-DB password hashes; permission
+    // logic lives in the service either way.
+    it('service returns forbidden when a non-creator tries to delete', async () => {
+      const createRes = await request(app)
+        .post('/api/v1/tasks')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ title: `Owner-only ${Date.now()}`, assignee: 'Sam Owner', category: 'billing' });
+      const id = createRes.body.data.task.id as string;
+
+      const stranger: AuthPayload = {
+        userId: '99999999-0000-0000-0000-000000000099',
+        email: 'someone-else@stato.app',
+        role: 'finance_admin',
+      };
+
+      const result = await taskService.deleteTask(id, stranger);
+      expect(result).toBe('forbidden');
+
+      // Row must still exist after the forbidden attempt.
+      const getRes = await request(app)
+        .get(`/api/v1/tasks/${id}`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(getRes.status).toBe(200);
+    });
+
+    it('service returns deleted when the creator deletes their own task', async () => {
+      const createRes = await request(app)
+        .post('/api/v1/tasks')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ title: `Owner deletes own ${Date.now()}`, assignee: 'Sam Owner', category: 'billing' });
+      const id = createRes.body.data.task.id as string;
+
+      const owner: AuthPayload = {
+        userId: '11111111-0000-0000-0000-000000000001',
+        email: 'owner@stato.app',
+        role: 'owner',
+      };
+
+      const result = await taskService.deleteTask(id, owner);
+      expect(result).toBe('deleted');
+    });
+
+    it('service returns not_found for non-existent task', async () => {
+      const owner: AuthPayload = {
+        userId: '11111111-0000-0000-0000-000000000001',
+        email: 'owner@stato.app',
+        role: 'owner',
+      };
+      const result = await taskService.deleteTask(MISSING_UUID, owner);
+      expect(result).toBe('not_found');
+    });
   });
 
   describe('PATCH /api/v1/tasks/:id/status', () => {
@@ -209,6 +267,37 @@ describe('Task API', () => {
         text: 'Should fail',
       });
       expect(res.status).toBe(404);
+    });
+  });
+
+  // Sam-Loom (jam-video #5) — "save categories as we make them so we've
+  // got them for the future." The endpoint returns the DISTINCT non-empty
+  // categories the requester's workspace has ever used so the create form
+  // can offer them as autocomplete suggestions.
+  describe('GET /api/v1/tasks/categories', () => {
+    it('returns the distinct list of categories already in use', async () => {
+      // Seed some tasks with varying categories — categories used should
+      // appear once each, case-preserving.
+      await request(app).post('/api/v1/tasks').set('Authorization', `Bearer ${ownerToken}`).send({
+        title: `Cat-test-A ${Date.now()}`, assignee: 'Sam Owner', category: 'Marketing',
+      });
+      await request(app).post('/api/v1/tasks').set('Authorization', `Bearer ${ownerToken}`).send({
+        title: `Cat-test-B ${Date.now()}`, assignee: 'Sam Owner', category: 'Marketing',
+      });
+      await request(app).post('/api/v1/tasks').set('Authorization', `Bearer ${ownerToken}`).send({
+        title: `Cat-test-C ${Date.now()}`, assignee: 'Sam Owner', category: 'Compliance',
+      });
+
+      const res = await request(app)
+        .get('/api/v1/tasks/categories')
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.data.categories)).toBe(true);
+      expect(res.body.data.categories).toEqual(expect.arrayContaining(['Marketing', 'Compliance']));
+      // Distinct — "Marketing" must appear exactly once even though two
+      // tasks used it.
+      const marketingHits = res.body.data.categories.filter((c: string) => c === 'Marketing').length;
+      expect(marketingHits).toBe(1);
     });
   });
 
