@@ -574,16 +574,19 @@ describe('Portal API', () => {
   describe('Ad spend visibility — managed clients only', () => {
     const FB_SPEND_ID = '00000000-0000-0000-0000-0000000a5001';
     const GOOGLE_SPEND_ID = '00000000-0000-0000-0000-0000000a5002';
+    const FB_USD_SPEND_ID = '00000000-0000-0000-0000-0000000a5003';
     const today = new Date().toISOString().split('T')[0];
 
     beforeAll(async () => {
-      // Two platforms this month for the demo client. Google spend > Facebook
-      // so we can also assert the desc-by-spend ordering.
+      // Two GBP platforms (Google > Facebook so we can assert desc ordering)
+      // plus a USD Facebook row so we can assert (platform, currency) grouping
+      // never sums across currencies.
       await db
         .insert(adSpend)
         .values([
           { id: FB_SPEND_ID, platform: 'Facebook Ads', authorizationId: 50011, accountId: 'act_portal_fb', campaignId: 'portal-fb', date: today, spend: '120.50', currency: 'GBP', clientId: DEMO_CLIENT_ID },
           { id: GOOGLE_SPEND_ID, platform: 'Google Ads', authorizationId: 50012, accountId: 'act_portal_google', campaignId: 'portal-google', date: today, spend: '300.00', currency: 'GBP', clientId: DEMO_CLIENT_ID },
+          { id: FB_USD_SPEND_ID, platform: 'Facebook Ads', authorizationId: 50013, accountId: 'act_portal_fb_us', campaignId: 'portal-fb-us', date: today, spend: '50.00', currency: 'USD', clientId: DEMO_CLIENT_ID },
         ])
         .onConflictDoNothing();
     });
@@ -591,11 +594,12 @@ describe('Portal API', () => {
     afterAll(async () => {
       await db.delete(adSpend).where(eq(adSpend.id, FB_SPEND_ID));
       await db.delete(adSpend).where(eq(adSpend.id, GOOGLE_SPEND_ID));
+      await db.delete(adSpend).where(eq(adSpend.id, FB_USD_SPEND_ID));
       // Restore default so other suites aren't surprised.
       await db.update(clients).set({ clientType: 'ppl' }).where(eq(clients.id, DEMO_CLIENT_ID));
     });
 
-    it('managed client sees per-platform ad spend, sorted by spend desc', async () => {
+    it('managed client sees per-(platform, currency) ad spend, sorted by spend desc', async () => {
       await db.update(clients).set({ clientType: 'managed' }).where(eq(clients.id, DEMO_CLIENT_ID));
 
       const res = await request(app).get('/api/v1/portal/dashboard').set('Authorization', `Bearer ${clientToken}`);
@@ -604,14 +608,26 @@ describe('Portal API', () => {
       const rows = res.body.data.adSpendByPlatform as Array<{ platform: string; spend: number; currency: string }>;
       expect(Array.isArray(rows)).toBe(true);
 
-      const byPlatform = Object.fromEntries(rows.map((r) => [r.platform, r.spend]));
-      expect(byPlatform['Facebook Ads']).toBe(120.5);
-      expect(byPlatform['Google Ads']).toBe(300);
+      // Key by (platform, currency) since a platform can appear in >1 currency.
+      const byKey = Object.fromEntries(rows.map((r) => [`${r.platform}|${r.currency}`, r.spend]));
+      expect(byKey['Facebook Ads|GBP']).toBe(120.5);
+      expect(byKey['Google Ads|GBP']).toBe(300);
+      // The USD Facebook spend is a SEPARATE row — never summed into the GBP one.
+      expect(byKey['Facebook Ads|USD']).toBe(50);
 
-      // Google (£300) must sort before Facebook (£120.50).
-      const fbIdx = rows.findIndex((r) => r.platform === 'Facebook Ads');
-      const googleIdx = rows.findIndex((r) => r.platform === 'Google Ads');
-      expect(googleIdx).toBeLessThan(fbIdx);
+      // Google (£300) — the largest single bucket — sorts first.
+      expect(rows[0].platform).toBe('Google Ads');
+      expect(rows[0].currency).toBe('GBP');
+    });
+
+    it('does NOT sum spend across currencies (Facebook GBP and USD stay distinct)', async () => {
+      await db.update(clients).set({ clientType: 'managed' }).where(eq(clients.id, DEMO_CLIENT_ID));
+      const res = await request(app).get('/api/v1/portal/dashboard').set('Authorization', `Bearer ${clientToken}`);
+      const rows = res.body.data.adSpendByPlatform as Array<{ platform: string; spend: number; currency: string }>;
+      const fbRows = rows.filter((r) => r.platform === 'Facebook Ads');
+      // Two distinct rows, not one £170.50 mega-row.
+      expect(fbRows).toHaveLength(2);
+      expect(fbRows.some((r) => r.spend === 170.5)).toBe(false);
     });
 
     it('PPL client gets an empty adSpendByPlatform array (no regression)', async () => {

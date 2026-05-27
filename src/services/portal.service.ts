@@ -253,14 +253,20 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
   // client's own ad_spend rows (client_id) + this-month window so the figure
   // lines up with the agency-side getPnlSummary's per-client spend total and
   // the portal's existing "Leads This Month" window.
+  // Group by (platform, currency) — NOT platform alone — so we never sum
+  // across currencies. A client running ads in more than one currency (rare,
+  // but ad_spend.currency is per-row and not constrained to GBP) gets one row
+  // per (platform, currency) pair; the FE renders each with its own symbol
+  // and totals per-currency. Summing mixed currencies into a single figure
+  // would be silently wrong.
   const adSpendByPlatform: PortalAdSpendPlatform[] =
     (client.clientType ?? 'ppl') === 'managed'
       ? (
           await db
             .select({
               platform: adSpend.platform,
+              currency: adSpend.currency,
               spend: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text`,
-              currency: sql<string>`max(${adSpend.currency})`,
             })
             .from(adSpend)
             .where(
@@ -269,7 +275,7 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
                 gte(adSpend.date, monthStart.toISOString().split('T')[0]),
               ),
             )
-            .groupBy(adSpend.platform)
+            .groupBy(adSpend.platform, adSpend.currency)
             .orderBy(desc(sql`sum(${adSpend.spend}::numeric)`))
         ).map((r) => ({
           platform: r.platform,
