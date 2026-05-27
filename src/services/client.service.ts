@@ -567,6 +567,16 @@ export async function updateClient(id: string, data: UpdateClientInput, requeste
   if (data.leadbyteClientId !== undefined) patch.leadbyteClientId = data.leadbyteClientId;
   if (data.endoleCompanyId !== undefined) patch.endoleCompanyId = data.endoleCompanyId;
   if (data.xeroContactId !== undefined) patch.xeroContactId = data.xeroContactId;
+  // Sam (27 May 2026 portal meeting): admin override for clients who
+  // signed outside the platform. Flipping agreementSigned=true also
+  // bumps onboardingStatus past the 'pending' stage so the portal's
+  // "Action needed" banner clears.
+  if (data.agreementSigned !== undefined) {
+    patch.agreementSigned = data.agreementSigned;
+    if (data.agreementSigned && data.onboardingStatus === undefined) {
+      patch.onboardingStatus = 'agreement_signed' as ClientRow['onboardingStatus'];
+    }
+  }
 
   const [row] = await db
     .update(clients)

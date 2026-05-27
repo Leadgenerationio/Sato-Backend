@@ -70,6 +70,12 @@ const clientCoreFields = {
   leadbyteClientId: z.string().max(100).optional(),
   endoleCompanyId: z.string().max(100).optional(),
   xeroContactId: z.string().max(100).optional(),
+  // Sam (27 May 2026 portal meeting): Benson signed outside the platform
+  // so the dashboard's "Pending agreement, action needed" banner reads
+  // wrong. Need an admin-side override that flips agreementSigned=true
+  // without going through SignNow. Update endpoint accepts it directly;
+  // FE surfaces a "Mark agreement as signed" button on client detail.
+  agreementSigned: z.boolean().optional(),
   contacts: z.array(contactSchema).optional(),
 };
 
