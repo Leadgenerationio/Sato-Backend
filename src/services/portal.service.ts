@@ -7,7 +7,6 @@ import { campaigns } from '../db/schema/campaigns.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { invoices } from '../db/schema/invoices.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
-import { adSpend } from '../db/schema/ad-spend.js';
 import { creatives } from '../db/schema/creatives.js';
 import { landingPages } from '../db/schema/landing-pages.js';
 import { agreements } from '../db/schema/agreements.js';
@@ -15,6 +14,7 @@ import { getApprovalStatesForCreatives } from './creative-approval.service.js';
 import { computeDaysOverdue, deriveDisplayStatus } from './invoice.service.js';
 import { logger } from '../utils/logger.js';
 import { normalizeCurrencyCode } from '../utils/currency.js';
+import { canonicalPlatformSql } from '../utils/catchr-platform.js';
 import type { AuthPayload } from '../types/index.js';
 
 /**
@@ -33,6 +33,64 @@ async function campaignIdsForClient(clientId: string): Promise<string[]> {
     .from(clientCampaigns)
     .where(eq(clientCampaigns.clientId, clientId));
   return rows.map((r) => r.campaignId);
+}
+
+/**
+ * Per-platform ad spend attributed to a client's campaigns since `fromDateIso`.
+ *
+ * Attribution goes through `traffic_sources`, NOT `ad_spend.client_id` —
+ * `client_id` is never populated by the Catchr ingest (it's NULL on every
+ * row), so scoping by it returns nothing. The whole app attributes Catchr
+ * spend by joining ad_spend → traffic_sources on (canonical platform,
+ * account_id) → campaign (see aggregateCatchrSpend). Both platform sides go
+ * through canonicalPlatformSql() because Catchr writes 'facebook-ads' while
+ * traffic_sources hold 'facebook' — a raw `=` join silently yields zero rows.
+ * `account_ids` (jsonb) is unioned in for sources that roll up multiple
+ * Catchr accounts under one row.
+ *
+ * Grouped per (platform, currency) so we never sum across currencies.
+ * Self-maintaining: a campaign's spend appears the moment its Catchr account
+ * is linked via traffic_sources — no backfill, no client_id needed.
+ */
+async function aggregateClientAdSpendByPlatform(
+  campaignIds: string[],
+  fromDateIso: string,
+): Promise<Array<{ platform: string; currency: string | null; spend: number }>> {
+  if (campaignIds.length === 0) return [];
+  const adPlatform = sql.raw(canonicalPlatformSql('a.platform'));
+  const tsPlatform = sql.raw(canonicalPlatformSql('ts.platform'));
+  const idList = sql.join(campaignIds.map((id) => sql`${id}::uuid`), sql`, `);
+  const rows = (await db.execute(sql`
+    with source_accounts as (
+      select ${tsPlatform} as platform, ts.account_id as acc_id
+      from traffic_sources ts
+      where ts.campaign_id in (${idList})
+        and ts.is_active = true
+        and ts.account_id is not null
+        and ts.platform is not null
+      union
+      select ${tsPlatform} as platform, jsonb_array_elements_text(ts.account_ids) as acc_id
+      from traffic_sources ts
+      where ts.campaign_id in (${idList})
+        and ts.is_active = true
+        and ts.platform is not null
+    )
+    select a.platform as platform,
+           a.currency as currency,
+           coalesce(sum(a.spend::numeric), 0)::text as spend
+    from ad_spend a
+    join source_accounts sa
+      on ${adPlatform} = sa.platform
+     and a.account_id = sa.acc_id
+    where a.date >= ${fromDateIso}
+    group by a.platform, a.currency
+    order by sum(a.spend::numeric) desc
+  `)) as unknown as Array<{ platform: string; currency: string | null; spend: string }>;
+  return rows.map((r) => ({
+    platform: r.platform,
+    currency: r.currency,
+    spend: Math.round(Number(r.spend) * 100) / 100,
+  }));
 }
 
 export interface PortalAdSpendPlatform {
@@ -255,41 +313,22 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
     recentLeads.push({ date: dateStr, leads: deliveryMap.get(dateStr) ?? 0 });
   }
 
-  // Managed clients (bundled retainer) now see their ad spend in the portal.
-  // PPL clients never do — we short-circuit to an empty array without running
-  // the query, so there's zero behaviour change for them. Scope by the
-  // client's own ad_spend rows (client_id) + this-month window so the figure
-  // lines up with the agency-side getPnlSummary's per-client spend total and
-  // the portal's existing "Leads This Month" window.
-  // Group by (platform, currency) — NOT platform alone — so we never sum
-  // across currencies. A client running ads in more than one currency (rare,
-  // but ad_spend.currency is per-row and not constrained to GBP) gets one row
-  // per (platform, currency) pair; the FE renders each with its own symbol
-  // and totals per-currency. Summing mixed currencies into a single figure
-  // would be silently wrong.
+  // Managed clients (bundled retainer) now see their ad spend in the portal;
+  // PPL clients never do, so we short-circuit to an empty array. Attribution
+  // runs through traffic_sources (see aggregateClientAdSpendByPlatform) —
+  // ad_spend.client_id is never populated, so the previous direct-column
+  // scope returned nothing for every client. This is the same join the agency
+  // side uses, and is self-maintaining: spend appears the moment a campaign's
+  // Catchr account is linked. Window is MTD to match the portal's framing;
+  // grouped per (platform, currency) so mixed currencies are never summed.
   const adSpendByPlatform: PortalAdSpendPlatform[] =
     (client.clientType ?? 'ppl') === 'managed'
-      ? (
-          await db
-            .select({
-              platform: adSpend.platform,
-              currency: adSpend.currency,
-              spend: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text`,
-            })
-            .from(adSpend)
-            .where(
-              and(
-                eq(adSpend.clientId, clientId),
-                gte(adSpend.date, monthStart.toISOString().split('T')[0]),
-              ),
-            )
-            .groupBy(adSpend.platform, adSpend.currency)
-            .orderBy(desc(sql`sum(${adSpend.spend}::numeric)`))
-        ).map((r) => ({
-          platform: r.platform,
-          spend: Math.round(Number(r.spend) * 100) / 100,
-          currency: normalizeCurrencyCode(r.currency, client.currency ?? 'GBP'),
-        }))
+      ? (await aggregateClientAdSpendByPlatform(linkedCampaignIds, monthStart.toISOString().split('T')[0]))
+          .map((r) => ({
+            platform: r.platform,
+            spend: r.spend,
+            currency: normalizeCurrencyCode(r.currency, client.currency ?? 'GBP'),
+          }))
       : [];
 
   return {
