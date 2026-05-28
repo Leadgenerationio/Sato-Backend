@@ -16,6 +16,7 @@ type UserRow = {
   clientId: string | null;
   isActive: boolean;
   isPrimaryOwner: boolean;
+  allowedTabs: string[] | null;
   createdAt: Date | null;
   updatedAt: Date | null;
 };
@@ -58,8 +59,29 @@ export async function listUsers(requester: AuthPayload) {
     clientId: u.clientId,
     isActive: u.isActive,
     isPrimaryOwner: u.isPrimaryOwner,
+    // Sam jam-video #2 follow-up: surface per-portal-user tab visibility
+    // so the admin Portal Users card can pre-fill the Permissions dialog.
+    // client_admin masked to null since admins always see everything.
+    allowedTabs: u.role === 'client_admin' ? null : normalizeAllowedTabs(u.allowedTabs),
     createdAt: u.createdAt,
   }));
+}
+
+// Sam jam-video #2 follow-up: per-portal-user tab slugs the admin can
+// restrict a portal user to. Mirrors the portal FE nav slugs — keep in
+// sync with portal-layout.tsx and src/services/portal.service.ts.
+const PORTAL_TAB_SLUGS = ['leads', 'invoices', 'compliance', 'creatives', 'agreement'] as const;
+type PortalTabSlug = (typeof PORTAL_TAB_SLUGS)[number];
+
+function normalizeAllowedTabs(input: unknown): PortalTabSlug[] | null {
+  if (input === null || input === undefined) return null;
+  if (!Array.isArray(input)) return null;
+  const valid = new Set<string>(PORTAL_TAB_SLUGS);
+  const cleaned = input
+    .filter((s): s is string => typeof s === 'string')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => valid.has(s));
+  return Array.from(new Set(cleaned)) as PortalTabSlug[];
 }
 
 export async function createUser(
@@ -69,6 +91,7 @@ export async function createUser(
   role: UserRole,
   requester: AuthPayload,
   clientId?: string,
+  allowedTabs?: string[] | null,
 ) {
   if (await findByEmail(email)) {
     throw new ValidationError('Email already registered');
@@ -107,6 +130,12 @@ export async function createUser(
   }
 
   const passwordHash = await bcryptjs.hash(password, 12);
+  // Per-portal-user tab visibility — admin (Sam) picks which tabs a
+  // role='client' user can see. client_admin + staff roles ignore the
+  // column at render time (admins always see everything).
+  const normalizedTabs = role === 'client'
+    ? normalizeAllowedTabs(allowedTabs ?? null)
+    : null;
   const [inserted] = await db
     .insert(users)
     .values({
@@ -118,6 +147,7 @@ export async function createUser(
       clientId: resolvedClientId,
       isActive: true,
       isPrimaryOwner: false,
+      allowedTabs: normalizedTabs,
     })
     .returning();
 
@@ -256,6 +286,54 @@ export async function toggleUserActive(userId: string, requester: AuthPayload) {
 }
 
 // ─── Self-service profile + password ───
+// Sam (2026-05-28 follow-up to jam-video #2): admin-side per-portal-user
+// tab visibility. Refuses for staff roles (they don't see /portal at all)
+// and for client_admin (admins always see every tab — promote/demote is
+// the lever for client_admin). For role='client' the array overwrites
+// whatever's stored; null means full access.
+export async function updateUserAllowedTabs(
+  userId: string,
+  allowedTabs: string[] | null,
+  requester: AuthPayload,
+) {
+  const target = await findById(userId);
+  if (!target) throw new NotFoundError('User');
+
+  // Same business-scope guard as the other admin user mutations.
+  if (
+    requester.role !== 'owner' &&
+    requester.businessId &&
+    target.businessId !== requester.businessId
+  ) {
+    throw new ForbiddenError('Cannot modify users outside your business');
+  }
+
+  if (target.role !== 'client') {
+    throw new ForbiddenError(
+      target.role === 'client_admin'
+        ? 'Client admins always see every tab. Demote to a standard portal user first.'
+        : 'Per-tab visibility only applies to portal users (role=client).',
+    );
+  }
+
+  const normalized = normalizeAllowedTabs(allowedTabs);
+  const [updated] = await db
+    .update(users)
+    .set({ allowedTabs: normalized, updatedAt: new Date() })
+    .where(eq(users.id, userId))
+    .returning();
+  const u = updated as UserRow;
+
+  return {
+    id: u.id,
+    email: u.email,
+    name: u.name,
+    role: u.role,
+    isActive: u.isActive,
+    allowedTabs: normalized,
+  };
+}
+
 export async function updateOwnProfile(userId: string, name: string) {
   const user = await findById(userId);
   if (!user) throw new NotFoundError('User');

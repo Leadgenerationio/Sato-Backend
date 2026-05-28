@@ -11,13 +11,23 @@ export async function getUsers(req: Request, res: Response) {
 }
 
 export async function createUser(req: Request, res: Response) {
-  const { email, name, password, role, clientId } = req.body;
-  const user = await userService.createUser(email, name, password, role, req.user!, clientId);
+  const { email, name, password, role, clientId, allowedTabs } = req.body;
+  const user = await userService.createUser(email, name, password, role, req.user!, clientId, allowedTabs);
 
   res.status(201).json({
     status: 'success',
     data: { user },
   });
+}
+
+// Sam (2026-05-28 follow-up): admin sets which tabs a portal user sees,
+// from the Portal Users card on Client Detail. Service-layer no-ops if
+// the target is a client_admin (admins always see everything).
+export async function updateAllowedTabs(req: Request, res: Response) {
+  const id = req.params.id as string;
+  const { allowedTabs } = req.body;
+  const user = await userService.updateUserAllowedTabs(id, allowedTabs ?? null, req.user!);
+  res.json({ status: 'success', data: { user } });
 }
 
 export async function updateUser(req: Request, res: Response) {

@@ -7,7 +7,21 @@ import * as userController from '../controllers/user.controller.js';
 
 export const userRoutes: RouterType = Router();
 
-const roleEnum = z.enum(['owner', 'finance_admin', 'ops_manager', 'client', 'readonly']);
+// Sam (2026-05-27 portal meeting + jam-video #2): roleEnum gains
+// 'client_admin' so admin-side promote/demote on the Portal Users card
+// can target it. The Portal Users card has been PATCHing
+// `/users/:id/role` with `role: 'client_admin'` since 27 May, which was
+// silently failing zod validation here — fix.
+const roleEnum = z.enum(['owner', 'finance_admin', 'ops_manager', 'client', 'client_admin', 'readonly']);
+
+// Sam (2026-05-28 follow-up to jam-video #2): "when creating user Sam
+// don't have the option to choose which page is visible to the user.
+// Earlier it was there, when the user creation was in the client portal."
+// allowedTabs surfaces the per-portal-user tab visibility on the admin
+// side now that the client-portal self-service surface has been deleted.
+// Same tab slugs the portal-layout FE filter reads off the user record.
+const PORTAL_TAB_VALUES = ['leads', 'invoices', 'compliance', 'creatives', 'agreement'] as const;
+const allowedTabsSchema = z.array(z.enum(PORTAL_TAB_VALUES)).nullable().optional();
 
 const createUserSchema = z.object({
   body: z.object({
@@ -19,6 +33,10 @@ const createUserSchema = z.object({
     // whose data they're allowed to see. Must be omitted for internal roles.
     // Validated server-side in user.service.ts.
     clientId: z.string().uuid().optional(),
+    // Optional. null = full access (default for new portal users). Only
+    // meaningful for role='client'; ignored for staff + client_admin
+    // (admins always see everything).
+    allowedTabs: allowedTabsSchema,
   }),
 });
 
@@ -33,6 +51,12 @@ const updateRoleSchema = z.object({
   body: z.object({ role: roleEnum }),
 });
 
+const updateAllowedTabsSchema = z.object({
+  body: z.object({
+    allowedTabs: z.array(z.enum(PORTAL_TAB_VALUES)).nullable(),
+  }),
+});
+
 userRoutes.use(authMiddleware);
 userRoutes.use(requireRole('owner'));
 
@@ -41,3 +65,4 @@ userRoutes.post('/', validate(createUserSchema), userController.createUser);
 userRoutes.put('/:id', validate(updateUserSchema), userController.updateUser);
 userRoutes.patch('/:id/role', validate(updateRoleSchema), userController.updateRole);
 userRoutes.patch('/:id/toggle-active', userController.toggleActive);
+userRoutes.patch('/:id/allowed-tabs', validate(updateAllowedTabsSchema), userController.updateAllowedTabs);
