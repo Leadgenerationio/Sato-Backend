@@ -2,8 +2,9 @@ import { Router, type Router as RouterType, type Request, type Response, type Ne
 import { z } from 'zod';
 import { authMiddleware } from '../middleware/auth.middleware.js';
 import { requireRole } from '../middleware/rbac.middleware.js';
-import { getSignedUploadUrl, getSignedDownloadUrl, isR2Configured } from '../integrations/r2/r2-client.js';
+import { getSignedUploadUrl, getSignedDownloadUrl, isR2Configured, objectExists } from '../integrations/r2/r2-client.js';
 import { R2_FOLDERS, R2_FOLDER_TUPLE, type R2Folder } from '../integrations/r2/r2-types.js';
+import { assertCanReadObject, UploadAccessError } from '../services/upload-authz.service.js';
 
 export const uploadRoutes: RouterType = Router();
 
@@ -66,6 +67,27 @@ uploadRoutes.get(
         res.status(400).json({ status: 'error', message: 'Invalid folder or key' });
         return;
       }
+
+      // Authz BEFORE object-existence so we don't leak which keys exist via
+      // timing/error differences. Both denials and missing objects look
+      // identical from the outside (404 "Not found").
+      try {
+        await assertCanReadObject(req.user!, folder, key);
+      } catch (authErr) {
+        if (authErr instanceof UploadAccessError) {
+          res.status(404).json({ status: 'error', message: 'Not found' });
+          return;
+        }
+        throw authErr;
+      }
+
+      // Stale/mistyped key → return 404 too, so the FE toasts cleanly
+      // instead of opening a window that gets R2's NoSuchKey XML.
+      if (!(await objectExists(folder, key))) {
+        res.status(404).json({ status: 'error', message: 'Not found' });
+        return;
+      }
+
       const url = await getSignedDownloadUrl({ folder, key, expiresInSeconds: 3600 });
       res.json({ status: 'success', data: { url } });
     } catch (err) {

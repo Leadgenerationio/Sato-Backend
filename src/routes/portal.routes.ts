@@ -25,6 +25,10 @@ portalRoutes.get('/agreement', portalController.agreement);
 // at /portal/compliance does approve/reject; /portal/creatives is a
 // read-only display of what's already approved (Sam jam-video #2).
 portalRoutes.get('/creatives', portalController.creatives);
+// Per-creative signed URL. Lets the buyer open a creative without trusting
+// the stored upload-time fileUrl (which expires within an hour) or the FE's
+// guess at the R2 folder (legacy uploads went to misc/, not creatives/).
+portalRoutes.get('/creatives/:creativeId/signed-url', portalController.creativeSignedUrl);
 portalRoutes.post('/creatives/:creativeId/approve', portalController.approveCreative);
 portalRoutes.post('/creatives/:creativeId/reject', portalController.rejectCreative);
 portalRoutes.post('/creatives/:creativeId/request-changes', portalController.requestChangesCreative);

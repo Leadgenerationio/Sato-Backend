@@ -1,10 +1,11 @@
 import { env } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
-import type {
-  R2UploadOptions,
-  R2UploadResult,
-  R2SignedUrlOptions,
-  R2Folder,
+import {
+  R2_FOLDERS,
+  type R2UploadOptions,
+  type R2UploadResult,
+  type R2SignedUrlOptions,
+  type R2Folder,
 } from './r2-types.js';
 
 /**
@@ -33,6 +34,40 @@ function buildEndpoint(): string {
 function buildKey(folder: R2Folder, key: string): string {
   const safe = key.replace(/^\/+/, '');
   return `${folder}/${safe}`;
+}
+
+/**
+ * Recover the (folder, key) pair from a stored R2 file URL. Used to generate
+ * a fresh signed download URL for a creative without trusting any single
+ * caller-provided folder — staff and the portal each saw different folder
+ * names for the same row before this. The URL written at upload time always
+ * contains the real path, so it's the authoritative source.
+ *
+ * Handles both URL shapes the SDK produces:
+ *   path-style (forcePathStyle true) — `/<bucket>/<folder>/<key>`
+ *   vhost-style                       — `/<folder>/<key>`
+ *
+ * We find the first path segment matching a canonical R2_FOLDERS entry and
+ * take everything after it as the key. Returns null if the URL doesn't
+ * contain a recognised folder — callers should fall back to ('misc', r2Key)
+ * for legacy rows where every creative landed in misc/ before this fix.
+ */
+export function parseR2LocationFromFileUrl(
+  fileUrl: string | null | undefined,
+): { folder: R2Folder; key: string } | null {
+  if (!fileUrl) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(fileUrl);
+  } catch {
+    return null;
+  }
+  const segments = parsed.pathname.replace(/^\/+/, '').split('/').filter(Boolean);
+  const folderIdx = segments.findIndex((s) => (R2_FOLDERS as readonly string[]).includes(s));
+  if (folderIdx === -1) return null;
+  const key = segments.slice(folderIdx + 1).join('/');
+  if (!key) return null;
+  return { folder: segments[folderIdx] as R2Folder, key };
 }
 
 function buildPublicUrl(fullKey: string): string {
@@ -92,6 +127,29 @@ export async function uploadFile(opts: R2UploadOptions): Promise<R2UploadResult>
 
   logger.info({ fullKey, size, contentType: opts.contentType }, 'R2 upload complete');
   return { key: fullKey, bucket: env.R2_BUCKET, publicUrl: buildPublicUrl(fullKey), size };
+}
+
+/**
+ * HEAD the object to confirm it exists before we hand out a signed URL.
+ * Without this, a stale/mistyped r2_key still signs successfully and the
+ * caller gets R2's `<Error><Code>NoSuchKey/></Error>` XML when they open
+ * the URL — same UX failure mode as the original ExpiredRequest bug.
+ *
+ * Returns `true` in mock mode (no creds) so dev/test paths don't fail.
+ */
+export async function objectExists(folder: R2Folder, key: string): Promise<boolean> {
+  if (!isR2Configured()) return true;
+  const fullKey = buildKey(folder, key);
+  const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
+  const client = await getS3Client();
+  try {
+    await client.send(new HeadObjectCommand({ Bucket: env.R2_BUCKET, Key: fullKey }));
+    return true;
+  } catch (err) {
+    const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+    if (e?.name === 'NotFound' || e?.$metadata?.httpStatusCode === 404) return false;
+    throw err;
+  }
 }
 
 export async function getSignedDownloadUrl(opts: R2SignedUrlOptions): Promise<string> {

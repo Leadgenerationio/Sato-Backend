@@ -160,6 +160,30 @@ export async function creatives(req: Request, res: Response, next: NextFunction)
   }
 }
 
+/**
+ * Issue a fresh 1-hour signed download URL for one creative the buyer is
+ * allowed to open. Server picks the R2 folder from the stored file_url, so
+ * legacy rows uploaded into misc/ open without the buyer's FE needing to
+ * know that.
+ */
+export async function creativeSignedUrl(req: Request, res: Response, next: NextFunction) {
+  try {
+    const creativeId = req.params.creativeId as string | undefined;
+    if (!creativeId) {
+      res.status(400).json({ status: 'error', message: 'creativeId is required' });
+      return;
+    }
+    const url = await portalService.getCreativeSignedUrlForPortal(creativeId, req.user!);
+    if (!url) {
+      res.status(404).json({ status: 'error', message: 'Creative not found' });
+      return;
+    }
+    res.json({ status: 'success', data: { url } });
+  } catch (err) {
+    handlePortalError(err, res, next);
+  }
+}
+
 // Sam (2026-05-27 jam-video #2): the client-side self-service controllers
 // (listPortalUsers / createPortalUser / deletePortalUser /
 // updatePortalUserPermissions / uploadExternalAgreement) have been removed
