@@ -12,6 +12,7 @@ import { agreements } from '../db/schema/agreements.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { adSpend } from '../db/schema/ad-spend.js';
 import { trafficSources } from '../db/schema/traffic-sources.js';
+import { users } from '../db/schema/users.js';
 
 let clientToken: string;
 let ownerToken: string;
@@ -753,6 +754,172 @@ describe('Portal API', () => {
       // fileUrl is still surfaced for legacy/back-compat callers, but r2Key is
       // the one the portal should use for opening.
       expect(typeof item.fileUrl).toBe('string');
+    });
+  });
+
+  // Pins the per-creative signed-url endpoint that replaces the FE-side
+  // fetchFreshDownloadUrl(folder, key) call. The bug the buyer hit:
+  // every legacy creative was uploaded into the misc/ R2 folder (FileUpload
+  // folder="misc" on the agency page) but the portal asked for 'creatives/',
+  // which is the wrong folder. The FE then fell back to the stale
+  // upload-time fileUrl and surfaced R2's ExpiredRequest XML. The new
+  // endpoint resolves the real folder server-side from the stored
+  // file_url, so a misc-folder legacy row opens cleanly.
+  describe('GET /portal/creatives/:id/signed-url — server-resolved folder', () => {
+    const SU_CAMPAIGN_ID = '00000000-0000-0000-0000-0000000a6101';
+    const SU_LEGACY_MISC_ID = '00000000-0000-0000-0000-0000000a6102';
+    const SU_NEW_CREATIVES_ID = '00000000-0000-0000-0000-0000000a6103';
+    const SU_DRAFT_ID = '00000000-0000-0000-0000-0000000a6104';
+    const SU_UNLINKED_CAMPAIGN_ID = '00000000-0000-0000-0000-0000000a6105';
+    const SU_UNLINKED_CREATIVE_ID = '00000000-0000-0000-0000-0000000a6106';
+    // The DB-seeded owner can be reassigned to a different business between
+    // schema resets vs. what data/users.ts uses for in-memory seeds. Look up
+    // the owner's actual businessId so the staff-side test passes regardless
+    // of which seed ran last.
+    const SU_STAFF_CLIENT_ID = '00000000-0000-0000-0000-0000000a6107';
+
+    beforeAll(async () => {
+      const [ownerRow] = await db
+        .select({ businessId: users.businessId })
+        .from(users)
+        .where(eq(users.email, 'owner@stato.app'));
+      const ownerBusinessId = ownerRow?.businessId;
+      if (!ownerBusinessId) throw new Error('owner user not seeded — cannot run signed-url tests');
+
+      // A dedicated client in the owner's business so the staff campaignBelongsToBusiness
+      // check passes via the client_campaigns junction. Separate from DEMO_CLIENT_ID
+      // (which is tied to the portal-side LEADGEN_BUSINESS_ID and may differ).
+      await db.insert(clients).values({
+        id: SU_STAFF_CLIENT_ID,
+        businessId: ownerBusinessId,
+        companyName: 'Signed-url Test Co',
+        contactEmail: 'su-test@apex.test',
+        currency: 'GBP',
+        status: 'active',
+      }).onConflictDoNothing();
+
+      await db.insert(campaigns).values([
+        { id: SU_CAMPAIGN_ID, name: 'signed-url legacy campaign', vertical: 'Solar Panels', status: 'active' },
+        { id: SU_UNLINKED_CAMPAIGN_ID, name: 'unlinked campaign', vertical: 'Solar Panels', status: 'active' },
+      ]).onConflictDoNothing();
+      await db.insert(clientCampaigns).values([
+        { campaignId: SU_CAMPAIGN_ID, clientId: DEMO_CLIENT_ID },
+        { campaignId: SU_CAMPAIGN_ID, clientId: SU_STAFF_CLIENT_ID },
+      ]).onConflictDoNothing();
+      await db.insert(creatives).values([
+        {
+          // Legacy upload: file_url path says misc/ — pre-fix uploads landed there.
+          id: SU_LEGACY_MISC_ID,
+          campaignId: SU_CAMPAIGN_ID,
+          name: 'legacy-misc.png',
+          fileUrl: 'https://example.r2.cloudflarestorage.com/stato-production/misc/1779000000000-legacy.png?X-Amz-Expires=900&X-Amz-Signature=stale',
+          r2Key: '1779000000000-legacy.png',
+          type: 'image',
+          section: 'media',
+          status: 'approved',
+          submittedAt: new Date(),
+        },
+        {
+          // Post-fix upload: file_url path says creatives/.
+          id: SU_NEW_CREATIVES_ID,
+          campaignId: SU_CAMPAIGN_ID,
+          name: 'new-creatives.png',
+          fileUrl: 'https://example.r2.cloudflarestorage.com/stato-production/creatives/1779999999999-new.png?X-Amz-Expires=900&X-Amz-Signature=fresh',
+          r2Key: '1779999999999-new.png',
+          type: 'image',
+          section: 'media',
+          status: 'approved',
+          submittedAt: new Date(),
+        },
+        {
+          // Staff-only draft: must 404 even for the linked client.
+          id: SU_DRAFT_ID,
+          campaignId: SU_CAMPAIGN_ID,
+          name: 'staff-draft.png',
+          fileUrl: 'https://example.r2.cloudflarestorage.com/stato-production/creatives/draft.png?X-Amz-Expires=900&X-Amz-Signature=x',
+          r2Key: 'draft.png',
+          type: 'image',
+          section: 'media',
+          status: 'draft',
+        },
+        {
+          // Belongs to a campaign NOT linked to DEMO_CLIENT_ID — tenant isolation.
+          id: SU_UNLINKED_CREATIVE_ID,
+          campaignId: SU_UNLINKED_CAMPAIGN_ID,
+          name: 'other-client.png',
+          fileUrl: 'https://example.r2.cloudflarestorage.com/stato-production/misc/other.png?X-Amz-Expires=900&X-Amz-Signature=x',
+          r2Key: 'other.png',
+          type: 'image',
+          section: 'media',
+          status: 'approved',
+          submittedAt: new Date(),
+        },
+      ]).onConflictDoNothing();
+    });
+
+    afterAll(async () => {
+      await db.delete(creatives).where(inArray(creatives.id, [
+        SU_LEGACY_MISC_ID, SU_NEW_CREATIVES_ID, SU_DRAFT_ID, SU_UNLINKED_CREATIVE_ID,
+      ]));
+      await db.delete(clientCampaigns).where(eq(clientCampaigns.campaignId, SU_CAMPAIGN_ID));
+      await db.delete(campaigns).where(inArray(campaigns.id, [SU_CAMPAIGN_ID, SU_UNLINKED_CAMPAIGN_ID]));
+      await db.delete(clients).where(eq(clients.id, SU_STAFF_CLIENT_ID));
+    });
+
+    it('opens a legacy misc-folder creative (the bug Sam reported)', async () => {
+      const res = await request(app)
+        .get(`/api/v1/portal/creatives/${SU_LEGACY_MISC_ID}/signed-url`)
+        .set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+      expect(typeof res.body.data.url).toBe('string');
+      // Mock-mode R2 returns the buildPublicUrl path; either way the folder
+      // must be misc (recovered from the file_url path) — never 'creatives'.
+      expect(res.body.data.url).toMatch(/\/misc\//);
+      expect(res.body.data.url).not.toMatch(/\/creatives\//);
+    });
+
+    it('opens a new creatives-folder upload from the correct folder', async () => {
+      const res = await request(app)
+        .get(`/api/v1/portal/creatives/${SU_NEW_CREATIVES_ID}/signed-url`)
+        .set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.url).toMatch(/\/creatives\//);
+    });
+
+    it('404s a draft (staff-only — buyers must never resolve drafts by id)', async () => {
+      const res = await request(app)
+        .get(`/api/v1/portal/creatives/${SU_DRAFT_ID}/signed-url`)
+        .set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(404);
+    });
+
+    it('404s a creative whose campaign is not linked to the requesting client', async () => {
+      const res = await request(app)
+        .get(`/api/v1/portal/creatives/${SU_UNLINKED_CREATIVE_ID}/signed-url`)
+        .set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(404);
+    });
+
+    it('403s a staff token (portal-only route)', async () => {
+      const res = await request(app)
+        .get(`/api/v1/portal/creatives/${SU_LEGACY_MISC_ID}/signed-url`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(403);
+    });
+
+    it('staff /creatives/:id/signed-url also resolves the misc folder from file_url', async () => {
+      const res = await request(app)
+        .get(`/api/v1/creatives/${SU_LEGACY_MISC_ID}/signed-url`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.url).toMatch(/\/misc\//);
+    });
+
+    it('staff signed-url 403s a client token', async () => {
+      const res = await request(app)
+        .get(`/api/v1/creatives/${SU_LEGACY_MISC_ID}/signed-url`)
+        .set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(403);
     });
   });
 });

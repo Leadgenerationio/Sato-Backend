@@ -8,6 +8,8 @@ import { logger } from '../utils/logger.js';
 import { uuidOrNull } from '../utils/zod-helpers.js';
 import { resolveSatoCampaignId } from '../utils/resolve-campaign-id.js';
 import { notifyBuyersOfNewCreative } from './creative-review-email.service.js';
+import { getSignedDownloadUrl, parseR2LocationFromFileUrl } from '../integrations/r2/r2-client.js';
+import type { R2Folder } from '../integrations/r2/r2-types.js';
 import type { AuthPayload } from '../types/index.js';
 
 /**
@@ -167,6 +169,62 @@ export async function createCreative(
   });
 
   return toDto(row);
+}
+
+/**
+ * Resolve where a creative actually lives in R2 and generate a fresh signed
+ * download URL for it. Splits the responsibility that used to be on each FE
+ * page (portal hardcoded 'creatives'; agency hardcoded 'misc') — the server
+ * now owns folder selection per row, derived from the stored file_url. This
+ * is also the per-resource authz boundary backlog #4 was asking for: a staff
+ * caller can only resolve creatives in their own business.
+ *
+ * Folder selection order:
+ *   1. Parse the stored file_url path (authoritative — that's where the
+ *      file physically was written at upload time).
+ *   2. Fall back to ('misc', r2Key) if the URL is malformed but r2_key is
+ *      set — every legacy creative landed in misc/ because the upload UI
+ *      used folder="misc" until the same-day fix.
+ *   3. Return null if neither yields a usable (folder, key).
+ *
+ * Returns null on auth failure, missing row, or unresolvable location so the
+ * controller can map cleanly to 404.
+ */
+export async function getCreativeSignedUrlForStaff(
+  id: string,
+  requester: AuthPayload,
+): Promise<string | null> {
+  const businessId = requester.businessId;
+  if (!businessId) return null;
+
+  const [row] = await db
+    .select()
+    .from(creatives)
+    .where(and(eq(creatives.id, id), eq(creatives.isDeleted, false)));
+  if (!row) return null;
+  if (!(await campaignBelongsToBusiness(row.campaignId, businessId))) return null;
+
+  const location = resolveR2Location(row.fileUrl, row.r2Key);
+  if (!location) return null;
+  return getSignedDownloadUrl({ folder: location.folder, key: location.key, expiresInSeconds: 3600 });
+}
+
+/**
+ * Shared (folder, key) resolver used by both staff and portal signed-url
+ * paths. Exported so portal.service can reuse the same fallback rules without
+ * duplicating the parse logic.
+ */
+export function resolveR2Location(
+  fileUrl: string | null | undefined,
+  r2Key: string | null | undefined,
+): { folder: R2Folder; key: string } | null {
+  const parsed = parseR2LocationFromFileUrl(fileUrl);
+  if (parsed) return parsed;
+  // Pre-fix uploads all landed in misc/ via FileUpload folder="misc" on the
+  // agency campaign-detail page. If we couldn't recover a folder from the URL
+  // but the row has an r2_key, that's where it lives.
+  if (r2Key) return { folder: 'misc', key: r2Key };
+  return null;
 }
 
 /** Soft-delete: marks isDeleted=true. R2 file is left in place. */

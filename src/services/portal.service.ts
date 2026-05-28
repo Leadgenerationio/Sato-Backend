@@ -12,6 +12,8 @@ import { landingPages } from '../db/schema/landing-pages.js';
 import { agreements } from '../db/schema/agreements.js';
 import { getApprovalStatesForCreatives } from './creative-approval.service.js';
 import { computeDaysOverdue, deriveDisplayStatus } from './invoice.service.js';
+import { resolveR2Location } from './creative.service.js';
+import { getSignedDownloadUrl } from '../integrations/r2/r2-client.js';
 import { supplierNameToCatchrPlatform } from './report.service.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
@@ -1000,6 +1002,42 @@ export async function getCreativesBySection(requester: AuthPayload): Promise<Por
     media: items.filter((i) => i.section === 'media'),
     copyLp: items.filter((i) => i.section === 'copy_lp'),
   };
+}
+
+/**
+ * Portal-side per-creative signed URL. Mirrors the staff-side
+ * getCreativeSignedUrlForStaff but uses portal authz:
+ *
+ *   - requester must be a portal client (clientId set)
+ *   - creative's campaign must be linked to that client via client_campaigns
+ *   - creative must not be a staff-only draft
+ *
+ * The buyer never needed to know the R2 folder — every legacy creative
+ * landed in misc/ via the agency upload UI even though the portal asked for
+ * 'creatives/', which is what produced the ExpiredRequest XML (the FE fell
+ * back to the stale upload-time fileUrl). The server now resolves the
+ * folder from the stored file_url, so misc-folder legacy rows open fine.
+ */
+export async function getCreativeSignedUrlForPortal(
+  id: string,
+  requester: AuthPayload,
+): Promise<string | null> {
+  const clientId = requireClientId(requester);
+
+  const [row] = await db
+    .select()
+    .from(creatives)
+    .where(and(eq(creatives.id, id), eq(creatives.isDeleted, false)));
+  if (!row) return null;
+  // Staff drafts must never be visible to the buyer, even by direct id.
+  if (row.status === 'draft') return null;
+
+  const linkedCampaignIds = await campaignIdsForClient(clientId);
+  if (!linkedCampaignIds.includes(row.campaignId)) return null;
+
+  const location = resolveR2Location(row.fileUrl, row.r2Key);
+  if (!location) return null;
+  return getSignedDownloadUrl({ folder: location.folder, key: location.key, expiresInSeconds: 3600 });
 }
 
 export async function getAgreement(requester: AuthPayload): Promise<PortalAgreement | null> {

@@ -55,6 +55,21 @@ export async function remove(req: Request, res: Response) {
 }
 
 /**
+ * Issue a fresh 1-hour signed download URL for a single creative. The server
+ * picks the correct R2 folder from the stored file_url so the FE no longer
+ * has to know whether a row lives in creatives/ or misc/ (legacy uploads
+ * went to misc/ before the same-day folder fix).
+ */
+export async function signedUrl(req: Request, res: Response) {
+  const url = await creativeService.getCreativeSignedUrlForStaff(req.params.id as string, req.user!);
+  if (!url) {
+    res.status(404).json({ status: 'error', message: 'Creative not found' });
+    return;
+  }
+  res.json({ status: 'success', data: { url } });
+}
+
+/**
  * Admin-side audit trail for a single creative — every approve/reject row
  * with IP, UA, user, timestamp. This is the legal-evidence view used when
  * a client later disputes whether they approved an ad.
