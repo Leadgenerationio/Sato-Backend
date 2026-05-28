@@ -12,6 +12,10 @@ import { landingPages } from '../db/schema/landing-pages.js';
 import { agreements } from '../db/schema/agreements.js';
 import { getApprovalStatesForCreatives } from './creative-approval.service.js';
 import { computeDaysOverdue, deriveDisplayStatus } from './invoice.service.js';
+import { supplierNameToCatchrPlatform } from './report.service.js';
+import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
+import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
+import { cached } from '../utils/cache.js';
 import { logger } from '../utils/logger.js';
 import { normalizeCurrencyCode } from '../utils/currency.js';
 import { canonicalPlatformSql } from '../utils/catchr-platform.js';
@@ -624,6 +628,38 @@ async function aggregateClientAdSpendByCampaignAndPlatform(
   }));
 }
 
+// Sam (jam-video #2, 27-May-2026) ask 4b: drop the spend-share leads
+// estimate when we can use LeadByte's per-supplier truth instead. LeadByte
+// only exposes preset windows (`today`, `this_month`, `last_month`, etc.),
+// not arbitrary date ranges. When the portal's picker lands on one of
+// those presets we hit LeadByte; otherwise we fall back to the spend-share
+// estimate for that range. `last_year` from the FE preset list is not
+// supported by LeadByte's preset enum so it goes the estimate route.
+function isoDate(d: Date): string {
+  return d.toISOString().split('T')[0];
+}
+
+function rangeToLeadByteWindow(from: string, to: string): DeliveryWindow | null {
+  const now = new Date();
+  const today = isoDate(now);
+  const yesterday = isoDate(new Date(Date.now() - 86_400_000));
+  if (from === today && to === today) return 'today';
+  if (from === yesterday && to === yesterday) return 'yesterday';
+  // this_month → 1st of current month → today
+  const monthStart = isoDate(new Date(now.getFullYear(), now.getMonth(), 1));
+  if (from === monthStart && to === today) return 'this_month';
+  // last_month → 1st of last month → last day of last month
+  const lastMonthStart = isoDate(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+  const lastMonthEnd = isoDate(new Date(now.getFullYear(), now.getMonth(), 0));
+  if (from === lastMonthStart && to === lastMonthEnd) return 'last_month';
+  // ytd → Jan 1 → today
+  const ytdStart = `${now.getFullYear()}-01-01`;
+  if (from === ytdStart && to === today) return 'ytd';
+  // this_week (Mon → today) and last_week aren't surfaced by the portal's
+  // preset buttons so we don't probe for them — keeps the mapper tight.
+  return null;
+}
+
 export async function getLeadsBySource(
   requester: AuthPayload,
   range?: GetLeadsRange,
@@ -644,10 +680,10 @@ export async function getLeadsBySource(
     spendByCampaign.set(r.campaignId, (spendByCampaign.get(r.campaignId) ?? 0) + r.spend);
   }
 
-  // Walk each (campaign, platform, spend) row, allocate that campaign's
-  // leads proportionally to its share of the campaign's total spend in the
-  // same window. Single-source campaigns get the full lead count on that
-  // platform. Multi-source flag the result as estimated.
+  // Step 1 — spend-share allocation (the fallback): walk each
+  // (campaign, platform, spend) row, allocate that campaign's leads
+  // proportionally to its share of the campaign's total spend. Single-
+  // source campaigns get 100%; multi-source split by spend share.
   interface Bucket { leads: number; spend: number; currency: string; estimated: boolean; }
   const buckets = new Map<string, Bucket>();
   const platformsPerCampaign = new Map<string, Set<string>>();
@@ -676,6 +712,70 @@ export async function getLeadsBySource(
         currency: normalizeCurrencyCode(r.currency) ?? 'GBP',
         estimated: platformCount > 1,
       });
+    }
+  }
+
+  // Step 2 — if the date range exactly matches a LeadByte preset, OVERRIDE
+  // the lead count per platform with LeadByte's supplier-row truth. Goes
+  // through the same `cached('lb:supplier-spend:${window}:v1', …)` key
+  // that getUnifiedReport uses so we never make a duplicate LeadByte call
+  // when an operator is on the admin side at the same time. Spend numbers
+  // stay sourced from Catchr ad_spend (still deduped) — LeadByte's
+  // `payout` field is empty for ad-network suppliers, so we'd lose the
+  // numbers if we sourced both from there.
+  const lbWindow = rangeToLeadByteWindow(from, to);
+  if (lbWindow) {
+    try {
+      const supplierRows = await cached(
+        `lb:supplier-spend:${lbWindow}:v1`,
+        900,
+        () => leadbyte.getSupplierSpend(lbWindow),
+      );
+      // Tenant-scope by campaign name. The client's Stato campaigns carry
+      // the canonical LeadByte campaign name on `campaigns.name`, which
+      // matches the `campaignName` LeadByte returns. Look those names up
+      // for the requester's campaign set so we never read a row that
+      // belongs to another tenant's campaign.
+      const ownCampaignNames = new Set(
+        (await db
+          .select({ name: campaigns.name })
+          .from(campaigns)
+          .where(inArray(campaigns.id, linkedCampaignIds))
+        ).map((r) => r.name),
+      );
+
+      const lbLeadsByPlatform = new Map<string, number>();
+      for (const r of supplierRows) {
+        if (!ownCampaignNames.has(r.campaignName)) continue;
+        const canonicalPlatform = supplierNameToCatchrPlatform(r.supplierName);
+        if (!canonicalPlatform) continue;
+        lbLeadsByPlatform.set(
+          canonicalPlatform,
+          (lbLeadsByPlatform.get(canonicalPlatform) ?? 0) + r.leads,
+        );
+      }
+
+      // Overwrite per-platform leads in the existing buckets with the
+      // LeadByte truth. Drop the `estimated` flag — these are actuals now.
+      // Buckets that didn't get a LeadByte row keep the spend-share
+      // estimate (could happen for a platform with no LeadByte supplier
+      // configured, e.g. when only the Catchr side is connected).
+      for (const [key, b] of buckets.entries()) {
+        const platform = key.split('|')[0];
+        const lbLeads = lbLeadsByPlatform.get(platform);
+        if (lbLeads !== undefined) {
+          b.leads = lbLeads;
+          b.estimated = false;
+        }
+      }
+    } catch (err) {
+      // LeadByte hiccup → fall back to the spend-share estimate already
+      // computed in Step 1. Log once so we know when the override path
+      // misses (Sam will see "est." on the row).
+      logger.warn(
+        { err, lbWindow, clientId },
+        'portal getLeadsBySource: LeadByte supplier-spend fetch failed — keeping spend-share estimate',
+      );
     }
   }
 

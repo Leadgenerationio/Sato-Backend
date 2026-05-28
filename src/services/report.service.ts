@@ -66,7 +66,7 @@ function deliveryWindowToRange(win: DeliveryWindow): { from: string; to: string 
 // totalSpend=0 since no ad-network paid for them. Returns null also for
 // platforms Catchr supports but we haven't wired up (Outbrain, LinkedIn,
 // Snapchat, etc.) so we don't lookup a key that never returns rows.
-function supplierNameToCatchrPlatform(supplierName: string): string | null {
+export function supplierNameToCatchrPlatform(supplierName: string): string | null {
   const n = supplierName.toLowerCase().trim();
   if (!n) return null;
   if (n.includes('facebook') || n === 'meta' || n.includes('meta ads')) return 'facebook-ads';
