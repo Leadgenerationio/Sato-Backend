@@ -706,4 +706,53 @@ describe('Portal API', () => {
       }
     });
   });
+
+  // The portal Creatives tab opened R2 assets via the stored fileUrl, which is
+  // a presigned URL that expires (R2 returns the `ExpiredRequest` XML once the
+  // X-Amz-Expires window elapses). The FE now fetches a fresh signed URL by
+  // r2Key on every open — but that only works if the BE actually returns r2Key
+  // in the /portal/creatives response. Pin that here.
+  describe('Creatives response — r2Key for fresh signed URL', () => {
+    const C_CAMPAIGN_ID = '00000000-0000-0000-0000-0000000a6001';
+    const C_CREATIVE_ID = '00000000-0000-0000-0000-0000000a6002';
+    const C_R2_KEY = '1730000000-test-banner.png';
+
+    beforeAll(async () => {
+      await db.insert(campaigns).values({
+        id: C_CAMPAIGN_ID, name: 'r2Key test campaign', vertical: 'Solar Panels', status: 'active',
+      }).onConflictDoNothing();
+      await db.insert(clientCampaigns).values({ campaignId: C_CAMPAIGN_ID, clientId: DEMO_CLIENT_ID }).onConflictDoNothing();
+      await db.insert(creatives).values({
+        id: C_CREATIVE_ID,
+        campaignId: C_CAMPAIGN_ID,
+        name: 'test-banner.png',
+        // Stored fileUrl mimics a real (now-stale) presigned URL — exactly the
+        // shape that crashes once X-Amz-Expires elapses.
+        fileUrl: 'https://r2.example.com/creatives/test-banner.png?X-Amz-Expires=900&X-Amz-Signature=stale',
+        r2Key: C_R2_KEY,
+        type: 'image',
+        section: 'media',
+        status: 'approved',
+        submittedAt: new Date(),
+      }).onConflictDoNothing();
+    });
+
+    afterAll(async () => {
+      await db.delete(creatives).where(eq(creatives.id, C_CREATIVE_ID));
+      await db.delete(clientCampaigns).where(eq(clientCampaigns.campaignId, C_CAMPAIGN_ID));
+      await db.delete(campaigns).where(eq(campaigns.id, C_CAMPAIGN_ID));
+    });
+
+    it('returns r2Key on /portal/creatives so the FE can fetch a fresh signed URL', async () => {
+      const res = await request(app).get('/api/v1/portal/creatives').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+      const all = [...(res.body.data.media ?? []), ...(res.body.data.copyLp ?? [])];
+      const item = all.find((c: { id: string }) => c.id === C_CREATIVE_ID);
+      expect(item).toBeDefined();
+      expect(item.r2Key).toBe(C_R2_KEY);
+      // fileUrl is still surfaced for legacy/back-compat callers, but r2Key is
+      // the one the portal should use for opening.
+      expect(typeof item.fileUrl).toBe('string');
+    });
+  });
 });
