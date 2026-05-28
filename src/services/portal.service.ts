@@ -916,6 +916,12 @@ export interface PortalCreative {
   name: string;
   type: string;
   fileUrl: string;
+  // R2 object key (e.g. 'creatives/<uuid>.png'). Surfaced so the portal can
+  // ask for a fresh signed download URL on each open — fileUrl was the
+  // upload-time presigned URL, which expires (R2 returns the `ExpiredRequest`
+  // XML once the X-Amz-Expires window elapses). Nullable for legacy rows
+  // uploaded before r2Key was recorded.
+  r2Key: string | null;
   uploadedAt: string;
   section: 'media' | 'copy_lp';
   approval: {
@@ -950,6 +956,7 @@ export async function getCreativesBySection(requester: AuthPayload): Promise<Por
       name: creatives.name,
       type: creatives.type,
       fileUrl: creatives.fileUrl,
+      r2Key: creatives.r2Key,
       section: creatives.section,
       createdAt: creatives.createdAt,
     })
@@ -977,6 +984,7 @@ export async function getCreativesBySection(requester: AuthPayload): Promise<Por
       name: r.name,
       type: r.type ?? 'unknown',
       fileUrl: r.fileUrl,
+      r2Key: r.r2Key,
       uploadedAt: (r.createdAt ?? new Date()).toISOString(),
       section: (r.section as 'media' | 'copy_lp') ?? 'media',
       approval: {
