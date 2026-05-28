@@ -76,16 +76,21 @@ export async function assertCanReadObject(
 
 async function assertCanReadCreative(requester: AuthPayload, key: string): Promise<void> {
   // The creative's r2_key is the bare key (no folder prefix); look it up
-  // directly and walk to the owning client(s) via the campaign.
+  // directly and walk to the owning client(s) via the campaign. Soft-deleted
+  // rows are not openable by anyone — staff included.
   const [row] = await db
-    .select({ id: creatives.id, campaignId: creatives.campaignId })
+    .select({ id: creatives.id, campaignId: creatives.campaignId, status: creatives.status })
     .from(creatives)
-    .where(eq(creatives.r2Key, key))
+    .where(and(eq(creatives.r2Key, key), eq(creatives.isDeleted, false)))
     .limit(1);
   if (!row) throw new UploadAccessError();
 
   if (isPortal(requester.role)) {
     if (!requester.clientId) throw new UploadAccessError();
+    // Staff drafts are not buyer-visible. Mirrors the filter in
+    // portal.service.getCreativesBySection — without it, a portal client
+    // who guessed the key could open a draft via /uploads/signed-url.
+    if (row.status === 'draft') throw new UploadAccessError();
     // Must be one of THIS client's campaigns (via client_campaigns).
     const [link] = await db
       .select({ id: clientCampaigns.campaignId })
@@ -130,11 +135,16 @@ async function assertCanReadCreative(requester: AuthPayload, key: string): Promi
   throw new UploadAccessError();
 }
 
+// Agreement statuses portal users must never resolve a signed URL for —
+// mirrors PORTAL_AGREEMENT_HIDDEN_STATUSES in portal.service.ts so a buyer
+// who guessed a draft/cancelled/voided agreement's r2 key can't open it.
+const PORTAL_HIDDEN_AGREEMENT_STATUSES = new Set(['draft', 'cancelled', 'voided', 'deleted']);
+
 async function assertCanReadAgreement(requester: AuthPayload, key: string): Promise<void> {
   // The key can live in either `pdf_r2_key` (uploaded original) or
   // `populated_pdf_r2_key` (post-template populate). Check both.
   const [row] = await db
-    .select({ clientId: agreements.clientId })
+    .select({ clientId: agreements.clientId, status: agreements.status })
     .from(agreements)
     .where(or(eq(agreements.pdfR2Key, key), eq(agreements.populatedPdfR2Key, key)))
     .limit(1);
@@ -142,6 +152,9 @@ async function assertCanReadAgreement(requester: AuthPayload, key: string): Prom
   if (row) {
     if (isPortal(requester.role)) {
       if (requester.clientId !== row.clientId) throw new UploadAccessError();
+      if (PORTAL_HIDDEN_AGREEMENT_STATUSES.has((row.status ?? 'pending').toLowerCase())) {
+        throw new UploadAccessError();
+      }
       return;
     }
     if (isStaff(requester.role)) {

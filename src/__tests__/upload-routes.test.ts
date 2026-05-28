@@ -220,6 +220,73 @@ describe('GET /uploads/signed-url — per-resource authz', () => {
       .set('Authorization', `Bearer ${ownerToken}`);
     expect(res.status).toBe(404);
   });
+
+  // Status / soft-delete filters mirrored from the per-id endpoints. Without
+  // these, a portal client who guessed a key could open a staff-only draft
+  // or a soft-deleted asset via /uploads/signed-url even though the LIST
+  // endpoint correctly hides them.
+  describe('hidden-state filters', () => {
+    const UA_DRAFT_KEY = '1779100000010-draft.png';
+    const UA_DRAFT_CREATIVE_ID = '00000000-0000-0000-0000-0000000a7010';
+    const UA_DELETED_KEY = '1779100000011-deleted.png';
+    const UA_DELETED_CREATIVE_ID = '00000000-0000-0000-0000-0000000a7011';
+
+    beforeAll(async () => {
+      await db.insert(creatives).values([
+        {
+          id: UA_DRAFT_CREATIVE_ID,
+          campaignId: UA_OWN_CAMPAIGN_ID,
+          name: 'draft.png',
+          fileUrl: 'https://example.r2.cloudflarestorage.com/stato-production/creatives/draft.png?X-Amz-Expires=900&X-Amz-Signature=x',
+          r2Key: UA_DRAFT_KEY,
+          type: 'image',
+          section: 'media',
+          status: 'draft',
+        },
+        {
+          id: UA_DELETED_CREATIVE_ID,
+          campaignId: UA_OWN_CAMPAIGN_ID,
+          name: 'deleted.png',
+          fileUrl: 'https://example.r2.cloudflarestorage.com/stato-production/creatives/deleted.png?X-Amz-Expires=900&X-Amz-Signature=x',
+          r2Key: UA_DELETED_KEY,
+          type: 'image',
+          section: 'media',
+          status: 'approved',
+          isDeleted: true,
+          submittedAt: new Date(),
+        },
+      ]).onConflictDoNothing();
+    });
+
+    afterAll(async () => {
+      await db.delete(creatives).where(inArray(creatives.id, [UA_DRAFT_CREATIVE_ID, UA_DELETED_CREATIVE_ID]));
+    });
+
+    it("portal client 404s on a staff-only draft (can't open by guessing the key)", async () => {
+      const res = await request(app)
+        .get(`/api/v1/uploads/signed-url?folder=creatives&key=${UA_DRAFT_KEY}`)
+        .set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(404);
+    });
+
+    it('staff CAN open a draft (drafts are staff-visible during review)', async () => {
+      const res = await request(app)
+        .get(`/api/v1/uploads/signed-url?folder=creatives&key=${UA_DRAFT_KEY}`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+    });
+
+    it('nobody opens a soft-deleted creative', async () => {
+      const portalRes = await request(app)
+        .get(`/api/v1/uploads/signed-url?folder=creatives&key=${UA_DELETED_KEY}`)
+        .set('Authorization', `Bearer ${clientToken}`);
+      expect(portalRes.status).toBe(404);
+      const staffRes = await request(app)
+        .get(`/api/v1/uploads/signed-url?folder=creatives&key=${UA_DELETED_KEY}`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(staffRes.status).toBe(404);
+    });
+  });
 });
 
 describe('LeadByte time-slice dashboard routes', () => {
