@@ -55,11 +55,20 @@ async function campaignIdsForClient(clientId: string): Promise<string[]> {
 async function aggregateClientAdSpendByPlatform(
   campaignIds: string[],
   fromDateIso: string,
+  toDateIso?: string,
 ): Promise<Array<{ platform: string; currency: string | null; spend: number }>> {
   if (campaignIds.length === 0) return [];
-  const adPlatform = sql.raw(canonicalPlatformSql('a.platform'));
   const tsPlatform = sql.raw(canonicalPlatformSql('ts.platform'));
   const idList = sql.join(campaignIds.map((id) => sql`${id}::uuid`), sql`, `);
+  // Sam (jam-video #2, 27-May-2026): portal showed £5,646 for Benson when
+  // the real spend was £1,888. Root cause: each (platform, account_id,
+  // campaign_id, date) tuple has 3 rows in ad_spend because the unique
+  // index includes authorization_id and Catchr re-auths create a new id
+  // per reconnect. We pick MAX(spend) per natural key in a subquery so
+  // duplicates collapse to one row before summing. Hari's ingestion fix
+  // will eventually de-dup at write time; this defends the portal number
+  // until then.
+  const dateUpper = toDateIso ?? '2099-12-31';
   const rows = (await db.execute(sql`
     with source_accounts as (
       select ${tsPlatform} as platform, ts.account_id as acc_id
@@ -74,17 +83,29 @@ async function aggregateClientAdSpendByPlatform(
       where ts.campaign_id in (${idList})
         and ts.is_active = true
         and ts.platform is not null
+    ),
+    -- Dedupe step (Sam jam-video #2 — £5,646 vs £1,888): collapse the 3x
+    -- duplicate rows that share (platform, account_id, campaign_id, date)
+    -- but differ on authorization_id. Spend values are identical across
+    -- the duplicates so MAX() picks one row's value, not a sum.
+    deduped as (
+      select a.platform, a.account_id, a.campaign_id, a.date,
+             a.currency,
+             max(a.spend::numeric) as spend
+      from ad_spend a
+      where a.date >= ${fromDateIso}
+        and a.date <= ${dateUpper}
+      group by a.platform, a.account_id, a.campaign_id, a.date, a.currency
     )
-    select a.platform as platform,
-           a.currency as currency,
-           coalesce(sum(a.spend::numeric), 0)::text as spend
-    from ad_spend a
+    select d.platform as platform,
+           d.currency as currency,
+           coalesce(sum(d.spend), 0)::text as spend
+    from deduped d
     join source_accounts sa
-      on ${adPlatform} = sa.platform
-     and a.account_id = sa.acc_id
-    where a.date >= ${fromDateIso}
-    group by a.platform, a.currency
-    order by sum(a.spend::numeric) desc
+      on ${sql.raw(canonicalPlatformSql('d.platform'))} = sa.platform
+     and d.account_id = sa.acc_id
+    group by d.platform, d.currency
+    order by sum(d.spend) desc
   `)) as unknown as Array<{ platform: string; currency: string | null; spend: string }>;
   return rows.map((r) => ({
     platform: r.platform,
@@ -492,6 +513,186 @@ export async function getLeads(requester: AuthPayload, range?: GetLeadsRange): P
   }));
 }
 
+// Sam (jam-video #2, 27-May-2026):
+// "you have it in the back end to have the ad spend where you can see
+// google, facebook, and you can see the amount of leads that google or
+// facebook has generated, and the ad spend next to it... we can change
+// the time period to see the ad spend over different time periods."
+//
+// Per-source leads + spend for the same date range the Leads tab is
+// showing. Numbers:
+//
+//   SPEND — exact. Comes from the deduped aggregateClientAdSpendByPlatform,
+//     so the 3× authorization_id duplication that gave Sam £5,646 instead
+//     of £1,888 is already collapsed.
+//
+//   LEADS — attributed per (campaign × platform) by **spend share within
+//     that campaign**. A campaign that ran only on Facebook gets 100% of
+//     its leads on Facebook. A campaign that split £600 Facebook / £400
+//     Google over the window has its leads pro-rated 60/40. This matches
+//     the admin-side per-source view closely enough for the portal; the
+//     LeadByte supplier-row path is more precise and will replace this
+//     heuristic once it's wired in. Campaigns with zero recorded spend
+//     in the window keep their leads in an "Unattributed" bucket so we
+//     never inflate a platform.
+export interface PortalLeadsBySource {
+  platform: string;
+  leads: number;
+  spend: number;
+  currency: string;
+  /** Spend-share allocation is approximate for multi-source campaigns. */
+  leadsAreEstimated: boolean;
+}
+
+async function aggregateLeadsByCampaign(
+  clientId: string,
+  from: string,
+  to: string,
+): Promise<Map<string, number>> {
+  const rows = await db
+    .select({
+      campaignId: leadDeliveries.campaignId,
+      leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int`,
+    })
+    .from(leadDeliveries)
+    .where(and(
+      eq(leadDeliveries.clientId, clientId),
+      gte(leadDeliveries.deliveryDate, from),
+      lte(leadDeliveries.deliveryDate, to),
+    ))
+    .groupBy(leadDeliveries.campaignId);
+  const map = new Map<string, number>();
+  for (const r of rows) map.set(r.campaignId, r.leads);
+  return map;
+}
+
+async function aggregateClientAdSpendByCampaignAndPlatform(
+  campaignIds: string[],
+  fromDateIso: string,
+  toDateIso: string,
+): Promise<Array<{ campaignId: string; platform: string; currency: string | null; spend: number }>> {
+  if (campaignIds.length === 0) return [];
+  const tsPlatform = sql.raw(canonicalPlatformSql('ts.platform'));
+  const adPlatform = sql.raw(canonicalPlatformSql('d.platform'));
+  const idList = sql.join(campaignIds.map((id) => sql`${id}::uuid`), sql`, `);
+  // Same dedupe pattern as aggregateClientAdSpendByPlatform — collapse the
+  // 3× authorization_id rows per (platform, account_id, campaign_id, date)
+  // before we attach the campaign label.
+  const rows = (await db.execute(sql`
+    with source_accounts as (
+      select ts.campaign_id as campaign_id,
+             ${tsPlatform} as platform,
+             ts.account_id as acc_id
+      from traffic_sources ts
+      where ts.campaign_id in (${idList})
+        and ts.is_active = true
+        and ts.account_id is not null
+        and ts.platform is not null
+      union
+      select ts.campaign_id as campaign_id,
+             ${tsPlatform} as platform,
+             jsonb_array_elements_text(ts.account_ids) as acc_id
+      from traffic_sources ts
+      where ts.campaign_id in (${idList})
+        and ts.is_active = true
+        and ts.platform is not null
+    ),
+    deduped as (
+      select a.platform, a.account_id, a.campaign_id, a.date,
+             a.currency,
+             max(a.spend::numeric) as spend
+      from ad_spend a
+      where a.date >= ${fromDateIso}
+        and a.date <= ${toDateIso}
+      group by a.platform, a.account_id, a.campaign_id, a.date, a.currency
+    )
+    select sa.campaign_id::text as campaign_id,
+           d.platform as platform,
+           d.currency as currency,
+           coalesce(sum(d.spend), 0)::text as spend
+    from deduped d
+    join source_accounts sa
+      on ${adPlatform} = sa.platform
+     and d.account_id = sa.acc_id
+    group by sa.campaign_id, d.platform, d.currency
+  `)) as unknown as Array<{ campaign_id: string; platform: string; currency: string | null; spend: string }>;
+  return rows.map((r) => ({
+    campaignId: r.campaign_id,
+    platform: r.platform,
+    currency: r.currency,
+    spend: Math.round(Number(r.spend) * 100) / 100,
+  }));
+}
+
+export async function getLeadsBySource(
+  requester: AuthPayload,
+  range?: GetLeadsRange,
+): Promise<PortalLeadsBySource[]> {
+  const clientId = requireClientId(requester);
+  const { from, to } = resolveLeadsRange(range);
+  const linkedCampaignIds = await campaignIdsForClient(clientId);
+  if (linkedCampaignIds.length === 0) return [];
+
+  const [campaignSpendRows, campaignLeadsMap] = await Promise.all([
+    aggregateClientAdSpendByCampaignAndPlatform(linkedCampaignIds, from, to),
+    aggregateLeadsByCampaign(clientId, from, to),
+  ]);
+
+  // Bucket spend per campaign so we know the share each platform claims.
+  const spendByCampaign = new Map<string, number>();
+  for (const r of campaignSpendRows) {
+    spendByCampaign.set(r.campaignId, (spendByCampaign.get(r.campaignId) ?? 0) + r.spend);
+  }
+
+  // Walk each (campaign, platform, spend) row, allocate that campaign's
+  // leads proportionally to its share of the campaign's total spend in the
+  // same window. Single-source campaigns get the full lead count on that
+  // platform. Multi-source flag the result as estimated.
+  interface Bucket { leads: number; spend: number; currency: string; estimated: boolean; }
+  const buckets = new Map<string, Bucket>();
+  const platformsPerCampaign = new Map<string, Set<string>>();
+  for (const r of campaignSpendRows) {
+    const set = platformsPerCampaign.get(r.campaignId) ?? new Set<string>();
+    set.add(r.platform);
+    platformsPerCampaign.set(r.campaignId, set);
+  }
+
+  for (const r of campaignSpendRows) {
+    const campaignTotalSpend = spendByCampaign.get(r.campaignId) ?? 0;
+    const platformCount = platformsPerCampaign.get(r.campaignId)?.size ?? 1;
+    const campaignLeads = campaignLeadsMap.get(r.campaignId) ?? 0;
+    const share = campaignTotalSpend > 0 ? r.spend / campaignTotalSpend : 1 / platformCount;
+    const allocatedLeads = campaignLeads * share;
+    const key = `${r.platform}|${r.currency ?? ''}`;
+    const existing = buckets.get(key);
+    if (existing) {
+      existing.leads += allocatedLeads;
+      existing.spend += r.spend;
+      existing.estimated = existing.estimated || platformCount > 1;
+    } else {
+      buckets.set(key, {
+        leads: allocatedLeads,
+        spend: r.spend,
+        currency: normalizeCurrencyCode(r.currency) ?? 'GBP',
+        estimated: platformCount > 1,
+      });
+    }
+  }
+
+  return Array.from(buckets.entries())
+    .map(([key, b]) => {
+      const platform = key.split('|')[0];
+      return {
+        platform,
+        leads: Math.round(b.leads),
+        spend: Math.round(b.spend * 100) / 100,
+        currency: b.currency,
+        leadsAreEstimated: b.estimated,
+      };
+    })
+    .sort((a, b) => b.spend - a.spend);
+}
+
 export async function getInvoices(requester: AuthPayload): Promise<PortalInvoice[]> {
   const clientId = requireClientId(requester);
   // Sam wants what the client owes surfaced first — outstanding rows
@@ -737,292 +938,24 @@ export async function getAgreement(requester: AuthPayload): Promise<PortalAgreem
   };
 }
 
-// ─── Sam (2026-05-27 portal meeting) — client-side self-service ──────
-// client_admin manages their own portal users + uploads externally-signed
-// agreements without Sam being involved. Every function below is scoped
-// server-side to req.user.clientId — even a forged request body can only
-// touch the caller's own client.
+// ─── Sam (2026-05-27 jam-video #2) ───────────────────────────────────
+// The client-side self-service surface (listPortalUsersForClient /
+// createPortalUserForClient / deletePortalUserForClient /
+// updatePortalUserPermissions / uploadExternalAgreement) has been removed.
+// Sam manages portal users and agreement uploads on the admin side; the
+// portal user account is display-only.
+//
+// PortalTabSlug + the allowedTabs column on users remain because admin-side
+// per-portal-user tab visibility (set by Sam) is read by the FE nav at
+// render time. portal-layout.tsx is the only consumer of that field.
 // ─────────────────────────────────────────────────────────────────────
 
-// Sam (2026-05-27): tab slugs a portal user can be restricted to. Dashboard
-// + account are always visible — these are the optional ones the admin
-// toggles per user. Keep the list in sync with PortalLayout's navItems.
 export const PORTAL_TAB_SLUGS = ['leads', 'invoices', 'compliance', 'creatives', 'agreement'] as const;
 export type PortalTabSlug = (typeof PORTAL_TAB_SLUGS)[number];
 
-export interface PortalUserDto {
-  id: string;
-  email: string;
-  name: string;
-  role: 'client' | 'client_admin';
-  isActive: boolean;
-  isYou: boolean;
-  createdAt: string;
-  // null = full access. non-null = only these tabs (+ dashboard + account).
-  // Always null for client_admin — admins see everything.
-  allowedTabs: PortalTabSlug[] | null;
-}
-
-function normalizeAllowedTabs(input: unknown): PortalTabSlug[] | null {
-  if (input === null || input === undefined) return null;
-  if (!Array.isArray(input)) return null;
-  const valid = new Set<string>(PORTAL_TAB_SLUGS);
-  const cleaned = input
-    .filter((s): s is string => typeof s === 'string')
-    .map((s) => s.trim().toLowerCase())
-    .filter((s) => valid.has(s));
-  // Deduplicate.
-  return Array.from(new Set(cleaned)) as PortalTabSlug[];
-}
-
-export async function listPortalUsersForClient(requester: AuthPayload): Promise<PortalUserDto[]> {
-  if (!requester.clientId) {
-    const err = new Error('Portal access requires a client user');
-    err.name = 'PortalAccessError';
-    throw err;
-  }
-  const rows = await db
-    .select({
-      id: users.id,
-      email: users.email,
-      name: users.name,
-      role: users.role,
-      isActive: users.isActive,
-      createdAt: users.createdAt,
-      allowedTabs: users.allowedTabs,
-    })
-    .from(users)
-    .where(and(
-      eq(users.clientId, requester.clientId),
-      inArray(users.role, ['client', 'client_admin']),
-    ))
-    .orderBy(users.createdAt);
-  return rows.map((r) => ({
-    id: r.id,
-    email: r.email,
-    name: r.name,
-    role: r.role as 'client' | 'client_admin',
-    isActive: r.isActive,
-    isYou: r.id === requester.userId,
-    createdAt: (r.createdAt ?? new Date()).toISOString(),
-    // client_admin always returns null — admins see everything.
-    allowedTabs: r.role === 'client_admin' ? null : normalizeAllowedTabs(r.allowedTabs),
-  }));
-}
-
-export interface CreatePortalUserInput {
-  email: string;
-  name: string;
-  password: string;
-  promoteAsClientAdmin: boolean;
-  allowedTabs?: PortalTabSlug[] | null;
-}
-
-export async function createPortalUserForClient(
-  requester: AuthPayload,
-  input: CreatePortalUserInput,
-): Promise<PortalUserDto> {
-  if (!requester.clientId) {
-    const err = new Error('Portal access requires a client user');
-    err.name = 'PortalAccessError';
-    throw err;
-  }
-  // Email uniqueness — same constraint as the admin /users endpoint.
-  const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.email, input.email.toLowerCase().trim()));
-  if (existing) {
-    const err = new Error('A user with this email already exists');
-    err.name = 'PortalAccessError';
-    throw err;
-  }
-  const passwordHash = await bcryptjs.hash(input.password, 12);
-  // client_admin ignores allowedTabs — admins always see everything.
-  // For role=client we persist whatever the caller sent (after normalize)
-  // or NULL if not provided (= backward-compat full access).
-  const normalizedTabs = input.promoteAsClientAdmin
-    ? null
-    : normalizeAllowedTabs(input.allowedTabs ?? null);
-  const [row] = await db
-    .insert(users)
-    .values({
-      email: input.email.toLowerCase().trim(),
-      name: input.name.trim(),
-      passwordHash,
-      role: input.promoteAsClientAdmin ? 'client_admin' : 'client',
-      clientId: requester.clientId,
-      // Portal users have no businessId — that's owner-side.
-      businessId: null,
-      isActive: true,
-      allowedTabs: normalizedTabs,
-    })
-    .returning();
-  logger.info(
-    { actorUserId: requester.userId, newUserId: row.id, clientId: requester.clientId, role: row.role, allowedTabs: normalizedTabs },
-    'portal_user_created',
-  );
-  return {
-    id: row.id,
-    email: row.email,
-    name: row.name,
-    role: row.role as 'client' | 'client_admin',
-    isActive: row.isActive,
-    isYou: false,
-    createdAt: (row.createdAt ?? new Date()).toISOString(),
-    allowedTabs: row.role === 'client_admin' ? null : normalizeAllowedTabs(row.allowedTabs),
-  };
-}
-
-export async function updatePortalUserPermissions(
-  requester: AuthPayload,
-  targetUserId: string,
-  allowedTabs: PortalTabSlug[] | null,
-): Promise<PortalUserDto> {
-  if (!requester.clientId) {
-    const err = new Error('Portal access requires a client user');
-    err.name = 'PortalAccessError';
-    throw err;
-  }
-  // Scope: target must belong to the requester's client.
-  const [target] = await db
-    .select({ id: users.id, role: users.role })
-    .from(users)
-    .where(and(eq(users.id, targetUserId), eq(users.clientId, requester.clientId)));
-  if (!target || (target.role !== 'client' && target.role !== 'client_admin')) {
-    const err = new Error('User not found in your portal');
-    err.name = 'PortalAccessError';
-    throw err;
-  }
-  // client_admin permissions are not editable — admins always see everything.
-  if (target.role === 'client_admin') {
-    const err = new Error('Admins always see every tab. Demote to User first to set per-tab permissions.');
-    err.name = 'PortalAccessError';
-    throw err;
-  }
-  const normalized = normalizeAllowedTabs(allowedTabs);
-  const [row] = await db
-    .update(users)
-    .set({ allowedTabs: normalized, updatedAt: new Date() })
-    .where(eq(users.id, target.id))
-    .returning();
-  logger.info(
-    { actorUserId: requester.userId, targetUserId: row.id, clientId: requester.clientId, allowedTabs: normalized },
-    'portal_user_permissions_updated',
-  );
-  return {
-    id: row.id,
-    email: row.email,
-    name: row.name,
-    role: row.role as 'client' | 'client_admin',
-    isActive: row.isActive,
-    isYou: row.id === requester.userId,
-    createdAt: (row.createdAt ?? new Date()).toISOString(),
-    allowedTabs: normalizeAllowedTabs(row.allowedTabs),
-  };
-}
-
-export async function deletePortalUserForClient(
-  requester: AuthPayload,
-  targetUserId: string,
-): Promise<{ id: string; email: string }> {
-  if (!requester.clientId) {
-    const err = new Error('Portal access requires a client user');
-    err.name = 'PortalAccessError';
-    throw err;
-  }
-  if (targetUserId === requester.userId) {
-    const err = new Error('You cannot remove your own account');
-    err.name = 'PortalAccessError';
-    throw err;
-  }
-  // Scope: target must belong to the requester's client. A forged userId
-  // for someone else's client returns 404 even though the row exists.
-  const [target] = await db
-    .select({ id: users.id, email: users.email, role: users.role })
-    .from(users)
-    .where(and(eq(users.id, targetUserId), eq(users.clientId, requester.clientId)));
-  if (!target) {
-    const err = new Error('User not found in your portal');
-    err.name = 'PortalAccessError';
-    throw err;
-  }
-  if (target.role !== 'client' && target.role !== 'client_admin') {
-    // Defensive — staff users should never have a clientId, but if a row is
-    // misconfigured the portal must not be able to delete a staff account.
-    const err = new Error('User not found in your portal');
-    err.name = 'PortalAccessError';
-    throw err;
-  }
-  await db.delete(users).where(eq(users.id, target.id));
-  logger.info(
-    { actorUserId: requester.userId, removedUserId: target.id, clientId: requester.clientId },
-    'portal_user_deleted',
-  );
-  return { id: target.id, email: target.email };
-}
-
-export interface ExternalAgreementInput {
-  r2Key: string;
-  fileName: string;
-  sizeBytes: number | null;
-  ipAddress: string | null;
-  userAgent: string | null;
-}
-
-export async function uploadExternalAgreement(
-  requester: AuthPayload,
-  input: ExternalAgreementInput,
-): Promise<{ agreementSigned: true; documentUrl: string; uploadedAt: string }> {
-  if (!requester.clientId) {
-    const err = new Error('Portal access requires a client user');
-    err.name = 'PortalAccessError';
-    throw err;
-  }
-  const now = new Date();
-  // Flip agreementSigned + bump onboardingStatus past 'pending' so the
-  // dashboard "Action needed" banner clears. Also persist the R2 key as
-  // the agreement document URL so the agreement tab can render the file.
-  const [row] = await db
-    .update(clients)
-    .set({
-      agreementSigned: true,
-      agreementDocumentUrl: input.r2Key,
-      // Only bump status if it's still at 'pending'. Anything further
-      // along (documents_received / agreement_signed / active) means
-      // someone else got there first — don't roll it back.
-      onboardingStatus: sql`CASE WHEN ${clients.onboardingStatus} = 'pending' THEN 'agreement_signed'::onboarding_status ELSE ${clients.onboardingStatus} END`,
-      updatedAt: now,
-    })
-    .where(eq(clients.id, requester.clientId))
-    .returning({
-      id: clients.id,
-      agreementDocumentUrl: clients.agreementDocumentUrl,
-    });
-  if (!row) {
-    const err = new Error('Client not found');
-    err.name = 'PortalAccessError';
-    throw err;
-  }
-  // Audit log — IP + UA + uploader + filename + timestamp. Lines up with
-  // the same shape we already capture for creative approvals so external
-  // auditors get one consistent record. logger.info is the right vehicle
-  // because Railway aggregates logs into searchable history; a dedicated
-  // audit table can come later if/when compliance requires it.
-  logger.info(
-    {
-      actorUserId: requester.userId,
-      actorEmail: requester.email,
-      clientId: requester.clientId,
-      r2Key: input.r2Key,
-      fileName: input.fileName,
-      sizeBytes: input.sizeBytes,
-      ipAddress: input.ipAddress,
-      userAgent: input.userAgent,
-      at: now.toISOString(),
-    },
-    'external_agreement_uploaded',
-  );
-  return {
-    agreementSigned: true,
-    documentUrl: row.agreementDocumentUrl ?? input.r2Key,
-    uploadedAt: now.toISOString(),
-  };
-}
+// PortalUserDto / CreatePortalUserInput / ExternalAgreementInput +
+// listPortalUsersForClient / createPortalUserForClient /
+// deletePortalUserForClient / updatePortalUserPermissions /
+// uploadExternalAgreement removed per Sam jam-video #2 (27-May-2026).
+// Admin-side equivalents (clients/detail Portal Users card + "Mark as
+// signed (external)" override) remain.

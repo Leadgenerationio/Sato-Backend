@@ -42,8 +42,14 @@ export async function leads(req: Request, res: Response, next: NextFunction) {
     const from = typeof req.query.from === 'string' ? req.query.from : undefined;
     const to = typeof req.query.to === 'string' ? req.query.to : undefined;
     const range = portalService.resolveLeadsRange({ from, to });
-    const leads = await portalService.getLeads(req.user!, range);
-    res.json({ status: 'success', data: { leads, range } });
+    // Sam (jam-video #2): per-source ad-spend on the Leads tab, scoped to
+    // the same date range as the leads list. Empty array for PPL clients
+    // (no traffic_sources mapped) or when there's no spend in the window.
+    const [leads, bySource] = await Promise.all([
+      portalService.getLeads(req.user!, range),
+      portalService.getLeadsBySource(req.user!, range),
+    ]);
+    res.json({ status: 'success', data: { leads, range, bySource } });
   } catch (err) {
     handlePortalError(err, res, next);
   }
@@ -154,71 +160,7 @@ export async function creatives(req: Request, res: Response, next: NextFunction)
   }
 }
 
-// ─── Sam (2026-05-27 portal meeting) ─────────────────────────────────
-// Client-side self-service routes. client_admin manages portal users +
-// uploads externally-signed agreements without Sam being involved.
-// Every action is scoped server-side to req.user.clientId.
-// ─────────────────────────────────────────────────────────────────────
-
-export async function listPortalUsers(req: Request, res: Response, next: NextFunction) {
-  try {
-    const users = await portalService.listPortalUsersForClient(req.user!);
-    res.json({ status: 'success', data: { users } });
-  } catch (err) {
-    handlePortalError(err, res, next);
-  }
-}
-
-export async function createPortalUser(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { email, name, password, promoteAsClientAdmin } = req.body ?? {};
-    const user = await portalService.createPortalUserForClient(req.user!, {
-      email, name, password, promoteAsClientAdmin: !!promoteAsClientAdmin,
-    });
-    res.status(201).json({ status: 'success', data: { user } });
-  } catch (err) {
-    handlePortalError(err, res, next);
-  }
-}
-
-export async function deletePortalUser(req: Request, res: Response, next: NextFunction) {
-  try {
-    const userId = req.params.userId as string | undefined;
-    if (!userId) {
-      res.status(400).json({ status: 'error', message: 'userId is required' });
-      return;
-    }
-    const removed = await portalService.deletePortalUserForClient(req.user!, userId);
-    res.json({ status: 'success', data: { removed } });
-  } catch (err) {
-    handlePortalError(err, res, next);
-  }
-}
-
-export async function updatePortalUserPermissions(req: Request, res: Response, next: NextFunction) {
-  try {
-    const userId = req.params.userId as string | undefined;
-    if (!userId) {
-      res.status(400).json({ status: 'error', message: 'userId is required' });
-      return;
-    }
-    const { allowedTabs } = req.body ?? {};
-    const user = await portalService.updatePortalUserPermissions(req.user!, userId, allowedTabs ?? null);
-    res.json({ status: 'success', data: { user } });
-  } catch (err) {
-    handlePortalError(err, res, next);
-  }
-}
-
-export async function uploadExternalAgreement(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { r2Key, fileName, sizeBytes } = req.body ?? {};
-    const { ipAddress, userAgent } = captureRequestMetadata(req);
-    const result = await portalService.uploadExternalAgreement(req.user!, {
-      r2Key, fileName, sizeBytes: sizeBytes ?? null, ipAddress, userAgent,
-    });
-    res.status(201).json({ status: 'success', data: result });
-  } catch (err) {
-    handlePortalError(err, res, next);
-  }
-}
+// Sam (2026-05-27 jam-video #2): the client-side self-service controllers
+// (listPortalUsers / createPortalUser / deletePortalUser /
+// updatePortalUserPermissions / uploadExternalAgreement) have been removed
+// — Sam manages portal users and agreement uploads from the admin side.
