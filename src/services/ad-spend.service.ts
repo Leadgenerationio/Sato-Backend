@@ -60,6 +60,39 @@ export function __resetDeadAccountCacheForTests(): void {
   KNOWN_DEAD_ACCOUNTS.clear();
 }
 
+/**
+ * Defensive deduped sum of `ad_spend.spend` over a date range.
+ *
+ * Sam jam-video #2 (27-May-2026): Catchr's OAuth model rotates
+ * `authorization_id` on every reconnect, and the `ad_spend` unique index
+ * includes it — so each natural row (platform, account_id, campaign_id,
+ * date) ends up with N copies, one per reconnect. The portal showed
+ * Google £5,646 instead of £1,888 for Benson because of this. The admin
+ * dashboard + unified report were summing the same triple-counted rows.
+ *
+ * This helper builds a Drizzle SQL fragment that collapses the duplicates
+ * by taking MAX(spend) per natural key BEFORE summing. The spend value is
+ * identical across duplicates so MAX picks one row's value, never a sum.
+ *
+ * Use as a scalar subquery in a select, or as the right-hand side of a
+ * column. Permanent ingestion fix (drop authorization_id from the unique
+ * index + backfill DELETE) is Hari's piece; this defends the read-path
+ * until then.
+ */
+export function dedupedSpendSumSql(
+  dateFromIso: string,
+  dateToIso: string,
+): ReturnType<typeof sql<string>> {
+  return sql<string>`coalesce((
+    select sum(d.spend)::text from (
+      select max(spend::numeric) as spend
+      from ad_spend
+      where date >= ${dateFromIso} and date <= ${dateToIso}
+      group by platform, account_id, campaign_id, date
+    ) d
+  ), '0')`;
+}
+
 export interface AdSpendFilters {
   from?: string;          // YYYY-MM-DD inclusive
   to?: string;            // YYYY-MM-DD inclusive

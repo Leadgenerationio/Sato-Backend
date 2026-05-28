@@ -582,18 +582,28 @@ export async function getSupplierPerformance(
   const platforms = [...new Set(catchrPlatformKey.values())];
   if (platforms.length > 0) {
     const { from, to } = deliveryWindowToRange(window);
-    const catchrRows = await db
-      .select({
-        platform: adSpend.platform,
-        spend: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text`,
-      })
-      .from(adSpend)
-      .where(and(
-        inArray(adSpend.platform, platforms),
-        gte(adSpend.date, from),
-        lte(adSpend.date, to),
-      ))
-      .groupBy(adSpend.platform);
+    // Sam jam-video #2 (27-May-2026): Catchr re-auths leave 3 rows per
+    // natural key in ad_spend. Dedupe on (platform, account_id,
+    // campaign_id, date) via MAX(spend) BEFORE summing — the displayed
+    // Google number flips from £64,939 to £28,938 once the duplicates
+    // are collapsed. Permanent ingestion fix is Hari's; this defends the
+    // unified report's per-platform sum in the meantime.
+    const idList = sql.join(platforms.map((p) => sql`${p}`), sql`, `);
+    const catchrRowsRaw = (await db.execute(sql`
+      with deduped as (
+        select platform, account_id, campaign_id, date,
+               max(spend::numeric) as spend
+        from ad_spend
+        where platform in (${idList})
+          and date >= ${from}
+          and date <= ${to}
+        group by platform, account_id, campaign_id, date
+      )
+      select platform, coalesce(sum(spend), 0)::text as spend
+      from deduped
+      group by platform
+    `)) as unknown as Array<{ platform: string; spend: string }>;
+    const catchrRows = catchrRowsRaw;
 
     const catchrSpendByPlatform = new Map(
       catchrRows.map((r) => [r.platform, Number(r.spend)]),

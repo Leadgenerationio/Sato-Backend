@@ -8,6 +8,7 @@ import { invoices } from '../db/schema/invoices.js';
 import { agreements } from '../db/schema/agreements.js';
 import { creditChecks } from '../db/schema/credit-checks.js';
 import { adSpend } from '../db/schema/ad-spend.js';
+import { dedupedSpendSumSql } from './ad-spend.service.js';
 import type { AuthPayload } from '../types/index.js';
 import {
   resolveDashboardWindow,
@@ -319,10 +320,9 @@ export async function getDashboardStats(
       )),
     // Ad spend in the selected window. Catchr only has ~50d of history;
     // for windows wider than that the sum is bounded by what's available.
-    db
-      .select({ cost: sql<string>`coalesce(sum(${adSpend.spend}), 0)::text` })
-      .from(adSpend)
-      .where(sql`${adSpend.date} >= ${win.startIso}::date AND ${adSpend.date} <= ${win.endIso}::date`),
+    // Deduped per dedupedSpendSumSql — Sam jam-video #2.
+    db.execute(sql`select ${dedupedSpendSumSql(win.startIso, win.endIso)} as cost`)
+      .then((rows) => (rows as unknown as Array<{ cost: string }>)),
     // Active clients: status IN ('active', 'onboarding'). Time-window
     // independent — a client either exists or doesn't right now.
     db
@@ -374,10 +374,17 @@ export async function getDashboardStats(
       )),
     // Rolling-90d cost — same reasoning. 90d gives the post-acquisition
     // invoice cycle time to convert spend into the revenue captured above.
-    db
-      .select({ cost: sql<string>`coalesce(sum(${adSpend.spend}), 0)::text` })
-      .from(adSpend)
-      .where(sql`${adSpend.date} >= (current_date - interval '90 days') AND ${adSpend.date} <= current_date`),
+    // Deduped per dedupedSpendSumSql — Sam jam-video #2.
+    db.execute(sql`
+      select coalesce((
+        select sum(d.spend)::text from (
+          select max(spend::numeric) as spend
+          from ad_spend
+          where date >= (current_date - interval '90 days') and date <= current_date
+          group by platform, account_id, campaign_id, date
+        ) d
+      ), '0') as cost
+    `).then((rows) => (rows as unknown as Array<{ cost: string }>)),
   ]);
 
   const revenue = Number(revenueRow[0]?.revenue ?? '0');
