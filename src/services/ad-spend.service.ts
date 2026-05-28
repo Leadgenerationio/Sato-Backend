@@ -370,20 +370,34 @@ export interface AdSpendSummaryRow {
 export async function summarizeAdSpend(filters: AdSpendFilters = {}): Promise<AdSpendSummaryRow[]> {
   const where = buildWhere(filters);
 
-  const rows = await db
-    .select({
-      platform: adSpend.platform,
-      accountName: adSpend.accountName,
-      currency: adSpend.currency,
-      totalSpend: sql<string>`coalesce(sum(${adSpend.spend}), 0)`,
-      campaigns: sql<number>`count(distinct ${adSpend.campaignId})::int`,
-    })
-    .from(adSpend)
-    .where(where)
-    .groupBy(adSpend.platform, adSpend.accountName, adSpend.currency)
-    .orderBy(desc(sql`coalesce(sum(${adSpend.spend}), 0)`));
+  // Sam jam-video #2: dedupe on natural key BEFORE grouping by
+  // (platform, accountName, currency) so the per-account totals on
+  // the agency Ad Spend page stop showing 3× the real number. We pull
+  // the filtered rows through a CTE that collapses dupes on the natural
+  // key first, then aggregate.
+  const rowsRaw = (await db.execute(sql`
+    with deduped as (
+      select a.platform, a.account_id, a.campaign_id, a.date, a.account_name, a.currency,
+             max(a.spend::numeric) as spend
+      from ${adSpend} a
+      where ${where}
+      group by a.platform, a.account_id, a.campaign_id, a.date, a.account_name, a.currency
+    )
+    select platform, account_name as "accountName", currency,
+           coalesce(sum(spend), 0)::text as "totalSpend",
+           count(distinct campaign_id)::int as campaigns
+    from deduped
+    group by platform, account_name, currency
+    order by sum(spend) desc nulls last
+  `)) as unknown as Array<{
+    platform: string;
+    accountName: string | null;
+    currency: string;
+    totalSpend: string;
+    campaigns: number;
+  }>;
 
-  return rows.map((r) => ({
+  return rowsRaw.map((r) => ({
     platform: r.platform,
     accountName: r.accountName,
     currency: r.currency,
@@ -394,17 +408,29 @@ export async function summarizeAdSpend(filters: AdSpendFilters = {}): Promise<Ad
 
 export async function totalSpend(filters: AdSpendFilters = {}): Promise<{ total: number; currency: string; rowCount: number }> {
   const where = buildWhere(filters);
-  const [row] = await db
-    .select({
-      total: sql<string>`coalesce(sum(${adSpend.spend}), 0)`,
-      rowCount: sql<number>`count(*)::int`,
-    })
-    .from(adSpend)
-    .where(where);
+  // Sam jam-video #2 (27-May-2026): dedupe before summing — the 3×
+  // authorization_id rows per natural key inflate the total ~3x.
+  // rowCount stays as the raw count for diagnostics (so dashboards can
+  // still see how many rows are stored); the displayed total is the
+  // deduped one. Permanent ingestion fix is Hari's.
+  const rowsRaw = (await db.execute(sql`
+    with filtered as (
+      select * from ${adSpend} where ${where}
+    ),
+    deduped as (
+      select platform, account_id, campaign_id, date, max(spend::numeric) as spend
+      from filtered
+      group by platform, account_id, campaign_id, date
+    )
+    select coalesce(sum(spend), 0)::text as total,
+           (select count(*)::int from filtered) as row_count
+    from deduped
+  `)) as unknown as Array<{ total: string; row_count: number }>;
+  const row = rowsRaw[0];
 
   return {
     total: parseFloat(row?.total ?? '0'),
     currency: 'GBP',
-    rowCount: Number(row?.rowCount ?? 0),
+    rowCount: Number(row?.row_count ?? 0),
   };
 }

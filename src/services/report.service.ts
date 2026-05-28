@@ -716,14 +716,22 @@ export async function getFinancialOverview(
       .from(invoices)
       .where(and(inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]), gte(invoices.dueDate, windowStart)))
       .groupBy(sql`to_char(${invoices.dueDate}, 'YYYY-MM')`),
-    db
-      .select({
-        month: sql<string>`to_char(${adSpend.date}, 'YYYY-MM')`,
-        expenses: sql<string>`coalesce(sum(${adSpend.spend}), 0)`,
-      })
-      .from(adSpend)
-      .where(gte(adSpend.date, windowStartIso))
-      .groupBy(sql`to_char(${adSpend.date}, 'YYYY-MM')`),
+    // Sam jam-video #2: dedupe on natural key before grouping by month
+    // — Catchr 3× auth-id duplication was inflating the monthly expense
+    // series by ~3x on Google rows, which is what feeds the Financial
+    // Overview chart on Sam's admin dashboard.
+    db.execute(sql`
+      with deduped as (
+        select date, max(spend::numeric) as spend
+        from ${adSpend}
+        where date >= ${windowStartIso}
+        group by platform, account_id, campaign_id, date
+      )
+      select to_char(date, 'YYYY-MM') as month,
+             coalesce(sum(spend), 0)::text as expenses
+      from deduped
+      group by to_char(date, 'YYYY-MM')
+    `).then((rows) => (rows as unknown as Array<{ month: string; expenses: string }>)),
     db
       .select({
         month: sql<string>`to_char(${invoices.dueDate}, 'YYYY-MM')`,
@@ -1005,18 +1013,24 @@ export async function getUnifiedReport(
   const catchrSpendByPlatform = new Map<string, number>();
   if (distinctCatchrPlatforms.length > 0) {
     const { from, to } = deliveryWindowToRange(window);
-    const catchrRows = await db
-      .select({
-        platform: adSpend.platform,
-        spend: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text`,
-      })
-      .from(adSpend)
-      .where(and(
-        inArray(adSpend.platform, distinctCatchrPlatforms),
-        gte(adSpend.date, from),
-        lte(adSpend.date, to),
-      ))
-      .groupBy(adSpend.platform);
+    // Sam jam-video #2: same dedupe-before-sum pattern as the unified
+    // report's earlier byPlatform query — getSupplierPerformance powers
+    // the supplier-level table Sam reads.
+    const platList = sql.join(distinctCatchrPlatforms.map((p) => sql`${p}`), sql`, `);
+    const catchrRows = (await db.execute(sql`
+      with deduped as (
+        select platform, account_id, campaign_id, date,
+               max(spend::numeric) as spend
+        from ad_spend
+        where platform in (${platList})
+          and date >= ${from}
+          and date <= ${to}
+        group by platform, account_id, campaign_id, date
+      )
+      select platform, coalesce(sum(spend), 0)::text as spend
+      from deduped
+      group by platform
+    `)) as unknown as Array<{ platform: string; spend: string }>;
     for (const r of catchrRows) catchrSpendByPlatform.set(r.platform, Number(r.spend));
   }
 
@@ -1272,18 +1286,28 @@ export async function getPnlSummary(
   // #109). Until those rows get a client mapping, they don't attribute to
   // anyone's P&L. unattributedSpendRows is surfaced so the UI can prompt
   // for the mapping.
+  // Sam jam-video #2: dedupe before summing. We dedupe scoped to this
+  // tenant's ad_spend rows (client_id mapped to a client in this business)
+  // so the natural-key collapse happens AFTER the tenant filter — keeps
+  // cross-tenant leaks impossible by construction.
   const adSpendRows = businessId
-    ? await db
-        .select({ total: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text` })
-        .from(adSpend)
-        .innerJoin(clients, eq(clients.id, adSpend.clientId))
-        .where(
-          and(
-            eq(clients.businessId, businessId),
-            gte(adSpend.date, fromIso),
-            lte(adSpend.date, toIso),
-          ),
+    ? ((await db.execute(sql`
+        with scoped as (
+          select a.platform, a.account_id, a.campaign_id, a.date, a.spend
+          from ${adSpend} a
+          inner join ${clients} c on c.id = a.client_id
+          where c.business_id = ${businessId}
+            and a.date >= ${fromIso}
+            and a.date <= ${toIso}
+        ),
+        deduped as (
+          select max(spend::numeric) as spend
+          from scoped
+          group by platform, account_id, campaign_id, date
         )
+        select coalesce(sum(spend), 0)::text as total
+        from deduped
+      `)) as unknown as Array<{ total: string }>)
     : [];
   const adSpendRow = adSpendRows[0];
 

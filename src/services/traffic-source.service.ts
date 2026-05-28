@@ -139,15 +139,21 @@ export async function listSourcesForCampaign(
     // Sum trailing-30-day ad_spend by (platform, account_id). Empty for
     // platforms/accounts we don't sync — sources pointing at unsynced or
     // dormant accounts naturally land at £0.
-    db
-      .select({
-        platform: adSpend.platform,
-        accountId: adSpend.accountId,
-        spend: sql<string>`coalesce(sum(${adSpend.spend}::numeric), 0)::text`,
-      })
-      .from(adSpend)
-      .where(sql`${adSpend.date} >= ${adSpendWindowIso}::date`)
-      .groupBy(adSpend.platform, adSpend.accountId),
+    // Sam jam-video #2: dedupe on natural key before grouping by
+    // (platform, account_id) — Catchr 3× auth-id rows were inflating the
+    // per-source spend shown on campaign detail / traffic-sources rollups.
+    db.execute(sql`
+      with deduped as (
+        select platform, account_id, campaign_id, date, max(spend::numeric) as spend
+        from ${adSpend}
+        where date >= ${adSpendWindowIso}::date
+        group by platform, account_id, campaign_id, date
+      )
+      select platform, account_id as "accountId",
+             coalesce(sum(spend), 0)::text as spend
+      from deduped
+      group by platform, account_id
+    `).then((rows) => (rows as unknown as Array<{ platform: string; accountId: string; spend: string }>)),
     // Campaign-level total leads. Per-source attribution isn't possible from
     // the LeadByte aggregate report, so for now every source on the same
     // campaign shows the same lead count (shared denominator).
