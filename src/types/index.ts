@@ -18,7 +18,7 @@ export const registerSchema = z.object({
   body: z.object({
     email: z.string().email(),
     name: z.string().min(1).max(255),
-    password: z.string().min(6),
+    password: z.string().min(8),
     role: z.enum(['finance_admin', 'ops_manager', 'readonly']).optional(),
   }),
 });
@@ -60,7 +60,7 @@ export const updateProfileSchema = z.object({
 export const changePasswordSchema = z.object({
   body: z.object({
     currentPassword: z.string().min(1),
-    newPassword: z.string().min(6).max(255),
+    newPassword: z.string().min(8).max(255),
   }),
 });
 

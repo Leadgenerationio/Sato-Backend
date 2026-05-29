@@ -365,8 +365,8 @@ export async function changeOwnPassword(userId: string, currentPassword: string,
   const user = await findById(userId);
   if (!user) throw new NotFoundError('User');
 
-  if (!newPassword || newPassword.length < 6) {
-    throw new ValidationError('New password must be at least 6 characters');
+  if (!newPassword || newPassword.length < 8) {
+    throw new ValidationError('New password must be at least 8 characters');
   }
   if (currentPassword === newPassword) {
     throw new ValidationError('New password must differ from the current password');
