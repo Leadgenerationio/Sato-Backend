@@ -42,14 +42,23 @@ export async function leads(req: Request, res: Response, next: NextFunction) {
     const from = typeof req.query.from === 'string' ? req.query.from : undefined;
     const to = typeof req.query.to === 'string' ? req.query.to : undefined;
     const range = portalService.resolveLeadsRange({ from, to });
-    // Sam (jam-video #2): per-source ad-spend on the Leads tab, scoped to
-    // the same date range as the leads list. Empty array for PPL clients
-    // (no traffic_sources mapped) or when there's no spend in the window.
-    const [leads, bySource] = await Promise.all([
+    // Sam (jam-video #3, 29-May-2026): per-source breakdown is now
+    // preset-only with `bySourceWindow` indicating which preset (or none)
+    // produced the rows. No more "est." flag — empty when the range
+    // doesn't map to a LeadByte preset.
+    const [leads, bySourceResult] = await Promise.all([
       portalService.getLeads(req.user!, range),
       portalService.getLeadsBySource(req.user!, range),
     ]);
-    res.json({ status: 'success', data: { leads, range, bySource } });
+    res.json({
+      status: 'success',
+      data: {
+        leads,
+        range,
+        bySource: bySourceResult.rows,
+        bySourceWindow: bySourceResult.window,
+      },
+    });
   } catch (err) {
     handlePortalError(err, res, next);
   }

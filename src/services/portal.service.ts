@@ -272,7 +272,7 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
           .where(and(inArray(campaigns.id, linkedCampaignIds), eq(campaigns.status, 'active'))),
     db
       .select({
-        totalThisMonth: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int`,
+        totalThisMonth: sql<number>`coalesce(sum(coalesce(${leadDeliveries.validLeadCount}, ${leadDeliveries.leadCount})), 0)::int`,
       })
       .from(leadDeliveries)
       .where(
@@ -283,7 +283,7 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
       ),
     db
       .select({
-        totalAllTime: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int`,
+        totalAllTime: sql<number>`coalesce(sum(coalesce(${leadDeliveries.validLeadCount}, ${leadDeliveries.leadCount})), 0)::int`,
       })
       .from(leadDeliveries)
       .where(eq(leadDeliveries.clientId, clientId)),
@@ -294,7 +294,7 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
     db
       .select({
         date: leadDeliveries.deliveryDate,
-        leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int`,
+        leads: sql<number>`coalesce(sum(coalesce(${leadDeliveries.validLeadCount}, ${leadDeliveries.leadCount})), 0)::int`,
       })
       .from(leadDeliveries)
       .where(
@@ -406,7 +406,7 @@ export async function getCampaigns(requester: AuthPayload): Promise<PortalCampai
     db
       .select({
         campaignId: leadDeliveries.campaignId,
-        leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int`,
+        leads: sql<number>`coalesce(sum(coalesce(${leadDeliveries.validLeadCount}, ${leadDeliveries.leadCount})), 0)::int`,
       })
       .from(leadDeliveries)
       .where(
@@ -419,7 +419,7 @@ export async function getCampaigns(requester: AuthPayload): Promise<PortalCampai
     db
       .select({
         campaignId: leadDeliveries.campaignId,
-        leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int`,
+        leads: sql<number>`coalesce(sum(coalesce(${leadDeliveries.validLeadCount}, ${leadDeliveries.leadCount})), 0)::int`,
       })
       .from(leadDeliveries)
       .where(
@@ -432,7 +432,7 @@ export async function getCampaigns(requester: AuthPayload): Promise<PortalCampai
     db
       .select({
         campaignId: leadDeliveries.campaignId,
-        leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int`,
+        leads: sql<number>`coalesce(sum(coalesce(${leadDeliveries.validLeadCount}, ${leadDeliveries.leadCount})), 0)::int`,
       })
       .from(leadDeliveries)
       .where(eq(leadDeliveries.clientId, clientId))
@@ -519,36 +519,39 @@ export async function getLeads(requester: AuthPayload, range?: GetLeadsRange): P
   }));
 }
 
-// Sam (jam-video #2, 27-May-2026):
-// "you have it in the back end to have the ad spend where you can see
-// google, facebook, and you can see the amount of leads that google or
-// facebook has generated, and the ad spend next to it... we can change
-// the time period to see the ad spend over different time periods."
+// Sam (jam-video #3, 29-May-2026):
+// "you've put in estimated, you put estimated 111 leads, estimated 30
+// which is not correct, we need to show the client actual figures, we
+// can't just make up figures... these need to be actual figures and
+// needs to be actual live ad spends, so that's a non-negotiable."
 //
-// Per-source leads + spend for the same date range the Leads tab is
-// showing. Numbers:
+// No more spend-share estimates. The By Source breakdown only renders
+// when LeadByte can give us per-supplier truth — i.e. when the date
+// range matches a LeadByte preset (today / yesterday / this_week /
+// last_week / this_month / last_month / ytd). For custom ranges that
+// don't map to a preset, we return an empty array and a `windowReason`
+// hint so the FE can prompt the user to pick a preset rather than
+// inventing numbers.
 //
-//   SPEND — exact. Comes from the deduped aggregateClientAdSpendByPlatform,
-//     so the 3× authorization_id duplication that gave Sam £5,646 instead
-//     of £1,888 is already collapsed.
-//
-//   LEADS — attributed per (campaign × platform) by **spend share within
-//     that campaign**. A campaign that ran only on Facebook gets 100% of
-//     its leads on Facebook. A campaign that split £600 Facebook / £400
-//     Google over the window has its leads pro-rated 60/40. This matches
-//     the admin-side per-source view closely enough for the portal; the
-//     LeadByte supplier-row path is more precise and will replace this
-//     heuristic once it's wired in. Campaigns with zero recorded spend
-//     in the window keep their leads in an "Unattributed" bucket so we
-//     never inflate a platform.
+// LEADS — valid only, sourced from LeadByte's `valid` column on the
+//   supplier report. Admin /reports/campaign overview reads the same
+//   field, so the numbers reconcile.
+// SPEND — exact, from the deduped aggregateClientAdSpendByPlatform
+//   path. The 3× authorization_id duplication that gave Sam £5,646
+//   instead of £1,888 is already collapsed there.
 export interface PortalLeadsBySource {
   platform: string;
+  /** Valid lead count from LeadByte's supplier report (matches admin). */
   leads: number;
   spend: number;
   currency: string;
-  /** Spend-share allocation is approximate for multi-source campaigns. */
-  leadsAreEstimated: boolean;
 }
+
+/** Returned alongside the breakdown so the FE can explain why the card
+ *  is empty when the user has picked a custom range. */
+export type PortalLeadsBySourceWindow =
+  | { kind: 'preset'; preset: DeliveryWindow }
+  | { kind: 'custom-no-preset-match' };
 
 async function aggregateLeadsByCampaign(
   clientId: string,
@@ -558,7 +561,7 @@ async function aggregateLeadsByCampaign(
   const rows = await db
     .select({
       campaignId: leadDeliveries.campaignId,
-      leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int`,
+      leads: sql<number>`coalesce(sum(coalesce(${leadDeliveries.validLeadCount}, ${leadDeliveries.leadCount})), 0)::int`,
     })
     .from(leadDeliveries)
     .where(and(
@@ -630,13 +633,12 @@ async function aggregateClientAdSpendByCampaignAndPlatform(
   }));
 }
 
-// Sam (jam-video #2, 27-May-2026) ask 4b: drop the spend-share leads
-// estimate when we can use LeadByte's per-supplier truth instead. LeadByte
-// only exposes preset windows (`today`, `this_month`, `last_month`, etc.),
-// not arbitrary date ranges. When the portal's picker lands on one of
-// those presets we hit LeadByte; otherwise we fall back to the spend-share
-// estimate for that range. `last_year` from the FE preset list is not
-// supported by LeadByte's preset enum so it goes the estimate route.
+// Sam (jam-video #3, 29-May-2026): no more spend-share estimates. The
+// LeadByte supplier report is preset-window only, so we map the
+// requester's date range onto the closest preset and only return data
+// when that mapping is exact. Custom ranges that don't hit a preset
+// return an empty array with kind='custom-no-preset-match' so the FE
+// can show a "pick a preset for per-source breakdown" hint.
 function isoDate(d: Date): string {
   return d.toISOString().split('T')[0];
 }
@@ -647,6 +649,14 @@ function rangeToLeadByteWindow(from: string, to: string): DeliveryWindow | null 
   const yesterday = isoDate(new Date(Date.now() - 86_400_000));
   if (from === today && to === today) return 'today';
   if (from === yesterday && to === yesterday) return 'yesterday';
+  // this_week (Mon → today). LeadByte's week starts Monday.
+  const dow = now.getDay() === 0 ? 6 : now.getDay() - 1; // 0=Mon … 6=Sun
+  const thisWeekStart = isoDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - dow));
+  if (from === thisWeekStart && to === today) return 'this_week';
+  // last_week (previous Mon → previous Sun)
+  const lastWeekStart = isoDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - dow - 7));
+  const lastWeekEnd = isoDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - dow - 1));
+  if (from === lastWeekStart && to === lastWeekEnd) return 'last_week';
   // this_month → 1st of current month → today
   const monthStart = isoDate(new Date(now.getFullYear(), now.getMonth(), 1));
   if (from === monthStart && to === today) return 'this_month';
@@ -657,131 +667,106 @@ function rangeToLeadByteWindow(from: string, to: string): DeliveryWindow | null 
   // ytd → Jan 1 → today
   const ytdStart = `${now.getFullYear()}-01-01`;
   if (from === ytdStart && to === today) return 'ytd';
-  // this_week (Mon → today) and last_week aren't surfaced by the portal's
-  // preset buttons so we don't probe for them — keeps the mapper tight.
   return null;
 }
 
 export async function getLeadsBySource(
   requester: AuthPayload,
   range?: GetLeadsRange,
-): Promise<PortalLeadsBySource[]> {
+): Promise<{ rows: PortalLeadsBySource[]; window: PortalLeadsBySourceWindow }> {
   const clientId = requireClientId(requester);
   const { from, to } = resolveLeadsRange(range);
   const linkedCampaignIds = await campaignIdsForClient(clientId);
-  if (linkedCampaignIds.length === 0) return [];
+  if (linkedCampaignIds.length === 0) {
+    const lbWindow = rangeToLeadByteWindow(from, to);
+    return {
+      rows: [],
+      window: lbWindow ? { kind: 'preset', preset: lbWindow } : { kind: 'custom-no-preset-match' },
+    };
+  }
 
-  const [campaignSpendRows, campaignLeadsMap] = await Promise.all([
+  const lbWindow = rangeToLeadByteWindow(from, to);
+  // Custom range without a preset match → no estimate, no fake numbers.
+  // FE shows "Switch to a preset to see per-source breakdown."
+  if (!lbWindow) {
+    return { rows: [], window: { kind: 'custom-no-preset-match' } };
+  }
+
+  // Both LeadByte supplier rows AND Catchr spend in parallel — Catchr is
+  // tenant-scoped to the client's campaign set via traffic_sources; LeadByte
+  // is tenant-scoped by campaign name (the LB campaign name lives on
+  // `campaigns.name`).
+  let supplierRows: Awaited<ReturnType<typeof leadbyte.getSupplierSpend>>;
+  try {
+    supplierRows = await cached(
+      `lb:supplier-spend:${lbWindow}:v1`,
+      900,
+      () => leadbyte.getSupplierSpend(lbWindow),
+    );
+  } catch (err) {
+    // LeadByte unreachable → return empty with the preset window so the
+    // FE shows "couldn't fetch report data" rather than estimates.
+    logger.warn({ err, lbWindow, clientId }, 'portal getLeadsBySource: LeadByte supplier-spend fetch failed');
+    return { rows: [], window: { kind: 'preset', preset: lbWindow } };
+  }
+
+  const [ownCampaignNames, campaignSpendRows] = await Promise.all([
+    db
+      .select({ name: campaigns.name })
+      .from(campaigns)
+      .where(inArray(campaigns.id, linkedCampaignIds))
+      .then((rs) => new Set(rs.map((r) => r.name))),
     aggregateClientAdSpendByCampaignAndPlatform(linkedCampaignIds, from, to),
-    aggregateLeadsByCampaign(clientId, from, to),
   ]);
 
-  // Bucket spend per campaign so we know the share each platform claims.
-  const spendByCampaign = new Map<string, number>();
-  for (const r of campaignSpendRows) {
-    spendByCampaign.set(r.campaignId, (spendByCampaign.get(r.campaignId) ?? 0) + r.spend);
+  // Sam (jam-video #3): use VALID leads, not total. Admin /reports shows
+  // "Google 18 valid leads / Facebook 92 valid leads" — portal must match.
+  const lbValidLeadsByPlatform = new Map<string, number>();
+  for (const r of supplierRows) {
+    if (!ownCampaignNames.has(r.campaignName)) continue;
+    const canonicalPlatform = supplierNameToCatchrPlatform(r.supplierName);
+    if (!canonicalPlatform) continue;
+    lbValidLeadsByPlatform.set(
+      canonicalPlatform,
+      (lbValidLeadsByPlatform.get(canonicalPlatform) ?? 0) + r.validLeads,
+    );
   }
 
-  // Step 1 — spend-share allocation (the fallback): walk each
-  // (campaign, platform, spend) row, allocate that campaign's leads
-  // proportionally to its share of the campaign's total spend. Single-
-  // source campaigns get 100%; multi-source split by spend share.
-  interface Bucket { leads: number; spend: number; currency: string; estimated: boolean; }
+  // Bucket spend per (platform, currency). LeadByte tells us what leads
+  // there are; Catchr tells us what was spent. Platforms with spend but no
+  // LeadByte supplier row land with leads=0 (Catchr connected, LB supplier
+  // not set up — surface the spend honestly).
+  interface Bucket { leads: number; spend: number; currency: string; }
   const buckets = new Map<string, Bucket>();
-  const platformsPerCampaign = new Map<string, Set<string>>();
   for (const r of campaignSpendRows) {
-    const set = platformsPerCampaign.get(r.campaignId) ?? new Set<string>();
-    set.add(r.platform);
-    platformsPerCampaign.set(r.campaignId, set);
-  }
-
-  for (const r of campaignSpendRows) {
-    const campaignTotalSpend = spendByCampaign.get(r.campaignId) ?? 0;
-    const platformCount = platformsPerCampaign.get(r.campaignId)?.size ?? 1;
-    const campaignLeads = campaignLeadsMap.get(r.campaignId) ?? 0;
-    const share = campaignTotalSpend > 0 ? r.spend / campaignTotalSpend : 1 / platformCount;
-    const allocatedLeads = campaignLeads * share;
     const key = `${r.platform}|${r.currency ?? ''}`;
     const existing = buckets.get(key);
     if (existing) {
-      existing.leads += allocatedLeads;
       existing.spend += r.spend;
-      existing.estimated = existing.estimated || platformCount > 1;
     } else {
       buckets.set(key, {
-        leads: allocatedLeads,
+        leads: 0,
         spend: r.spend,
         currency: normalizeCurrencyCode(r.currency) ?? 'GBP',
-        estimated: platformCount > 1,
       });
     }
   }
-
-  // Step 2 — if the date range exactly matches a LeadByte preset, OVERRIDE
-  // the lead count per platform with LeadByte's supplier-row truth. Goes
-  // through the same `cached('lb:supplier-spend:${window}:v1', …)` key
-  // that getUnifiedReport uses so we never make a duplicate LeadByte call
-  // when an operator is on the admin side at the same time. Spend numbers
-  // stay sourced from Catchr ad_spend (still deduped) — LeadByte's
-  // `payout` field is empty for ad-network suppliers, so we'd lose the
-  // numbers if we sourced both from there.
-  const lbWindow = rangeToLeadByteWindow(from, to);
-  if (lbWindow) {
-    try {
-      const supplierRows = await cached(
-        `lb:supplier-spend:${lbWindow}:v1`,
-        900,
-        () => leadbyte.getSupplierSpend(lbWindow),
-      );
-      // Tenant-scope by campaign name. The client's Stato campaigns carry
-      // the canonical LeadByte campaign name on `campaigns.name`, which
-      // matches the `campaignName` LeadByte returns. Look those names up
-      // for the requester's campaign set so we never read a row that
-      // belongs to another tenant's campaign.
-      const ownCampaignNames = new Set(
-        (await db
-          .select({ name: campaigns.name })
-          .from(campaigns)
-          .where(inArray(campaigns.id, linkedCampaignIds))
-        ).map((r) => r.name),
-      );
-
-      const lbLeadsByPlatform = new Map<string, number>();
-      for (const r of supplierRows) {
-        if (!ownCampaignNames.has(r.campaignName)) continue;
-        const canonicalPlatform = supplierNameToCatchrPlatform(r.supplierName);
-        if (!canonicalPlatform) continue;
-        lbLeadsByPlatform.set(
-          canonicalPlatform,
-          (lbLeadsByPlatform.get(canonicalPlatform) ?? 0) + r.leads,
-        );
-      }
-
-      // Overwrite per-platform leads in the existing buckets with the
-      // LeadByte truth. Drop the `estimated` flag — these are actuals now.
-      // Buckets that didn't get a LeadByte row keep the spend-share
-      // estimate (could happen for a platform with no LeadByte supplier
-      // configured, e.g. when only the Catchr side is connected).
-      for (const [key, b] of buckets.entries()) {
-        const platform = key.split('|')[0];
-        const lbLeads = lbLeadsByPlatform.get(platform);
-        if (lbLeads !== undefined) {
-          b.leads = lbLeads;
-          b.estimated = false;
-        }
-      }
-    } catch (err) {
-      // LeadByte hiccup → fall back to the spend-share estimate already
-      // computed in Step 1. Log once so we know when the override path
-      // misses (Sam will see "est." on the row).
-      logger.warn(
-        { err, lbWindow, clientId },
-        'portal getLeadsBySource: LeadByte supplier-spend fetch failed — keeping spend-share estimate',
-      );
+  for (const [key, b] of buckets.entries()) {
+    const platform = key.split('|')[0];
+    b.leads = lbValidLeadsByPlatform.get(platform) ?? 0;
+  }
+  // Also surface platforms that have LeadByte leads but no recorded
+  // Catchr spend (free traffic, or Catchr ingestion missing). Spend = 0,
+  // currency defaults to GBP. Sam wants the leads visible regardless.
+  for (const [platform, leads] of lbValidLeadsByPlatform.entries()) {
+    const key = `${platform}|`;
+    const matched = Array.from(buckets.keys()).some((k) => k.startsWith(`${platform}|`));
+    if (!matched) {
+      buckets.set(key, { leads, spend: 0, currency: 'GBP' });
     }
   }
 
-  return Array.from(buckets.entries())
+  const rows = Array.from(buckets.entries())
     .map(([key, b]) => {
       const platform = key.split('|')[0];
       return {
@@ -789,10 +774,11 @@ export async function getLeadsBySource(
         leads: Math.round(b.leads),
         spend: Math.round(b.spend * 100) / 100,
         currency: b.currency,
-        leadsAreEstimated: b.estimated,
       };
     })
     .sort((a, b) => b.spend - a.spend);
+
+  return { rows, window: { kind: 'preset', preset: lbWindow } };
 }
 
 export async function getInvoices(requester: AuthPayload): Promise<PortalInvoice[]> {

@@ -144,7 +144,12 @@ export interface LeadByteSupplierSpend {
   window: DeliveryWindow;
   /** Equals LeadByte `payout`. */
   spend: number;
+  /** Total leads (valid + invalid + pending + rejected) — keep for legacy callers. */
   leads: number;
+  /** Sam (jam-video #3, 29-May-2026): admin `/reports/campaign` shows
+   *  "Google 18 valid leads / Facebook 92 valid leads" — the portal must
+   *  match. Expose the valid-only count separately. */
+  validLeads: number;
   /** Effective cost per lead. */
   cpl: number;
 }

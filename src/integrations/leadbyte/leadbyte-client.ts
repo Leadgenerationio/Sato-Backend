@@ -432,6 +432,8 @@ export async function getSupplierSpend(window: DeliveryWindow): Promise<LeadByte
         window,
         spend,
         leads,
+        // Mock has no invalid split — same as totals.
+        validLeads: leads,
         cpl: leads > 0 ? Math.round((spend / leads) * 100) / 100 : 0,
       };
     });
@@ -465,6 +467,7 @@ export async function getSupplierSpend(window: DeliveryWindow): Promise<LeadByte
       window,
       spend: r.payout,
       leads: r.leads,
+      validLeads: r.valid,
       cpl: r.eCPL ?? (r.leads > 0 ? Math.round((r.payout / r.leads) * 100) / 100 : 0),
     };
   });
