@@ -341,13 +341,7 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
   }
 
   // Managed clients (bundled retainer) now see their ad spend in the portal;
-  // PPL clients never do, so we short-circuit to an empty array. Attribution
-  // runs through traffic_sources (see aggregateClientAdSpendByPlatform) —
-  // ad_spend.client_id is never populated, so the previous direct-column
-  // scope returned nothing for every client. This is the same join the agency
-  // side uses, and is self-maintaining: spend appears the moment a campaign's
-  // Catchr account is linked. Window is MTD to match the portal's framing;
-  // grouped per (platform, currency) so mixed currencies are never summed.
+  // PPL clients never do, so we short-circuit to an empty array.
   const adSpendByPlatform: PortalAdSpendPlatform[] =
     (client.clientType ?? 'ppl') === 'managed'
       ? (await aggregateClientAdSpendByPlatform(linkedCampaignIds, monthStart.toISOString().split('T')[0]))
@@ -358,11 +352,43 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
           }))
       : [];
 
+  // Sam (jam-video #3, 29-May-2026): "Google's on 18 valid leads and
+  // Facebook's on 92 valid leads, so it's 110 but 141, you've got the
+  // figures well off." Admin /reports reads valid leads from LeadByte's
+  // per-supplier report. lead_deliveries.lead_count (= valid_lead_count
+  // in our sync) gives 141 because it counts leads attributed to all
+  // suppliers including "Direct" / unmapped. To reconcile with admin we
+  // pull the headline number from the same LeadByte path admin uses,
+  // filtered to the client's campaign set. Falls back to lead_deliveries
+  // when LeadByte is unreachable so the tile never goes blank.
+  let leadsThisMonthValid = totalThisMonth ?? 0;
+  try {
+    const lbRows = await cached(
+      'lb:supplier-spend:this_month:v1',
+      900,
+      () => leadbyte.getSupplierSpend('this_month'),
+    );
+    const ownCampaignNamesArr = await db
+      .select({ name: campaigns.name })
+      .from(campaigns)
+      .where(inArray(campaigns.id, linkedCampaignIds));
+    const ownCampaignNames = new Set(ownCampaignNamesArr.map((r) => r.name));
+    let sum = 0;
+    for (const r of lbRows) {
+      if (!ownCampaignNames.has(r.campaignName)) continue;
+      if (!supplierNameToCatchrPlatform(r.supplierName)) continue;
+      sum += r.validLeads;
+    }
+    if (sum > 0) leadsThisMonthValid = sum;
+  } catch (err) {
+    logger.warn({ err, clientId }, 'portal getDashboard: LeadByte fetch failed for valid-leads headline — keeping lead_deliveries fallback');
+  }
+
   return {
     companyName: client.companyName,
     clientType: client.clientType ?? 'ppl',
     activeCampaigns: activeCampaigns ?? 0,
-    totalLeadsThisMonth: totalThisMonth ?? 0,
+    totalLeadsThisMonth: leadsThisMonthValid,
     totalLeadsAllTime: totalAllTime ?? 0,
     pendingInvoices,
     overdueInvoices,
