@@ -68,7 +68,7 @@ describe('LeadByte routes — read-through cache', () => {
 
   it('/reports/supplier-spend caches per-window', async () => {
     const spy = vi.spyOn(lb, 'getSupplierSpend').mockResolvedValue([
-      { supplierId: 's-1', supplierName: 'Meta', platform: 'Meta', campaignId: 'c-1', campaignName: 'X', window: 'today', spend: 100, leads: 50, cpl: 2 },
+      { supplierId: 's-1', supplierName: 'Meta', platform: 'Meta', campaignId: 'c-1', campaignName: 'X', window: 'today', spend: 100, leads: 50, validLeads: 45, cpl: 2 },
     ]);
 
     await request(app)

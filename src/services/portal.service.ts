@@ -181,6 +181,33 @@ export interface PortalInvoice {
   daysOverdue: number;
 }
 
+/**
+ * Sam (jam-video #3, 29-May-2026): "all the data from capture, update here,
+ * all the data is there." Per-creative performance metrics aren't buildable
+ * today (creatives have no platform-side ad_id link), so we surface the
+ * parent campaign's real performance next to each creative as the honest
+ * stand-in. Spend comes from the same deduped Catchr aggregation the rest
+ * of the portal uses; valid leads come from LeadByte's supplier report —
+ * the same source admin's /reports reads. Both real, both this-month-to-
+ * date, no estimates. `null` (whole object) means the BE couldn't compute
+ * it this request — FE renders "temporarily unavailable" rather than zero.
+ */
+export interface PortalCreativeCampaignMetrics {
+  /** ISO date — first of current month. */
+  windowFrom: string;
+  /** ISO date — today. */
+  windowTo: string;
+  spend: number;
+  spendCurrency: string;
+  validLeads: number;
+  /** spend / validLeads, or null when validLeads === 0. */
+  costPerLead: number | null;
+  /** Optional explanations rendered as tooltips next to the metric. Present
+   *  when a real-zero needs context (no Catchr account linked, no LeadByte
+   *  campaign mapped) so the buyer doesn't read £0 as "broken". */
+  notes?: { spend?: string; leads?: string };
+}
+
 export interface PortalCompliance {
   campaignName: string;
   creatives: {
@@ -202,6 +229,8 @@ export interface PortalCompliance {
       decidedByName: string | null;
       feedback: string | null;
     };
+    /** null = BE could not compute (LeadByte 5xx etc.); undefined never sent. */
+    campaignMetrics: PortalCreativeCampaignMetrics | null;
   }[];
   landingPages: { id: string; url: string; screenshotUrl: string | null; lastChecked: string }[];
 }
@@ -666,6 +695,116 @@ async function aggregateClientAdSpendByCampaignAndPlatform(
   }));
 }
 
+/**
+ * Sam (jam-video #3, 29-May-2026): per-campaign MTD performance bundle for
+ * the side-panel layout. Returns one entry per requested campaignId with
+ * real Catchr spend (deduped via the same MAX-CTE the rest of the portal
+ * uses) and real LeadByte valid leads (the same path admin's /reports
+ * reads). Currencies that mix across platforms within one campaign are
+ * folded onto the client's currency — Sato doesn't FX-convert so the
+ * sum is platform-natural-amount; in practice every UK campaign is GBP.
+ *
+ * Hard rule from jam-video #3: no estimates. Real-zero is honest — a
+ * tooltip ('notes.spend' / 'notes.leads') explains *why* the zero is
+ * real (no Catchr account linked / no LeadByte campaign mapped). A
+ * thrown LeadByte / DB call yields `null` for that campaign so the FE
+ * renders "temporarily unavailable" rather than a fabricated number.
+ */
+async function getCampaignMetricsForCampaigns(
+  campaignIds: string[],
+  clientCurrency: string,
+): Promise<Map<string, PortalCreativeCampaignMetrics | null>> {
+  const result = new Map<string, PortalCreativeCampaignMetrics | null>();
+  if (campaignIds.length === 0) return result;
+
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const windowFrom = monthStart.toISOString().split('T')[0];
+  const windowTo = now.toISOString().split('T')[0];
+
+  // Spend: roll the (campaignId, platform) breakdown up to per-campaign.
+  // Each campaign may have multiple platforms — sum them in their native
+  // currency. If platforms disagree on currency we still sum (Sato does
+  // not FX-convert; UK clients are GBP across the board today), tagging
+  // the result with the client's currency. Catchr-side failures throw,
+  // caught below to null out per-campaign rather than the whole batch.
+  const spendByCampaign = new Map<string, { spend: number; currency: string }>();
+  const campaignsWithCatchr = new Set<string>();
+  try {
+    const rows = await aggregateClientAdSpendByCampaignAndPlatform(campaignIds, windowFrom, windowTo);
+    for (const r of rows) {
+      campaignsWithCatchr.add(r.campaignId);
+      const prev = spendByCampaign.get(r.campaignId) ?? { spend: 0, currency: clientCurrency };
+      prev.spend += r.spend;
+      // Prefer the first non-null currency we see; client currency as fallback.
+      if (r.currency && prev.currency === clientCurrency) prev.currency = normalizeCurrencyCode(r.currency, clientCurrency);
+      spendByCampaign.set(r.campaignId, prev);
+    }
+  } catch (err) {
+    logger.warn({ err, campaignIds }, 'portal getCampaignMetrics: Catchr aggregation failed — every campaign returns null');
+    for (const id of campaignIds) result.set(id, null);
+    return result;
+  }
+
+  // Valid leads per Sato campaign via LeadByte supplier-spend, MTD. Match
+  // LeadByte campaignName -> Sato campaignName (same path as getDashboard's
+  // totalLeadsThisMonth tile). Failure: every campaign falls back to 0
+  // leads with a tooltip; spend already computed stays attached.
+  const validLeadsByCampaign = new Map<string, number>();
+  const campaignsWithLeadByte = new Set<string>();
+  let leadByteFailed = false;
+  try {
+    const lbRows = await cached(
+      'lb:supplier-spend:this_month:v1',
+      900,
+      () => leadbyte.getSupplierSpend('this_month'),
+    );
+    const campaignNameToId = new Map<string, string>();
+    const nameRows = await db
+      .select({ id: campaigns.id, name: campaigns.name })
+      .from(campaigns)
+      .where(inArray(campaigns.id, campaignIds));
+    for (const c of nameRows) campaignNameToId.set(c.name, c.id);
+    for (const r of lbRows) {
+      const satoId = campaignNameToId.get(r.campaignName);
+      if (!satoId) continue;
+      if (!supplierNameToCatchrPlatform(r.supplierName)) continue;
+      campaignsWithLeadByte.add(satoId);
+      validLeadsByCampaign.set(satoId, (validLeadsByCampaign.get(satoId) ?? 0) + r.validLeads);
+    }
+  } catch (err) {
+    logger.warn({ err, campaignIds }, 'portal getCampaignMetrics: LeadByte supplier-spend failed — every campaign reports 0 leads');
+    leadByteFailed = true;
+  }
+
+  for (const id of campaignIds) {
+    const spendBucket = spendByCampaign.get(id);
+    const spend = spendBucket?.spend ?? 0;
+    const currency = spendBucket?.currency ?? clientCurrency;
+    const validLeads = validLeadsByCampaign.get(id) ?? 0;
+    const costPerLead = validLeads > 0 ? Math.round((spend / validLeads) * 100) / 100 : null;
+    const notes: { spend?: string; leads?: string } = {};
+    if (!campaignsWithCatchr.has(id)) {
+      notes.spend = 'No ad-platform account linked to this campaign.';
+    }
+    if (leadByteFailed) {
+      notes.leads = 'Lead data temporarily unavailable.';
+    } else if (!campaignsWithLeadByte.has(id)) {
+      notes.leads = 'No LeadByte campaign mapped to this campaign.';
+    }
+    result.set(id, {
+      windowFrom,
+      windowTo,
+      spend: Math.round(spend * 100) / 100,
+      spendCurrency: currency,
+      validLeads,
+      costPerLead,
+      ...(Object.keys(notes).length > 0 ? { notes } : {}),
+    });
+  }
+  return result;
+}
+
 // Sam (jam-video #3, 29-May-2026): no more spend-share estimates. The
 // LeadByte supplier report is preset-window only, so we map the
 // requester's date range onto the closest preset and only return data
@@ -917,6 +1056,18 @@ export async function getCompliance(requester: AuthPayload): Promise<PortalCompl
     }
   }));
 
+  // Sam (jam-video #3, 29-May-2026) — parent-campaign performance card.
+  // Real Catchr spend + real LeadByte valid leads MTD, batched once for
+  // every campaign on this client so the FE renders the metric block
+  // inline without an N+1 per creative.
+  const clientCurrencyRow = await db
+    .select({ currency: clients.currency })
+    .from(clients)
+    .where(eq(clients.id, clientId))
+    .limit(1);
+  const clientCurrency = normalizeCurrencyCode(clientCurrencyRow[0]?.currency ?? null, 'GBP');
+  const metricsByCampaign = await getCampaignMetricsForCampaigns(campaignIds, clientCurrency);
+
   return campaignRows.map((c) => ({
     campaignName: c.name,
     creatives: creativeRows
@@ -936,6 +1087,7 @@ export async function getCompliance(requester: AuthPayload): Promise<PortalCompl
             decidedByName: state?.decidedByName ?? null,
             feedback: state?.feedback ?? null,
           },
+          campaignMetrics: metricsByCampaign.get(cr.campaignId) ?? null,
         };
       }),
     landingPages: landingRows
@@ -978,6 +1130,9 @@ export interface PortalCreative {
     decidedByName: string | null;
     feedback: string | null;
   };
+  /** Same shape + semantics as PortalCompliance.creatives[].campaignMetrics
+   *  — parent-campaign performance MTD, real data, null on BE failure. */
+  campaignMetrics: PortalCreativeCampaignMetrics | null;
 }
 
 export interface PortalCreativesBySection {
@@ -1042,6 +1197,18 @@ export async function getCreativesBySection(requester: AuthPayload): Promise<Por
     }
   }));
 
+  // Sam (jam-video #3, 29-May-2026) — parent-campaign performance MTD.
+  // Same call + same cache key as getCompliance so the two endpoints are
+  // self-consistent for the same buyer.
+  const clientCurrencyRow = await db
+    .select({ currency: clients.currency })
+    .from(clients)
+    .where(eq(clients.id, clientId))
+    .limit(1);
+  const clientCurrency = normalizeCurrencyCode(clientCurrencyRow[0]?.currency ?? null, 'GBP');
+  const campaignIdsForMetrics = Array.from(new Set(rows.map((r) => r.campaignId)));
+  const metricsByCampaign = await getCampaignMetricsForCampaigns(campaignIdsForMetrics, clientCurrency);
+
   const items: PortalCreative[] = rows.map((r) => {
     const state = approvalStates.get(r.id);
     return {
@@ -1061,6 +1228,7 @@ export async function getCreativesBySection(requester: AuthPayload): Promise<Por
         decidedByName: state?.decidedByName ?? null,
         feedback: state?.feedback ?? null,
       },
+      campaignMetrics: metricsByCampaign.get(r.campaignId) ?? null,
     };
   });
 

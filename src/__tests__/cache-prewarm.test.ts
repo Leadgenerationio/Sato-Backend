@@ -64,7 +64,7 @@ describe('prewarmLeadByteCache', () => {
     vi.spyOn(leadbyte, 'getCampaigns').mockResolvedValue([]);
     vi.spyOn(leadbyte, 'getCampaignReport').mockResolvedValue([]);
     const spendSpy = vi.spyOn(leadbyte, 'getSupplierSpend').mockResolvedValue([
-      { supplierId: 's', supplierName: 'M', platform: 'M', campaignId: 'c', campaignName: 'C', window: 'today', spend: 1, leads: 1, cpl: 1 },
+      { supplierId: 's', supplierName: 'M', platform: 'M', campaignId: 'c', campaignName: 'C', window: 'today', spend: 1, leads: 1, validLeads: 1, cpl: 1 },
     ]);
     vi.spyOn(leadbyte, 'getBuyers').mockResolvedValue([]);
     vi.spyOn(leadbyte, 'getDeliveries').mockResolvedValue([]);
