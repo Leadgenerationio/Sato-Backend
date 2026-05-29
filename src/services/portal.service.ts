@@ -1305,13 +1305,28 @@ export async function getAgreement(requester: AuthPayload): Promise<PortalAgreem
   });
   const row = visibleRows[0];
 
-  const status: PortalAgreement['status'] =
+  // Yash (29-May-2026): Dashboard tile reads `client.agreementSigned`
+  // (admin-toggleable boolean), Agreement tab was reading only the
+  // `agreements` row's `signedAt` timestamp. The two drift apart when
+  // Sam toggles the flag on the client record without the agreements
+  // row being updated — e.g. for Benson Goldstein, status='sent' and
+  // signedAt=null but client.agreementSigned=true. Dashboard then said
+  // "Signed" while Agreement tab said "Pending". The admin-side boolean
+  // is the source-of-truth Sam wants honoured, so upgrade the derived
+  // status to 'signed' when that flag is set, and fall back to the
+  // row's sentAt / createdAt for the displayed timestamp.
+  let status: PortalAgreement['status'] =
     row.signedAt ? 'signed' : row.sentAt ? 'sent' : 'pending';
+  let signedAt = row.signedAt;
+  if (status !== 'signed' && client.agreementSigned === true) {
+    status = 'signed';
+    signedAt = row.signedAt ?? row.sentAt ?? row.updatedAt ?? row.createdAt ?? null;
+  }
 
   return {
     id: row.id,
     status,
-    signedAt: row.signedAt ? row.signedAt.toISOString() : null,
+    signedAt: signedAt ? signedAt.toISOString() : null,
     documentUrl: row.documentUrl,
     clientName: client.companyName,
     terms: `Lead Generation Service Agreement between leadgeneration.io and ${client.companyName}. Lead price: £${client.leadPrice ?? '0.00'} per valid lead. Payment terms: ${client.paymentTermsDays ?? 30} days.`,
