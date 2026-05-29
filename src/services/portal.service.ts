@@ -189,6 +189,13 @@ export interface PortalCompliance {
     type: string;
     uploadedAt: string;
     fileUrl: string;
+    /** Sam (jam-video #3, 29-May-2026): "you have to open it up in a brand
+     *  new tab, so it's not very user-friendly." A fresh 1-hour R2 signed
+     *  URL ready to drop into <img>/<video> at render time — saves an
+     *  N+1 round-trip to /signed-url and lets the FE show thumbnails
+     *  inline. null when the asset isn't R2-backed (e.g. landing-page URL
+     *  creatives whose fileUrl is already a public web link). */
+    signedUrl: string | null;
     approval: {
       status: 'pending' | 'approved' | 'rejected' | 'changes_requested';
       decidedAt: string | null;
@@ -890,6 +897,26 @@ export async function getCompliance(requester: AuthPayload): Promise<PortalCompl
   // Fetch latest approval status for every visible creative in one query.
   const approvalStates = await getApprovalStatesForCreatives(creativeRows.map((cr) => cr.id));
 
+  // Sam (jam-video #3, 29-May-2026): batch-sign R2 URLs at list time so
+  // the portal can drop them straight into <img>/<video> tags without an
+  // N+1 trip to /signed-url. Signing is local (HMAC, no network) so this
+  // adds maybe 1-2ms per row, well under the join cost above.
+  const signedUrlByCreativeId = new Map<string, string | null>();
+  await Promise.all(creativeRows.map(async (cr) => {
+    const loc = resolveR2Location(cr.fileUrl, cr.r2Key);
+    if (!loc) {
+      signedUrlByCreativeId.set(cr.id, null);
+      return;
+    }
+    try {
+      const url = await getSignedDownloadUrl({ folder: loc.folder, key: loc.key, expiresInSeconds: 3600 });
+      signedUrlByCreativeId.set(cr.id, url);
+    } catch (err) {
+      logger.warn({ err, creativeId: cr.id }, 'portal getCompliance: signed-URL refresh failed — falling back to stored fileUrl');
+      signedUrlByCreativeId.set(cr.id, null);
+    }
+  }));
+
   return campaignRows.map((c) => ({
     campaignName: c.name,
     creatives: creativeRows
@@ -902,6 +929,7 @@ export async function getCompliance(requester: AuthPayload): Promise<PortalCompl
           type: cr.type ?? 'unknown',
           uploadedAt: (cr.createdAt ?? new Date()).toISOString(),
           fileUrl: cr.fileUrl,
+          signedUrl: signedUrlByCreativeId.get(cr.id) ?? null,
           approval: {
             status: state?.status ?? 'pending',
             decidedAt: state?.decidedAt ?? null,
@@ -936,6 +964,12 @@ export interface PortalCreative {
   // XML once the X-Amz-Expires window elapses). Nullable for legacy rows
   // uploaded before r2Key was recorded.
   r2Key: string | null;
+  /** Sam (jam-video #3, 29-May-2026): a fresh 1-hour R2 signed URL ready
+   *  for inline <img>/<video> rendering. null when the row isn't R2-backed
+   *  (text/copy creatives whose fileUrl is already a public link). Saves
+   *  the FE an N+1 trip to /signed-url and means thumbnails load on first
+   *  paint without the buyer having to click anything. */
+  signedUrl: string | null;
   uploadedAt: string;
   section: 'media' | 'copy_lp';
   approval: {
@@ -989,6 +1023,25 @@ export async function getCreativesBySection(requester: AuthPayload): Promise<Por
 
   const approvalStates = await getApprovalStatesForCreatives(rows.map((r) => r.id));
 
+  // Sam (jam-video #3, 29-May-2026): batch-sign all R2 URLs at list time
+  // so the Creatives tab can render thumbnails inline. Same pattern as
+  // getCompliance above.
+  const signedUrlByCreativeId = new Map<string, string | null>();
+  await Promise.all(rows.map(async (r) => {
+    const loc = resolveR2Location(r.fileUrl, r.r2Key);
+    if (!loc) {
+      signedUrlByCreativeId.set(r.id, null);
+      return;
+    }
+    try {
+      const url = await getSignedDownloadUrl({ folder: loc.folder, key: loc.key, expiresInSeconds: 3600 });
+      signedUrlByCreativeId.set(r.id, url);
+    } catch (err) {
+      logger.warn({ err, creativeId: r.id }, 'portal getCreativesBySection: signed-URL refresh failed');
+      signedUrlByCreativeId.set(r.id, null);
+    }
+  }));
+
   const items: PortalCreative[] = rows.map((r) => {
     const state = approvalStates.get(r.id);
     return {
@@ -999,6 +1052,7 @@ export async function getCreativesBySection(requester: AuthPayload): Promise<Por
       type: r.type ?? 'unknown',
       fileUrl: r.fileUrl,
       r2Key: r.r2Key,
+      signedUrl: signedUrlByCreativeId.get(r.id) ?? null,
       uploadedAt: (r.createdAt ?? new Date()).toISOString(),
       section: (r.section as 'media' | 'copy_lp') ?? 'media',
       approval: {
