@@ -845,7 +845,18 @@ function rangeToLeadByteWindow(from: string, to: string): DeliveryWindow | null 
 export async function getLeadsBySource(
   requester: AuthPayload,
   range?: GetLeadsRange,
-): Promise<{ rows: PortalLeadsBySource[]; window: PortalLeadsBySourceWindow }> {
+): Promise<{
+  rows: PortalLeadsBySource[];
+  window: PortalLeadsBySourceWindow;
+  /** Yash (30-May-2026): per-Sato-campaign valid-lead count for the same
+   *  preset window, derived from LeadByte's per-supplier truth (the same
+   *  data the By Source breakdown uses). FE applies this as an override on
+   *  the By Campaign table so the table matches the summary tile (110) and
+   *  not lead_deliveries.lead_count (144 — includes Direct + unmapped
+   *  suppliers Sam objected to in jam-video #3 as "not the real number").
+   *  Undefined when the date range is custom-no-preset-match. */
+  validLeadsByCampaign?: Record<string, number>;
+}> {
   const clientId = requireClientId(requester);
   const { from, to } = resolveLeadsRange(range);
   const linkedCampaignIds = await campaignIdsForClient(clientId);
@@ -882,18 +893,27 @@ export async function getLeadsBySource(
     return { rows: [], window: { kind: 'preset', preset: lbWindow } };
   }
 
-  const [ownCampaignNames, campaignSpendRows] = await Promise.all([
+  const [ownCampaignNameToId, campaignSpendRows] = await Promise.all([
     db
-      .select({ name: campaigns.name })
+      .select({ id: campaigns.id, name: campaigns.name })
       .from(campaigns)
       .where(inArray(campaigns.id, linkedCampaignIds))
-      .then((rs) => new Set(rs.map((r) => r.name))),
+      .then((rs) => {
+        const m = new Map<string, string>();
+        for (const r of rs) m.set(r.name, r.id);
+        return m;
+      }),
     aggregateClientAdSpendByCampaignAndPlatform(linkedCampaignIds, from, to),
   ]);
+  const ownCampaignNames = new Set(ownCampaignNameToId.keys());
 
   // Sam (jam-video #3): use VALID leads, not total. Admin /reports shows
   // "Google 18 valid leads / Facebook 92 valid leads" — portal must match.
+  // Also bucket validLeads by Sato campaignId so the FE By Campaign table
+  // can override lead_deliveries.lead_count (which includes Direct +
+  // unmapped suppliers and produced the 144 number Sam called out).
   const lbValidLeadsByPlatform = new Map<string, number>();
+  const lbValidLeadsByCampaign = new Map<string, number>();
   for (const r of supplierRows) {
     if (!ownCampaignNames.has(r.campaignName)) continue;
     const canonicalPlatform = supplierNameToCatchrPlatform(r.supplierName);
@@ -902,6 +922,13 @@ export async function getLeadsBySource(
       canonicalPlatform,
       (lbValidLeadsByPlatform.get(canonicalPlatform) ?? 0) + r.validLeads,
     );
+    const satoCampaignId = ownCampaignNameToId.get(r.campaignName);
+    if (satoCampaignId) {
+      lbValidLeadsByCampaign.set(
+        satoCampaignId,
+        (lbValidLeadsByCampaign.get(satoCampaignId) ?? 0) + r.validLeads,
+      );
+    }
   }
 
   // Bucket spend per (platform, currency). LeadByte tells us what leads
@@ -950,7 +977,16 @@ export async function getLeadsBySource(
     })
     .sort((a, b) => b.spend - a.spend);
 
-  return { rows, window: { kind: 'preset', preset: lbWindow } };
+  const validLeadsByCampaign: Record<string, number> = {};
+  for (const [id, v] of lbValidLeadsByCampaign.entries()) {
+    validLeadsByCampaign[id] = v;
+  }
+
+  return {
+    rows,
+    window: { kind: 'preset', preset: lbWindow },
+    validLeadsByCampaign,
+  };
 }
 
 export async function getInvoices(requester: AuthPayload): Promise<PortalInvoice[]> {

@@ -57,6 +57,7 @@ export async function leads(req: Request, res: Response, next: NextFunction) {
         range,
         bySource: bySourceResult.rows,
         bySourceWindow: bySourceResult.window,
+        validLeadsByCampaign: bySourceResult.validLeadsByCampaign,
       },
     });
   } catch (err) {
