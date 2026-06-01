@@ -4,6 +4,7 @@ import { clients } from '../db/schema/clients.js';
 import { clientContacts } from '../db/schema/client-contacts.js';
 import { clientDocuments } from '../db/schema/client-documents.js';
 import { campaigns } from '../db/schema/campaigns.js';
+import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { creditChecks } from '../db/schema/credit-checks.js';
 import { invoices } from '../db/schema/invoices.js';
 import * as creditCheck from '../integrations/credit-check/index.js';
@@ -172,22 +173,31 @@ function toDetail(row: ClientRow, activeCampaigns: number, totalRevenue: number,
 /**
  * Count active campaigns per client in a single query — keyed by clientId.
  * Runs once per listClients call, not once per client, to avoid N+1.
+ *
+ * Yash (31-May-2026): the previous version counted only via the legacy
+ * `campaigns.client_id` column, which is NULL on every Slice-2 row (the
+ * vertical-then-link model where one campaign can serve multiple clients
+ * via `client_campaigns`). Every client therefore showed "0 campaigns"
+ * on the list page even when revenue from those campaigns was attributed
+ * to them (e.g. UKESN: 0 campaigns / £734k revenue, Benson Goldstein:
+ * 0 / 1 campaign actually linked). Use the join table as the source of
+ * truth for "is this client linked to this campaign" — the legacy
+ * direct column is only kept for backwards compat and no longer
+ * populated by the create/link flow.
  */
 async function loadActiveCampaignCounts(businessId: string): Promise<Map<string, number>> {
   const rows = await db
     .select({
-      clientId: campaigns.clientId,
-      count: sql<number>`count(*)::int`,
+      clientId: clientCampaigns.clientId,
+      count: sql<number>`count(distinct ${clientCampaigns.campaignId})::int`,
     })
-    .from(campaigns)
-    .innerJoin(clients, eq(clients.id, campaigns.clientId))
+    .from(clientCampaigns)
+    .innerJoin(clients, eq(clients.id, clientCampaigns.clientId))
+    .innerJoin(campaigns, eq(campaigns.id, clientCampaigns.campaignId))
     .where(and(eq(clients.businessId, businessId), eq(campaigns.status, 'active')))
-    .groupBy(campaigns.clientId);
+    .groupBy(clientCampaigns.clientId);
 
   const map = new Map<string, number>();
-  // campaigns.client_id is now nullable (Slice 2 schema). Only count rows
-  // that are tied to a specific client — vertical-only campaigns with null
-  // client_id are still surfaced via the join table, not here.
   for (const r of rows) {
     if (r.clientId) map.set(r.clientId, r.count);
   }

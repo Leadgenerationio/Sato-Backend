@@ -332,7 +332,59 @@ export async function listAgreementsForClient(clientId: string, requester?: Auth
 }
 
 export async function listAllAgreements() {
-  return db.select().from(agreements);
+  // Yash (31-May-2026): admin /agreements page used to render the raw
+  // `status`/`signedAt` from the agreements row, which made Coby Benson's
+  // envelope read "Sent" even though `clients.agreementSigned=true` (the
+  // admin-toggleable override Sam uses for offline signatures). Portal
+  // already honours that override (see portal.service.ts getAgreement);
+  // admin should too so the two surfaces don't disagree. We compute the
+  // effective status here and emit it as `effectiveStatus`/`effectiveSignedAt`
+  // alongside the raw fields so existing consumers that read `status`
+  // unchanged still work.
+  const rows = await db
+    .select({
+      id: agreements.id,
+      clientId: agreements.clientId,
+      providerEnvelopeId: agreements.providerEnvelopeId,
+      documentUrl: agreements.documentUrl,
+      signerName: agreements.signerName,
+      signerEmail: agreements.signerEmail,
+      status: agreements.status,
+      sentAt: agreements.sentAt,
+      signedAt: agreements.signedAt,
+      signedByClient: agreements.signedByClient,
+      declinedAt: agreements.declinedAt,
+      createdAt: agreements.createdAt,
+      updatedAt: agreements.updatedAt,
+      clientAgreementSigned: clients.agreementSigned,
+    })
+    .from(agreements)
+    .leftJoin(clients, eq(clients.id, agreements.clientId));
+
+  return rows.map((r) => {
+    const overrideActive = r.clientAgreementSigned === true;
+    const rawStatus = r.status ?? 'pending';
+    const rawSigned = rawStatus === 'completed' || rawStatus === 'signed' || !!r.signedAt;
+    const effectiveStatus = rawSigned || overrideActive ? 'completed' : rawStatus;
+    const effectiveSignedAt = r.signedAt
+      ?? (overrideActive ? r.sentAt ?? r.updatedAt ?? r.createdAt : null);
+    return {
+      id: r.id,
+      clientId: r.clientId,
+      providerEnvelopeId: r.providerEnvelopeId,
+      documentUrl: r.documentUrl,
+      signerName: r.signerName,
+      signerEmail: r.signerEmail,
+      status: effectiveStatus,
+      rawStatus,
+      sentAt: r.sentAt,
+      signedAt: effectiveSignedAt,
+      signedByClient: r.signedByClient,
+      declinedAt: r.declinedAt,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  });
 }
 
 export async function getAgreement(id: string, requester?: AuthPayload) {

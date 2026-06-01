@@ -297,7 +297,7 @@ describe('User Service', () => {
 
     it('rejects a too-short new password', async () => {
       await expect(changeOwnPassword(pwTestUserId, PW_INITIAL, 'short'))
-        .rejects.toThrow('at least 6 characters');
+        .rejects.toThrow('at least 8 characters');
     });
 
     it('rejects reusing the same password', async () => {

@@ -671,7 +671,10 @@ async function buildOverview() {
     // Hot-path the cached LeadByte campaign report. Sum total leads across
     // all campaigns. Returns 0 leads when LeadByte is unconfigured (mock mode).
     isLeadByteConfigured()
-      ? cached('lb:report:this_month:v5', 900, () => getCampaignReport('this_month'))
+      // TTL 300s matches the same `lb:report:${window}:v5` key used by
+      // leadbyte.routes.ts so the Dashboard and Reports pages don't drift
+      // (one writing at 5min, the other expecting 15min). Same key, one TTL.
+      ? cached('lb:report:this_month:v5', 300, () => getCampaignReport('this_month'))
           .then((rows) => rows.reduce((s, r) => s + (r.leads ?? 0), 0))
           .catch(() => 0)
       : Promise.resolve(0),

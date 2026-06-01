@@ -93,11 +93,20 @@ export async function listCampaignsForClient(
 
   const rows = await db
     .select({
-      id: clientCampaigns.id,
+      linkId: clientCampaigns.id,
       clientId: clientCampaigns.clientId,
       clientName: clients.companyName,
       campaignId: clientCampaigns.campaignId,
       campaignName: campaigns.name,
+      // Yash (31-May-2026): FE Campaigns tab on Client Detail rendered
+      // `${c.name}` (undefined) and "Remove undefined" because the BE
+      // response was missing `name`/`vertical`/`costPerLead` and used
+      // `id` as the link-row id rather than the campaign id (so the
+      // unlink mutation also called with the wrong id). Include the
+      // campaign-level fields the FE actually reads.
+      vertical: campaigns.vertical,
+      campaignStatus: campaigns.status,
+      costPerLead: campaigns.costPerLead,
       leadPrice: clientCampaigns.leadPrice,
       currency: clientCampaigns.currency,
       status: clientCampaigns.status,
@@ -111,14 +120,23 @@ export async function listCampaignsForClient(
     .orderBy(desc(clientCampaigns.startedAt));
 
   return rows.map((r) => ({
-    id: r.id,
+    // Use the campaign id so `unlink({ campaignId: c.id })` actually
+    // hits the right row. Old behaviour returned the join-table id and
+    // the unlink call silently used the wrong id → "Remove undefined"
+    // button never actually removed anything.
+    id: r.campaignId,
+    linkId: r.linkId,
     clientId: r.clientId,
     clientName: r.clientName,
     campaignId: r.campaignId,
+    name: r.campaignName,
     campaignName: r.campaignName,
+    vertical: r.vertical ?? '',
+    status: r.campaignStatus ?? r.status ?? 'active',
+    linkStatus: r.status ?? 'active',
+    costPerLead: r.costPerLead != null ? Number(r.costPerLead) : null,
     leadPrice: r.leadPrice ? Number(r.leadPrice) : null,
     currency: r.currency ?? 'GBP',
-    status: r.status ?? 'active',
     startedAt: (r.startedAt ?? new Date()).toISOString(),
     endedAt: r.endedAt ? r.endedAt.toISOString() : null,
   }));

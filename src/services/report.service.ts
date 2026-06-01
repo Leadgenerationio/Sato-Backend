@@ -11,6 +11,7 @@ import type { AuthPayload } from '../types/index.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
 import { cached } from '../utils/cache.js';
+import { canonicalPlatformSql } from '../utils/catchr-platform.js';
 
 // Cache TTL for LeadByte report calls used by /reports/unified. Mirrors the
 // TTL used by campaign.service so the key/TTL pairing is consistent across
@@ -1278,35 +1279,61 @@ export async function getPnlSummary(
     .where(and(txWhere, isNull(bankTransactions.categoryId)));
   uncategorisedCount = uncatRow?.count ?? 0;
 
-  // Ad spend from Catchr. The ad_spend table has no business_id column yet,
-  // so we tenant-scope via a join through clients (ad_spend.client_id →
-  // clients.business_id). Side effect: rows where Sam hasn't yet mapped a
-  // Catchr campaign to a Stato client (clientId IS NULL) are excluded — that
-  // was the source of the cross-tenant Poland-spend leak Sam reported (#74,
-  // #109). Until those rows get a client mapping, they don't attribute to
-  // anyone's P&L. unattributedSpendRows is surfaced so the UI can prompt
-  // for the mapping.
-  // Sam jam-video #2: dedupe before summing. We dedupe scoped to this
-  // tenant's ad_spend rows (client_id mapped to a client in this business)
-  // so the natural-key collapse happens AFTER the tenant filter — keeps
-  // cross-tenant leaks impossible by construction.
+  // Ad spend from Catchr. The ad_spend table has no business_id column and
+  // Catchr's ingest leaves ad_spend.client_id NULL on every row (the field
+  // was never wired up). The previous implementation joined ad_spend.client_id
+  // → clients.business_id, which excluded EVERY Catchr row (NULL on both
+  // sides) and surfaced "Ad spend (Catchr): £0.00" in the P&L for tenants
+  // who clearly had spend (e.g. May 2026: £597k visible on /reports/unified
+  // but £0 here). Yash (31-May-2026): tenant-scope via traffic_sources
+  // instead — the same path the portal getCampaignMetrics + admin Reports
+  // /unified already use. A row attributes to this tenant when (platform,
+  // account_id) matches an active traffic_source whose campaign is owned by
+  // a client whose business_id is this one. Cross-tenant leaks are still
+  // impossible: traffic_sources is tenant-scoped via campaigns → clients.
+  // MAX-CTE dedupe at the bottom to collapse the 3× authorisation duplicate
+  // rows per (platform, account_id, campaign_id, date).
+  const tsPlatformExpr = sql.raw(canonicalPlatformSql('ts.platform'));
+  // `d.platform` references the deduped CTE alias; the inner ad_spend rows are
+  // already aliased `a` inside that CTE but only `d` is in scope on the outer
+  // JOIN. Using `a.platform` here would yield Postgres "missing FROM-clause
+  // entry for table 'a'".
+  const dedupedPlatformExpr = sql.raw(canonicalPlatformSql('d.platform'));
   const adSpendRows = businessId
     ? ((await db.execute(sql`
-        with scoped as (
-          select a.platform, a.account_id, a.campaign_id, a.date, a.spend
-          from ${adSpend} a
-          inner join ${clients} c on c.id = a.client_id
-          where c.business_id = ${businessId}
-            and a.date >= ${fromIso}
-            and a.date <= ${toIso}
+        with source_accounts as (
+          select ${tsPlatformExpr} as platform, ts.account_id as acc_id
+          from traffic_sources ts
+          inner join campaigns c on c.id = ts.campaign_id
+          inner join client_campaigns cc on cc.campaign_id = c.id
+          inner join clients cl on cl.id = cc.client_id
+          where cl.business_id = ${businessId}
+            and ts.is_active = true
+            and ts.account_id is not null
+            and ts.platform is not null
+          union
+          select ${tsPlatformExpr} as platform,
+                 jsonb_array_elements_text(ts.account_ids) as acc_id
+          from traffic_sources ts
+          inner join campaigns c on c.id = ts.campaign_id
+          inner join client_campaigns cc on cc.campaign_id = c.id
+          inner join clients cl on cl.id = cc.client_id
+          where cl.business_id = ${businessId}
+            and ts.is_active = true
+            and ts.platform is not null
         ),
         deduped as (
-          select max(spend::numeric) as spend
-          from scoped
-          group by platform, account_id, campaign_id, date
+          select a.platform, a.account_id, a.campaign_id, a.date,
+                 max(a.spend::numeric) as spend
+          from ad_spend a
+          where a.date >= ${fromIso}
+            and a.date <= ${toIso}
+          group by a.platform, a.account_id, a.campaign_id, a.date
         )
-        select coalesce(sum(spend), 0)::text as total
-        from deduped
+        select coalesce(sum(d.spend), 0)::text as total
+        from deduped d
+        inner join source_accounts sa
+          on ${dedupedPlatformExpr} = sa.platform and d.account_id = sa.acc_id
       `)) as unknown as Array<{ total: string }>)
     : [];
   const adSpendRow = adSpendRows[0];
