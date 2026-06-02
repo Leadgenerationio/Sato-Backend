@@ -331,6 +331,39 @@ export async function listAgreementsForClient(clientId: string, requester?: Auth
   return db.select().from(agreements).where(eq(agreements.clientId, clientId));
 }
 
+/**
+ * Compute the agreement status the admin UI should display, honouring the
+ * `clients.agreementSigned` admin override the same way the portal does.
+ *
+ * Pure + exported so the mapping is unit-testable without a DB round-trip.
+ * Returns BOTH the effective status (what the badge renders) and the raw
+ * provider status (so callers can still see the underlying SignNow state).
+ *
+ *   - genuine SignNow terminal state ('completed') → keep 'completed'
+ *     (accurate provider terminology staff recognise).
+ *   - admin override (clients.agreementSigned=true while the envelope is
+ *     still 'sent'/unsigned — e.g. Benson Goldstein, signed offline) →
+ *     'signed', matching the portal which returns 'signed' for the same
+ *     override (portal.service.ts getAgreement). This is the fix for the
+ *     mismatch Sam flagged: admin said "Completed"/"Sent" while the portal
+ *     said "Signed" for the same client.
+ *   - not effectively signed at all → pass the raw status through unchanged.
+ */
+export function computeEffectiveAgreementStatus(input: {
+  status: string | null;
+  signedAt: Date | null;
+  clientAgreementSigned: boolean | null;
+}): { effectiveStatus: string; rawStatus: string; effectiveSigned: boolean } {
+  const overrideActive = input.clientAgreementSigned === true;
+  const rawStatus = input.status ?? 'pending';
+  const rawSigned = rawStatus === 'completed' || rawStatus === 'signed' || !!input.signedAt;
+  const effectiveSigned = rawSigned || overrideActive;
+  const effectiveStatus = effectiveSigned
+    ? (rawStatus === 'completed' ? 'completed' : 'signed')
+    : rawStatus;
+  return { effectiveStatus, rawStatus, effectiveSigned };
+}
+
 export async function listAllAgreements() {
   // Yash (31-May-2026): admin /agreements page used to render the raw
   // `status`/`signedAt` from the agreements row, which made Coby Benson's
@@ -363,9 +396,11 @@ export async function listAllAgreements() {
 
   return rows.map((r) => {
     const overrideActive = r.clientAgreementSigned === true;
-    const rawStatus = r.status ?? 'pending';
-    const rawSigned = rawStatus === 'completed' || rawStatus === 'signed' || !!r.signedAt;
-    const effectiveStatus = rawSigned || overrideActive ? 'completed' : rawStatus;
+    const { effectiveStatus, rawStatus } = computeEffectiveAgreementStatus({
+      status: r.status,
+      signedAt: r.signedAt,
+      clientAgreementSigned: r.clientAgreementSigned,
+    });
     const effectiveSignedAt = r.signedAt
       ?? (overrideActive ? r.sentAt ?? r.updatedAt ?? r.createdAt : null);
     return {
