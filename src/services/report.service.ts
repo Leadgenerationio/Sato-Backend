@@ -463,7 +463,11 @@ export async function getClientPnl(requester: AuthPayload): Promise<ClientPnlRow
       .innerJoin(clients, eq(clients.id, invoices.clientId))
       .where(and(
         eq(clients.businessId, businessId),
-        eq(invoices.status, 'paid'),
+        // Recognised revenue = paid + authorised (accrual), matching the
+        // dashboard and financial-overview. Was 'paid'-only, which made the
+        // per-client P&L under-report authorised-but-unpaid invoices that the
+        // dashboard already counts — the two screens then disagreed.
+        inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]),
         gte(invoices.createdAt, sixMonthsAgo),
       ))
       .groupBy(invoices.clientId, sql`to_char(${invoices.createdAt}, 'YYYY-MM')`),
@@ -1364,7 +1368,8 @@ export async function getPnlSummary(
           SELECT 1
           FROM ${trafficSources} ts
           JOIN ${campaignsTable} c ON c.id = ts.campaign_id
-          JOIN ${clients} cl ON cl.id = c.client_id
+          LEFT JOIN client_campaigns cc ON cc.campaign_id = c.id
+          JOIN ${clients} cl ON (cl.id = cc.client_id OR cl.id = c.client_id)
           WHERE cl.business_id = ${businessId}
             AND ts.platform = ${adSpend.platform}
             AND (

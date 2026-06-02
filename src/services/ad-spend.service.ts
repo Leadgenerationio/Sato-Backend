@@ -369,6 +369,11 @@ export interface AdSpendSummaryRow {
 
 export async function summarizeAdSpend(filters: AdSpendFilters = {}): Promise<AdSpendSummaryRow[]> {
   const where = buildWhere(filters);
+  // Empty filters → buildWhere returns undefined; interpolating that straight
+  // into the raw SQL produces an invalid/degenerate WHERE. Guard it so a
+  // no-filter call (e.g. GET /ad-spend/summary with no query string) returns
+  // the full deduped roll-up instead of crashing or silently returning nothing.
+  const whereSql = where ? sql`where ${where}` : sql``;
 
   // Sam jam-video #2: dedupe on natural key BEFORE grouping by
   // (platform, accountName, currency) so the per-account totals on
@@ -380,7 +385,7 @@ export async function summarizeAdSpend(filters: AdSpendFilters = {}): Promise<Ad
       select a.platform, a.account_id, a.campaign_id, a.date, a.account_name, a.currency,
              max(a.spend::numeric) as spend
       from ${adSpend} a
-      where ${where}
+      ${whereSql}
       group by a.platform, a.account_id, a.campaign_id, a.date, a.account_name, a.currency
     )
     select platform, account_name as "accountName", currency,
@@ -408,6 +413,9 @@ export async function summarizeAdSpend(filters: AdSpendFilters = {}): Promise<Ad
 
 export async function totalSpend(filters: AdSpendFilters = {}): Promise<{ total: number; currency: string; rowCount: number }> {
   const where = buildWhere(filters);
+  // Same empty-filter guard as summarizeAdSpend — undefined where would
+  // produce invalid SQL on a no-filter call.
+  const whereSql = where ? sql`where ${where}` : sql``;
   // Sam jam-video #2 (27-May-2026): dedupe before summing — the 3×
   // authorization_id rows per natural key inflate the total ~3x.
   // rowCount stays as the raw count for diagnostics (so dashboards can
@@ -415,7 +423,7 @@ export async function totalSpend(filters: AdSpendFilters = {}): Promise<{ total:
   // deduped one. Permanent ingestion fix is Hari's.
   const rowsRaw = (await db.execute(sql`
     with filtered as (
-      select * from ${adSpend} where ${where}
+      select * from ${adSpend} ${whereSql}
     ),
     deduped as (
       select platform, account_id, campaign_id, date, max(spend::numeric) as spend
