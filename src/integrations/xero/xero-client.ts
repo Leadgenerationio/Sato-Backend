@@ -96,7 +96,7 @@ let lastTokenInfo: {
 
 async function exchangeCredentials(): Promise<{ accessToken: string; expiresAt: number }> {
   const basic = Buffer.from(`${clientId()}:${clientSecret()}`).toString('base64');
-  const res = await fetch(`${IDENTITY_HOST}/connect/token`, {
+  const res = await xeroFetchWithBackoff(`${IDENTITY_HOST}/connect/token`, {
     method: 'POST',
     headers: {
       Authorization: `Basic ${basic}`,
@@ -106,7 +106,6 @@ async function exchangeCredentials(): Promise<{ accessToken: string; expiresAt: 
       grant_type: 'client_credentials',
       scope: SCOPES,
     }),
-    signal: AbortSignal.timeout(15_000),
   });
 
   if (!res.ok) {
@@ -144,9 +143,8 @@ async function exchangeCredentials(): Promise<{ accessToken: string; expiresAt: 
 }
 
 async function fetchBoundTenant(accessToken: string): Promise<{ tenantId: string; tenantName: string }> {
-  const res = await fetch(`${API_HOST}/connections`, {
+  const res = await xeroFetchWithBackoff(`${API_HOST}/connections`, {
     headers: { Authorization: `Bearer ${accessToken}` },
-    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
     const body = await res.text();
@@ -289,7 +287,7 @@ export async function createContact(input: CreateContactInput): Promise<XeroCont
     body.Addresses = [{ AddressType: 'STREET', AddressLine1: input.address }];
   }
 
-  const res = await fetch(`${API_HOST}/api.xro/2.0/Contacts`, {
+  const res = await xeroFetchWithBackoff(`${API_HOST}/api.xro/2.0/Contacts`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -298,7 +296,6 @@ export async function createContact(input: CreateContactInput): Promise<XeroCont
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15_000),
   });
 
   if (!res.ok) {
@@ -396,9 +393,9 @@ export async function getBankBalances(): Promise<XeroBankAccount[]> {
     Accept: 'application/json',
   };
 
-  const accountsRes = await fetch(
+  const accountsRes = await xeroFetchWithBackoff(
     `${API_HOST}/api.xro/2.0/Accounts?where=${encodeURIComponent('Type=="BANK"&&Status=="ACTIVE"')}`,
-    { headers, signal: AbortSignal.timeout(15_000) },
+    { headers },
   );
   if (!accountsRes.ok) {
     const body = await accountsRes.text();
@@ -417,9 +414,9 @@ export async function getBankBalances(): Promise<XeroBankAccount[]> {
     { value: string; date: string | null; unreconciledLines: number | null }
   >();
 
-  const cvRes = await fetch(
+  const cvRes = await xeroFetchWithBackoff(
     `${API_HOST}/finance.xro/1.0/CashValidation?balanceDate=${balanceDate}&beginDate=${beginDate}`,
-    { headers, signal: AbortSignal.timeout(15_000) },
+    { headers },
   );
   if (cvRes.ok) {
     const items = (await cvRes.json()) as XeroCashValidationItem[];
@@ -449,9 +446,9 @@ export async function getBankBalances(): Promise<XeroBankAccount[]> {
   const bankSummaryByAccountId = new Map<string, { value: string; date: string | null }>();
   if (statementByAccountId.size === 0) {
     try {
-      const bsRes = await fetch(
+      const bsRes = await xeroFetchWithBackoff(
         `${API_HOST}/api.xro/2.0/Reports/BankSummary?fromDate=${beginDate}&toDate=${balanceDate}`,
-        { headers, signal: AbortSignal.timeout(15_000) },
+        { headers },
       );
       if (bsRes.ok) {
         const bsData = (await bsRes.json()) as XeroTaxSummaryResponse;
@@ -651,7 +648,7 @@ export async function getBankTransactions(
 
   for (let page = 1; page <= maxPages; page++) {
     const url = `${API_HOST}/api.xro/2.0/BankTransactions?where=${encodeURIComponent(where)}&order=Date%20DESC&page=${page}`;
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+    const res = await xeroFetchWithBackoff(url, { headers });
     if (!res.ok) {
       const body = await res.text();
       logger.error({ status: res.status, body, page }, 'Xero /BankTransactions failed');
@@ -854,7 +851,7 @@ export async function getInvoicesForContact(contactId: string): Promise<XeroInvo
   // Xero paginates Invoices via ?page=N and returns up to 100 per page.
   for (let page = 1; page <= 10; page++) {
     const url = `${API_HOST}/api.xro/2.0/Invoices?where=${where}&order=Date%20DESC&page=${page}`;
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+    const res = await xeroFetchWithBackoff(url, { headers });
     if (!res.ok) {
       const body = await res.text();
       logger.error({ status: res.status, body, contactId, page }, 'Xero /Invoices failed');
