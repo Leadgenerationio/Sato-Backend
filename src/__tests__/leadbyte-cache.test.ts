@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import app from '../index.js';
 import * as lb from '../integrations/leadbyte/leadbyte-client.js';
+import { invalidateCache } from '../utils/cache.js';
 
 // These tests verify the perf fix: dashboard routes go through `cached()` so a
 // repeat hit within the TTL window doesn't call LeadByte twice. Without the
@@ -14,6 +15,18 @@ let ownerToken: string;
 describe('LeadByte routes — read-through cache', () => {
   beforeEach(async () => {
     process.env.LEADBYTE_API_KEY = 'test-key-for-cache';
+    // A prior test file (cache-prewarm / report suites) may have warmed these
+    // keys in shared Redis; clear them so the spied LeadByte client is actually
+    // invoked on the first hit of each test rather than served from a stale
+    // cache entry (the cross-file leak that made these two tests flaky in the
+    // full suite while passing in isolation).
+    await invalidateCache(
+      'lb:report:yesterday:v5',
+      'lb:report:this_month:v5',
+      'lb:supplier-spend:last_week:v1',
+      'lb:buyers:all:v1',
+      'lb:deliveries:all:v1',
+    );
     const ownerRes = await request(app)
       .post('/api/v1/auth/login')
       .send({ email: 'owner@stato.app', password: 'owner123' });

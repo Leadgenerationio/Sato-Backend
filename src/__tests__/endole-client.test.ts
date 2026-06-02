@@ -242,17 +242,18 @@ describe('Endole client — unconfigured fallback', () => {
     global.fetch = ORIGINAL_FETCH;
   });
 
-  it('does not call fetch and returns a mock report when unconfigured', async () => {
+  // "No fabricated data" policy (audit 2026-05-03): when unconfigured the
+  // client must THROW rather than return a made-up mock score. Previously
+  // this asserted a mock report was returned — that was the old behaviour the
+  // policy removed, so the assertion was stale. It now verifies the throw, and
+  // that we never hit the network without credentials.
+  it('throws "not configured" and never calls fetch when unconfigured (no fabricated scores)', async () => {
     const fetchSpy = vi.fn();
     global.fetch = fetchSpy as unknown as typeof fetch;
 
-    const r = await endole.runCreditCheck('12345678', 'Acme Ltd');
+    await expect(endole.runCreditCheck('12345678', 'Acme Ltd')).rejects.toThrow(/not configured/i);
 
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(r.companyNumber).toBe('12345678');
-    expect(r.companyName).toBe('Acme Ltd');
-    expect(r.creditScore).toBeGreaterThanOrEqual(40);
-    expect(r.creditScore).toBeLessThanOrEqual(100);
   });
 });
 

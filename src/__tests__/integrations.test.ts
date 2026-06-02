@@ -10,7 +10,6 @@ import {
 // SignNow replaces DocuSign; see `signnow-client.test.ts` for the 17-test suite.
 import { isCreditsafeConfigured, runCreditCheck as runCreditsafe } from '../integrations/creditsafe/creditsafe-client.js';
 import { getActiveProvider, runCreditCheck as runCredit } from '../integrations/credit-check/index.js';
-import { scoreToRiskRating } from '../integrations/credit-check/types.js';
 
 describe('Resend integration', () => {
   it('reports not configured when RESEND_API_KEY is empty', () => {
@@ -115,21 +114,11 @@ describe('Creditsafe integration', () => {
     expect(isCreditsafeConfigured()).toBe(false);
   });
 
-  it('mock report has creditsafe source tag', async () => {
-    const r = await runCreditsafe('12345678', 'Acme Ltd');
-    expect(r.source).toBe('creditsafe');
-    expect(r.companyName).toBe('Acme Ltd');
-    expect(r.companyNumber).toBe('12345678');
-    expect(r.creditScore).toBeGreaterThanOrEqual(40);
-    expect(r.creditScore).toBeLessThanOrEqual(100);
-  });
-
-  it('mock report risk rating follows score bands', async () => {
-    for (let i = 0; i < 20; i++) {
-      const r = await runCreditsafe(`comp-${i}`, 'Test Co');
-      const expected = scoreToRiskRating(r.creditScore);
-      expect(r.riskRating).toBe(expected);
-    }
+  // "No fabricated data" policy: an unconfigured provider must THROW rather
+  // than return a made-up mock score. (The previous two tests asserted a mock
+  // report's contents — that mock no longer exists, so they were stale.)
+  it('throws "not configured" when unconfigured (no fabricated scores)', async () => {
+    await expect(runCreditsafe('12345678', 'Acme Ltd')).rejects.toThrow(/not configured/i);
   });
 });
 
