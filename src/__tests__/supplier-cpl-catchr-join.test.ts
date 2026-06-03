@@ -9,10 +9,15 @@ import { adSpend } from '../db/schema/ad-spend.js';
 // fix, the endpoint used LeadByte's `payout` field which is genuinely £0 for
 // every ad-platform supplier (LeadByte doesn't know what we spent in FB).
 
-const isoOffset = (days: number) => {
+// Seed dates must land INSIDE the `this_month` window the query covers.
+// Using a fixed "N days ago" offset was calendar-flaky: on the 1st–3rd of a
+// month, 2–3 days ago falls into LAST month, outside this_month, so the
+// Catchr join returned £0 and the spend assertions failed (every month-start,
+// in CI too — not just locally). Anchor the seeds to the 1st of the current
+// month, which is always within [start-of-month, today]. Server runs UTC.
+const thisMonthIso = () => {
   const d = new Date();
-  d.setDate(d.getDate() - days);
-  return d.toISOString().split('T')[0];
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().split('T')[0];
 };
 
 // Mock the LeadByte client: getSupplierSpend returns controlled supplier
@@ -51,7 +56,7 @@ describe('Supplier performance — Catchr ad_spend join', () => {
           platform: 'facebook-ads',
           authorizationId: 999201,
           accountId: 'cpl-test-acc-fb',
-          date: isoOffset(2),
+          date: thisMonthIso(),
           spend: '2400.00',
           currency: 'GBP',
         },
@@ -59,7 +64,7 @@ describe('Supplier performance — Catchr ad_spend join', () => {
           platform: 'google-ads',
           authorizationId: 999201,
           accountId: 'cpl-test-acc-g',
-          date: isoOffset(3),
+          date: thisMonthIso(),
           spend: '1500.00',
           currency: 'GBP',
         },
