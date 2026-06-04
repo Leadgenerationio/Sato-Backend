@@ -21,13 +21,23 @@ const SEED_CLIENT_ID = '00000000-0000-0000-0000-00000000fe01';
 const LEADGEN_BUSINESS_ID = '26d6b2b4-c867-460e-8473-eca2b1ffd232';
 let ownerToken: string;
 
-// Build a Date at the 15th of the month N months ago (mid-month avoids
-// any timezone-rollover oddities at month boundaries).
+// Build a Date inside the month N months ago that always lands within the
+// dashboard's [start, today] window.
+//
+// Two calendar traps this avoids (both failed in the first half of a month,
+// CI included):
+//   1. Future date — the 15th of the CURRENT month hasn't happened on the
+//      1st–14th, so it's past the window's `today` upper bound. Clamp the
+//      current-month day to min(15, today).
+//   2. Time-of-day boundary — the upper bound compares `due_date <= today::date`
+//      (i.e. midnight). A noon timestamp on `today` is > today-midnight and
+//      gets excluded. Use 00:00 so an in-month "today" still qualifies.
 function midMonthOffset(monthsAgo: number): Date {
-  const d = new Date();
+  const now = new Date();
+  const d = new Date(now);
   d.setMonth(d.getMonth() - monthsAgo);
-  d.setDate(15);
-  d.setHours(12, 0, 0, 0);
+  d.setDate(monthsAgo === 0 ? Math.min(15, now.getDate()) : 15);
+  d.setHours(0, 0, 0, 0);
   return d;
 }
 
