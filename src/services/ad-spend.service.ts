@@ -388,11 +388,11 @@ export async function summarizeAdSpend(filters: AdSpendFilters = {}): Promise<Ad
       ${whereSql}
       group by a.platform, a.account_id, a.campaign_id, a.date, a.account_name, a.currency
     )
-    select platform, account_name as "accountName", currency,
+    select platform, account_id, max(account_name) as "accountName", currency,
            coalesce(sum(spend), 0)::text as "totalSpend",
            count(distinct campaign_id)::int as campaigns
     from deduped
-    group by platform, account_name, currency
+    group by platform, account_id, currency
     order by sum(spend) desc nulls last
   `)) as unknown as Array<{
     platform: string;

@@ -57,42 +57,61 @@ export async function processRecurringTasks(now: Date = new Date()): Promise<Pro
 
     try {
       const dueDate = parent.recurrenceNextRun ?? now;
-      const [clone] = await db
-        .insert(tasks)
-        .values({
-          businessId: parent.businessId,
-          title: parent.title,
-          description: parent.description ?? '',
-          assignee: parent.assignee ?? '',
-          priority: parent.priority,
-          status: 'todo',
-          category: parent.category ?? 'general',
-          createdBy: parent.createdBy,
-          dueDate,
-          timeBlockMinutes: parent.timeBlockMinutes ?? null,
-          linkedSopId: parent.linkedSopId ?? null,
-          parentTaskId: parent.id,
-          // Clones don't themselves recur — only the original is the
-          // source-of-truth schedule. Prevents an exponentiating tree of
-          // recurrences if a user accidentally sets cron on a clone.
-          recurrenceCron: null,
-          recurrenceNextRun: null,
-          auditLog: [{
-            action: `Auto-created from recurring task "${parent.title}"`,
-            user: parent.createdBy,
-            timestamp: now.toISOString(),
-          }],
-        })
-        .returning();
-
       // Compute next fire AFTER `dueDate` (not after `now`) so dense
       // schedules (e.g. every-15-min) don't skip ticks when the worker
       // is delayed.
       const nextRun = cronNextFire(cron, dueDate);
-      await db
-        .update(tasks)
-        .set({ recurrenceNextRun: nextRun, updatedAt: new Date() })
-        .where(eq(tasks.id, parent.id));
+
+      // Atomic claim + clone in one transaction. The conditional UPDATE
+      // advances recurrence_next_run only if it STILL equals the value we
+      // observed in the select above — so if an overlapping tick (a delayed
+      // worker, or >1 worker process) already fired this recurrence, our
+      // claim affects 0 rows and we skip rather than creating a duplicate
+      // clone. Wrapping the clone INSERT in the same tx means a failed insert
+      // rolls the pointer back and we retry next tick — no double-clone, no
+      // lost clone.
+      const clone = await db.transaction(async (tx) => {
+        const claimed = await tx
+          .update(tasks)
+          .set({ recurrenceNextRun: nextRun, updatedAt: new Date() })
+          .where(and(eq(tasks.id, parent.id), eq(tasks.recurrenceNextRun, dueDate)))
+          .returning({ id: tasks.id });
+        if (claimed.length === 0) return null;
+        const [c] = await tx
+          .insert(tasks)
+          .values({
+            businessId: parent.businessId,
+            title: parent.title,
+            description: parent.description ?? '',
+            assignee: parent.assignee ?? '',
+            priority: parent.priority,
+            status: 'todo',
+            category: parent.category ?? 'general',
+            createdBy: parent.createdBy,
+            dueDate,
+            timeBlockMinutes: parent.timeBlockMinutes ?? null,
+            linkedSopId: parent.linkedSopId ?? null,
+            parentTaskId: parent.id,
+            // Clones don't themselves recur — only the original is the
+            // source-of-truth schedule. Prevents an exponentiating tree of
+            // recurrences if a user accidentally sets cron on a clone.
+            recurrenceCron: null,
+            recurrenceNextRun: null,
+            auditLog: [{
+              action: `Auto-created from recurring task "${parent.title}"`,
+              user: parent.createdBy,
+              timestamp: now.toISOString(),
+            }],
+          })
+          .returning();
+        return c;
+      });
+
+      // Lost the race to a concurrent tick — it already fired this recurrence.
+      if (!clone) {
+        result.skipped += 1;
+        continue;
+      }
 
       // Event on the PARENT — the feed view shows "this recurrence fired".
       await logActivity(parent.id, null, 'task_updated', {

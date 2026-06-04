@@ -728,22 +728,37 @@ async function getCampaignMetricsForCampaigns(
   // not FX-convert; UK clients are GBP across the board today), tagging
   // the result with the client's currency. Catchr-side failures throw,
   // caught below to null out per-campaign rather than the whole batch.
-  const spendByCampaign = new Map<string, { spend: number; currency: string }>();
+  // Bucket spend per (campaign, currency) so amounts in different currencies
+  // are never added together (Sato does not FX-convert). For the common
+  // single-currency case (UK clients are all GBP) this is identical to a plain
+  // sum. When a campaign genuinely spans currencies we report the DOMINANT
+  // bucket (largest spend) with its own currency tag — a coherent figure in a
+  // real currency rather than a meaningless mixed total.
+  const spendBucketsByCampaign = new Map<string, Map<string, number>>();
   const campaignsWithCatchr = new Set<string>();
   try {
     const rows = await aggregateClientAdSpendByCampaignAndPlatform(campaignIds, windowFrom, windowTo);
     for (const r of rows) {
       campaignsWithCatchr.add(r.campaignId);
-      const prev = spendByCampaign.get(r.campaignId) ?? { spend: 0, currency: clientCurrency };
-      prev.spend += r.spend;
-      // Prefer the first non-null currency we see; client currency as fallback.
-      if (r.currency && prev.currency === clientCurrency) prev.currency = normalizeCurrencyCode(r.currency, clientCurrency);
-      spendByCampaign.set(r.campaignId, prev);
+      const cur = normalizeCurrencyCode(r.currency, clientCurrency);
+      const buckets = spendBucketsByCampaign.get(r.campaignId) ?? new Map<string, number>();
+      buckets.set(cur, (buckets.get(cur) ?? 0) + r.spend);
+      spendBucketsByCampaign.set(r.campaignId, buckets);
     }
   } catch (err) {
     logger.warn({ err, campaignIds }, 'portal getCampaignMetrics: Catchr aggregation failed — every campaign returns null');
     for (const id of campaignIds) result.set(id, null);
     return result;
+  }
+  // Collapse each campaign's per-currency buckets to one representative figure.
+  const spendByCampaign = new Map<string, { spend: number; currency: string }>();
+  for (const [campaignId, buckets] of spendBucketsByCampaign) {
+    let bestCurrency = clientCurrency;
+    let bestSpend = 0;
+    for (const [cur, spend] of buckets) {
+      if (spend > bestSpend) { bestSpend = spend; bestCurrency = cur; }
+    }
+    spendByCampaign.set(campaignId, { spend: bestSpend, currency: bestCurrency });
   }
 
   // Valid leads per Sato campaign via LeadByte supplier-spend, MTD. Match

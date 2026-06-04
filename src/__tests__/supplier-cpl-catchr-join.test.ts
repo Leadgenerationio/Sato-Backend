@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { eq, inArray } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { adSpend } from '../db/schema/ad-spend.js';
+import { invalidateCache } from '../utils/cache.js';
 
 // Regression test: the supplier-performance report MUST join Catchr ad_spend
 // for ad-platform suppliers (Facebook, Google Ads, Taboola, etc.) so the
@@ -46,6 +47,13 @@ const { getSupplierPerformance, getUnifiedReport } = await import('../services/r
 
 describe('Supplier performance — Catchr ad_spend join', () => {
   beforeAll(async () => {
+    // getUnifiedReport wraps the LeadByte calls in cached('lb:report:..'/
+    // 'lb:supplier-spend:..'). A sibling test file (e.g. report.test) can warm
+    // those keys in shared Redis with the real (empty, in test env) client, so
+    // our vi.mock would be bypassed and the unified-report assertions see £0.
+    // Bust the keys this file's window ('this_month') uses so the mock is hit.
+    await invalidateCache('lb:report:this_month:v5', 'lb:supplier-spend:this_month:v1');
+
     // Seed ad_spend rows for the same window the supplier query covers
     // (this_month). Facebook £2,400 should split across "facebook" + "Facebook
     // Ads" suppliers proportionally to their 1000 vs 200 lead share (5:1).

@@ -432,7 +432,11 @@ export async function getCampaignPerformance(
       cost: Math.round(totalCost * 100) / 100,
       revenue: Math.round(r.revenue * 100) / 100,
       cpl: r.leads > 0 ? Math.round((totalCost / r.leads) * 100) / 100 : 0,
-      profit: Math.round(r.profit * 100) / 100,
+      // Derive profit from the SAME cost basis as `cost`/`margin` (payout +
+      // email + sms + validation). Was r.profit — LeadByte's own profit, which
+      // is computed on payout only — so profit and margin disagreed on the
+      // same row whenever email/sms/validation costs were non-zero.
+      profit: Math.round((r.revenue - totalCost) * 100) / 100,
       margin: r.revenue > 0 ? Math.round(((r.revenue - totalCost) / r.revenue) * 1000) / 10 : 0,
     };
   });
@@ -1050,6 +1054,37 @@ export async function getUnifiedReport(
     totalLeadsByCatchrPlatform.set(plat, (totalLeadsByCatchrPlatform.get(plat) ?? 0) + r.leads);
   });
 
+  // Largest-remainder allocation of each campaign's unique-lead total across
+  // its supplier rows, so the per-row integer lead counts sum EXACTLY to
+  // campaignLeads. Rounding each row independently with Math.round (as before)
+  // drifts the per-campaign sum by ±1 — breaking the "Σ(supplier.leads) ===
+  // campaign.leads" invariant this normalization promises. We floor every
+  // share, then hand the leftover one-by-one to the rows with the largest
+  // fractional parts.
+  const allocatedLeadsByRowIdx = new Map<number, number>();
+  {
+    const idxByCampaign = new Map<string, number[]>();
+    filteredSupplierRows.forEach((r, i) => {
+      const arr = idxByCampaign.get(r.campaignName) ?? [];
+      arr.push(i);
+      idxByCampaign.set(r.campaignName, arr);
+    });
+    for (const [campaignName, idxs] of idxByCampaign) {
+      const campaignLeads = campaignLeadsByName.get(campaignName) ?? 0;
+      const supplierLeadsSum = supplierLeadsSumByCampaign.get(campaignName) ?? 0;
+      if (!(supplierLeadsSum > 0 && campaignLeads > 0)) {
+        for (const i of idxs) allocatedLeadsByRowIdx.set(i, filteredSupplierRows[i].leads);
+        continue;
+      }
+      const exact = idxs.map((i) => (campaignLeads * filteredSupplierRows[i].leads) / supplierLeadsSum);
+      const alloc = exact.map((x) => Math.floor(x));
+      let remainder = campaignLeads - alloc.reduce((s, n) => s + n, 0);
+      const byFrac = idxs.map((_, k) => k).sort((a, b) => (exact[b] - alloc[b]) - (exact[a] - alloc[a]));
+      for (let k = 0; k < byFrac.length && remainder > 0; k++) { alloc[byFrac[k]]++; remainder--; }
+      idxs.forEach((i, k) => allocatedLeadsByRowIdx.set(i, alloc[k]));
+    }
+  }
+
   const rows: UnifiedReportRow[] = filteredSupplierRows.map((r, i) => {
     const meta = campaignMeta.get(r.campaignName) ?? {
       clientName: 'Pending client mapping',
@@ -1059,7 +1094,6 @@ export async function getUnifiedReport(
     // See the campaignRevenueByName comment above for why this is proportional
     // allocation rather than revPerLead × r.leads.
     const campaignRevenue = campaignRevenueByName.get(r.campaignName) ?? 0;
-    const campaignLeads = campaignLeadsByName.get(r.campaignName) ?? 0;
     const supplierLeadsSum = supplierLeadsSumByCampaign.get(r.campaignName) ?? 0;
     const revenue = supplierLeadsSum > 0
       ? Math.round((campaignRevenue * r.leads / supplierLeadsSum) * 100) / 100
@@ -1071,9 +1105,9 @@ export async function getUnifiedReport(
     // totals look inflated vs LeadByte's own dashboard + LeadReports.io.
     // Normalize via the same proportional allocation we use for revenue so
     // Σ(supplier.leads) per campaign === campaign.leads (LB unique-lead truth).
-    const leads = supplierLeadsSum > 0 && campaignLeads > 0
-      ? Math.round(campaignLeads * r.leads / supplierLeadsSum)
-      : r.leads;
+    // Use the largest-remainder allocation computed above (sums exactly to
+    // campaignLeads), not an independent per-row Math.round.
+    const leads = allocatedLeadsByRowIdx.get(i) ?? r.leads;
 
     // Override the LeadByte payout `r.spend` with the row's share of the
     // Catchr platform total — Catchr is the source of truth for ad-network
