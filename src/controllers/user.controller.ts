@@ -61,3 +61,16 @@ export async function toggleActive(req: Request, res: Response) {
     data: { user },
   });
 }
+
+// Sam (2026-06-10): admin resets a password for any client/staff user
+// from User Management. Does not require the user's current password.
+export async function resetPassword(req: Request, res: Response) {
+  const id = req.params.id as string;
+  const { newPassword } = req.body;
+  const user = await userService.adminResetPassword(id, newPassword, req.user!);
+
+  res.json({
+    status: 'success',
+    data: { user },
+  });
+}

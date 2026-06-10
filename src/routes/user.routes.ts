@@ -57,6 +57,12 @@ const updateAllowedTabsSchema = z.object({
   }),
 });
 
+// Sam (2026-06-10): admin password reset for any user. Min 8 to match the
+// create-user password rule and self-service change-password.
+const resetPasswordSchema = z.object({
+  body: z.object({ newPassword: z.string().min(8).max(200) }),
+});
+
 userRoutes.use(authMiddleware);
 userRoutes.use(requireRole('owner'));
 
@@ -66,3 +72,4 @@ userRoutes.put('/:id', validate(updateUserSchema), userController.updateUser);
 userRoutes.patch('/:id/role', validate(updateRoleSchema), userController.updateRole);
 userRoutes.patch('/:id/toggle-active', userController.toggleActive);
 userRoutes.patch('/:id/allowed-tabs', validate(updateAllowedTabsSchema), userController.updateAllowedTabs);
+userRoutes.patch('/:id/password', validate(resetPasswordSchema), userController.resetPassword);

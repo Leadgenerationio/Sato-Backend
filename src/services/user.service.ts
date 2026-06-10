@@ -334,6 +334,54 @@ export async function updateUserAllowedTabs(
   };
 }
 
+// ─── Admin-side password reset ───
+// Sam (2026-06-10): "be able to reset the password for any of the clients
+// and any users". Owner-only at the route layer. Unlike changeOwnPassword
+// this does NOT require the current password — the admin is setting a new
+// one on the user's behalf. Mirrors the same business-scope + primary-owner
+// guards as the other admin mutations so a non-primary owner can't reset
+// the primary owner (Sam) out of their own account.
+export async function adminResetPassword(
+  userId: string,
+  newPassword: string,
+  requester: AuthPayload,
+) {
+  const user = await findById(userId);
+  if (!user) throw new NotFoundError('User');
+
+  if (!newPassword || newPassword.length < 8) {
+    throw new ValidationError('New password must be at least 8 characters');
+  }
+
+  // Business scoping: non-owner can only reset users in their own business.
+  if (requester.role !== 'owner' && requester.businessId && user.businessId !== requester.businessId) {
+    throw new ForbiddenError('Cannot reset passwords outside your business');
+  }
+
+  // Primary owner is protected: only the primary owner can reset their own
+  // password (and they'd normally use self-service change-password for that).
+  if (user.isPrimaryOwner && requester.userId !== user.id) {
+    throw new ForbiddenError('The primary owner account is protected');
+  }
+
+  const newHash = await bcryptjs.hash(newPassword, 12);
+  const [updated] = await db
+    .update(users)
+    .set({ passwordHash: newHash, updatedAt: new Date() })
+    .where(eq(users.id, userId))
+    .returning();
+  const u = updated as UserRow;
+
+  return {
+    id: u.id,
+    email: u.email,
+    name: u.name,
+    role: u.role,
+    isActive: u.isActive,
+    isPrimaryOwner: u.isPrimaryOwner,
+  };
+}
+
 export async function updateOwnProfile(userId: string, name: string) {
   const user = await findById(userId);
   if (!user) throw new NotFoundError('User');

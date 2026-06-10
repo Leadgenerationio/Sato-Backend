@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import bcryptjs from 'bcryptjs';
 import {
   listUsers, createUser, updateUser, updateUserRole, toggleUserActive,
-  updateOwnProfile, changeOwnPassword,
+  updateOwnProfile, changeOwnPassword, adminResetPassword,
 } from '../services/user.service.js';
 import { findUserById, findUserByEmail, SEED_USER_IDS } from '../data/users.js';
 import { db } from '../config/database.js';
@@ -244,6 +244,56 @@ describe('User Service', () => {
       expect(primary?.isPrimaryOwner).toBe(true);
       const other = users.find((u) => u.id === SEED_USER_IDS.FINANCE);
       expect(other?.isPrimaryOwner).toBe(false);
+    });
+  });
+
+  describe('adminResetPassword', () => {
+    // Fresh user per suite so a reset can't strand a seed account's password.
+    let targetId: string;
+    let targetEmail: string;
+
+    beforeAll(async () => {
+      const email = `reset-target-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@test.com`;
+      const u = await createUser(email, 'Reset Target', 'original-pw-123', 'client', ownerPayload, undefined)
+        .catch(() => createUser(email, 'Reset Target', 'original-pw-123', 'readonly', ownerPayload));
+      targetId = u.id;
+      targetEmail = u.email;
+    });
+
+    it('owner can reset any user password without the current password', async () => {
+      const result = await adminResetPassword(targetId, 'admin-set-pw-456', ownerPayload);
+      expect(result.id).toBe(targetId);
+      expect(result.email).toBe(targetEmail);
+      const user = (await findUserById(targetId))!;
+      expect(await bcryptjs.compare('admin-set-pw-456', user.passwordHash)).toBe(true);
+    });
+
+    it('rejects a too-short new password', async () => {
+      await expect(adminResetPassword(targetId, 'short', ownerPayload))
+        .rejects.toThrow('at least 8 characters');
+    });
+
+    it('throws for a non-existent user', async () => {
+      await expect(adminResetPassword('99999999-0000-0000-0000-000000000999', 'whatever-123', ownerPayload))
+        .rejects.toThrow('User not found');
+    });
+
+    it('the user can log in with the admin-set password (hash verifies)', async () => {
+      await adminResetPassword(targetId, 'final-pw-789', ownerPayload);
+      const user = (await findUserById(targetId))!;
+      expect(await bcryptjs.compare('final-pw-789', user.passwordHash)).toBe(true);
+      // and the previous password no longer matches
+      expect(await bcryptjs.compare('admin-set-pw-456', user.passwordHash)).toBe(false);
+    });
+
+    it('non-primary owner cannot reset the primary owner password', async () => {
+      const secondary = await createUser(
+        `reset-secondary-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@test.com`,
+        'Secondary', 'pass1234', 'owner', ownerPayload,
+      );
+      const secondaryPayload: AuthPayload = { userId: secondary.id, email: secondary.email, role: 'owner' };
+      await expect(adminResetPassword(SEED_USER_IDS.OWNER, 'hijack-pw-123', secondaryPayload))
+        .rejects.toThrow('The primary owner account is protected');
     });
   });
 
