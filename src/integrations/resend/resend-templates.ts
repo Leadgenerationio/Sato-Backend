@@ -80,4 +80,15 @@ export const templates = {
     headline: `${vars.campaignName} received ${vars.leadCount} leads today`,
     body: `<p>${vars.pctAboveAverage}% above daily average. Check cap and delivery throttles.</p>`,
   }),
+
+  // Sam (2026-06-10): self-service forgot-password. The 6-digit code is the
+  // whole payload — render it large and unmissable. No CTA link; the user
+  // types the code back into the sign-in screen.
+  passwordReset: (vars: { code: string; minutes: number }) => ({
+    subject: `Your Stato password reset code`,
+    headline: `Password reset code`,
+    body: `<p>Use this code to reset your Stato password:</p>`
+      + `<p style="font-size:30px;font-weight:700;letter-spacing:6px;margin:18px 0;font-family:monospace">${escape(vars.code)}</p>`
+      + `<p>This code is valid for ${vars.minutes} minutes. If you didn't request a password reset, you can safely ignore this email — your password won't change.</p>`,
+  }),
 };

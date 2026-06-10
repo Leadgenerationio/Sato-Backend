@@ -4,7 +4,7 @@ import { validate } from '../middleware/validate.middleware.js';
 import { authMiddleware } from '../middleware/auth.middleware.js';
 import { authLimiter } from '../middleware/rate-limit.middleware.js';
 import { logger } from '../utils/logger.js';
-import { loginSchema, registerSchema, updateProfileSchema, changePasswordSchema, refreshTokenSchema } from '../types/index.js';
+import { loginSchema, registerSchema, updateProfileSchema, changePasswordSchema, refreshTokenSchema, forgotPasswordSchema, verifyResetCodeSchema, resetPasswordSchema } from '../types/index.js';
 
 export const authRoutes: RouterType = Router();
 
@@ -20,6 +20,13 @@ authRoutes.post('/logout', (req: Request, res: Response) => {
   logger.info({ userId }, 'User logout (best-effort, no denylist)');
   res.status(200).json({ status: 'success', data: { message: 'Logged out' } });
 });
+// Forgot-password OTP (Sam 2026-06-10) — public, rate-limited. The user is
+// logged out, so no authMiddleware. forgot-password never reveals whether an
+// email exists.
+authRoutes.post('/forgot-password', authLimiter, validate(forgotPasswordSchema), authController.forgotPassword);
+authRoutes.post('/verify-reset-code', authLimiter, validate(verifyResetCodeSchema), authController.verifyResetCode);
+authRoutes.post('/reset-password', authLimiter, validate(resetPasswordSchema), authController.resetPassword);
+
 authRoutes.get('/me', authMiddleware, authController.me);
 authRoutes.patch('/me', authMiddleware, validate(updateProfileSchema), authController.updateProfile);
 authRoutes.post('/change-password', authMiddleware, validate(changePasswordSchema), authController.changePassword);

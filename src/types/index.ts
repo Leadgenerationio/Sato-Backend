@@ -70,6 +70,27 @@ export const refreshTokenSchema = z.object({
   }),
 });
 
+// ─── Forgot-password OTP (Sam 2026-06-10) ───
+export const forgotPasswordSchema = z.object({
+  body: z.object({
+    email: z.string().email(),
+  }),
+});
+
+export const verifyResetCodeSchema = z.object({
+  body: z.object({
+    email: z.string().email(),
+    code: z.string().regex(/^\d{6}$/, 'Code must be 6 digits'),
+  }),
+});
+
+export const resetPasswordSchema = z.object({
+  body: z.object({
+    resetToken: z.string().min(1),
+    newPassword: z.string().min(8).max(255),
+  }),
+});
+
 // ─── Pagination / list query helpers ───
 //
 // Reused by every list route that paginates: page (1-based), limit (capped
