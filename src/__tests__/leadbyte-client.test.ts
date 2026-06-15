@@ -72,6 +72,31 @@ describe('LeadByte client — date window translation', () => {
     expect(spanMs).toBeLessThan(2 * 24 * 3600 * 1000);
     expect(spanMs).toBeGreaterThan(0);
   });
+
+  // Fix (2026-06-15): YTD is the only window with no LeadByte preset, so it
+  // emits explicit from/to. LeadByte expects DATE-ONLY YYYY-MM-DD — full ISO
+  // timestamps returned zero rows → "Year to Date" spend showed £0.
+  it('emits ytd from/to as date-only YYYY-MM-DD (no T/Z) on the query path', () => {
+    const q = lb.windowToQuery('ytd');
+    expect(q.datePreset).toBeUndefined();
+    expect(q.from).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(q.to).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(q.from).not.toContain('T');
+    expect(q.from).not.toContain('Z');
+    expect(q.to).not.toContain('T');
+    expect(q.to).not.toContain('Z');
+    // YTD boundary math preserved: `from` is the start of the current year
+    // (the date-only slice of local Jan 1 midnight can land on Dec 31 of the
+    // prior year in negative-UTC-offset zones — that's the pre-existing
+    // windowToRange behaviour, unchanged by this fix).
+    const yr = new Date().getFullYear();
+    expect([`${yr}-01-01`, `${yr - 1}-12-31`]).toContain(q.from);
+  });
+
+  it('uses datePreset (not from/to) for windows LeadByte supports', () => {
+    expect(lb.windowToQuery('today')).toEqual({ datePreset: 'today' });
+    expect(lb.windowToQuery('last_week')).toEqual({ datePreset: 'lastweek' });
+  });
 });
 
 describe('LeadByte client — API calls (fetch mocked)', () => {

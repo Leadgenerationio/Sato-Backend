@@ -55,6 +55,10 @@ export interface ClientContactInput {
 }
 
 export interface ClientDetail extends ClientSummary {
+  // Fix 6a (2026-06-15): expose the existing client_type column through the
+  // API so admins can flip a client between 'managed' (bundled retainer — sees
+  // ad spend in the portal) and 'ppl' (pay-per-lead — must NOT see ad spend).
+  clientType: 'managed' | 'ppl';
   companyNumber: string;
   contactPhone: string;
   address: string;
@@ -144,6 +148,7 @@ function toDetail(row: ClientRow, activeCampaigns: number, totalRevenue: number,
   return {
     ...toSummary(row, activeCampaigns, totalRevenue, 0),
     contacts,
+    clientType: row.clientType ?? 'ppl',
     companyNumber: row.companyNumber ?? '',
     contactPhone: row.contactPhone ?? '',
     address: row.address ?? '',
@@ -570,6 +575,7 @@ export async function updateClient(id: string, data: UpdateClientInput, requeste
   if (data.vatNumber !== undefined) patch.vatNumber = data.vatNumber;
   if (data.vatRate !== undefined) patch.vatRate = data.vatRate != null ? String(data.vatRate) : null;
   if (data.leadPrice !== undefined) patch.leadPrice = String(data.leadPrice);
+  if (data.clientType !== undefined) patch.clientType = data.clientType as ClientRow['clientType'];
   if (data.billingWorkflow !== undefined) patch.billingWorkflow = data.billingWorkflow as ClientRow['billingWorkflow'];
   if (data.onboardingStatus !== undefined) patch.onboardingStatus = data.onboardingStatus as ClientRow['onboardingStatus'];
   if (data.status !== undefined) patch.status = data.status as ClientRow['status'];

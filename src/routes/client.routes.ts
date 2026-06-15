@@ -63,6 +63,9 @@ const clientCoreFields = {
   vatNumber: z.string().max(50).optional(),
   vatRate: z.union([z.number(), z.string()]).optional(),
   leadPrice: z.union([z.number(), z.string()]).optional(),
+  // Fix 6a (2026-06-15): managed vs pay-per-lead. Gates portal ad-spend
+  // visibility (PPL clients must never see spend).
+  clientType: z.enum(['managed', 'ppl']).optional(),
   billingWorkflow: billingWorkflowEnum.optional(),
   onboardingStatus: onboardingEnum.optional(),
   status: clientStatusEnum.optional(),

@@ -706,6 +706,35 @@ describe('Portal API', () => {
         expect(() => new Intl.NumberFormat('en-GB', { style: 'currency', currency: r.currency })).not.toThrow();
       }
     });
+
+    // Fix 6b (2026-06-15): getLeadsBySource feeds the portal By Source / Ad
+    // Spend card and had NO clientType gate, so PPL clients leaked per-platform
+    // spend. Managed clients still get spend; PPL clients must get none.
+    it('managed client sees per-platform SPEND in /portal/leads bySource', async () => {
+      await db.update(clients).set({ clientType: 'managed' }).where(eq(clients.id, DEMO_CLIENT_ID));
+
+      const res = await request(app).get('/api/v1/portal/leads').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+      const bySource = res.body.data.bySource as Array<{ platform: string; spend: number }>;
+      expect(Array.isArray(bySource)).toBe(true);
+      // The seeded ad_spend is linked via traffic_sources, so a managed client
+      // gets at least one row with non-zero spend.
+      expect(bySource.some((r) => r.spend > 0)).toBe(true);
+    });
+
+    it('PPL client gets ZERO spend from /portal/leads bySource (lead sources may still appear)', async () => {
+      await db.update(clients).set({ clientType: 'ppl' }).where(eq(clients.id, DEMO_CLIENT_ID));
+
+      const res = await request(app).get('/api/v1/portal/leads').set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+      const bySource = res.body.data.bySource as Array<{ platform: string; spend: number }>;
+      expect(Array.isArray(bySource)).toBe(true);
+      // No row may carry spend for a pay-per-lead client — the spend figures
+      // must be hidden even though the underlying ad_spend data exists.
+      for (const r of bySource) {
+        expect(r.spend).toBe(0);
+      }
+    });
   });
 
   // The portal Creatives tab opened R2 assets via the stored fileUrl, which is

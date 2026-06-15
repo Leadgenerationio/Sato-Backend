@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { invoices } from '../db/schema/invoices.js';
 import { clients } from '../db/schema/clients.js';
@@ -102,6 +102,17 @@ export function deriveDisplayStatus(storedStatus: string | null, daysOverdue: nu
 // equivalent for portal.service.getDashboard which filters in-memory.
 // Keep them in lock-step — both must change together.
 const OUTSTANDING_STATUSES = ['sent', 'authorised', 'overdue', 'submitted'] as const;
+
+// Fix #8/#9 (2026-06-15): the admin Finance list and Client Detail invoices
+// tab were leaking DRAFT invoices, which Sam repeatedly asked us not to show
+// (drafts are pre-authorisation work-in-progress, and unpushed local drafts
+// with no xero_invoice_id are pure workflow noise). Mirror the portal's hidden
+// set so the admin default list is consistent with the dashboard "outstanding"
+// surfaces (which already exclude drafts + require xeroInvoiceId IS NOT NULL).
+// The default list still differs from the dashboard in that it shows paid
+// invoices — that's intentional; the consistency we enforce is "no drafts".
+// Someone who explicitly filters to status:'draft' still sees them.
+export const INVOICE_LIST_HIDDEN_STATUSES = ['draft', 'voided', 'deleted'] as const;
 
 export function isOutstandingInvoiceWhere() {
   return and(
@@ -211,6 +222,16 @@ export async function listInvoices(
   const offset = (page - 1) * pageSize;
 
   const filters = [eq(clients.businessId, businessId)];
+  // Fix #8/#9: by default exclude draft/voided/deleted from the admin Finance
+  // list + Client Detail invoices tab. Only when the caller explicitly asks
+  // for one of those hidden statuses do we surface it (the "Drafts" tab).
+  const wantsHiddenStatus =
+    !!params.status &&
+    params.status !== 'all' &&
+    (INVOICE_LIST_HIDDEN_STATUSES as readonly string[]).includes(params.status);
+  if (!wantsHiddenStatus) {
+    filters.push(notInArray(invoices.status, [...INVOICE_LIST_HIDDEN_STATUSES]));
+  }
   if (params.status && params.status !== 'all') {
     // #6: the stored `status` doesn't auto-flip when an invoice crosses
     // its due date, so the SQL filter expands to match what the UI labels
@@ -336,6 +357,7 @@ export async function getOverdueInvoices(requester: AuthPayload): Promise<Invoic
 export interface SyncInvoicesResult {
   synced: number;       // new invoices imported on this call
   skipped: number;      // already-imported invoices (dedup by xeroInvoiceId)
+  updated?: number;     // existing invoices whose mutable fields were re-synced (Fix #7)
   totalRemote: number;  // total found in Xero for this contact
   linkedContact: boolean; // did we just auto-link the xeroContactId?
   message?: string;     // optional human-readable summary, e.g. "no Xero contact"
@@ -457,9 +479,41 @@ export async function syncInvoicesFromXero(
     );
   }
 
+  // Fix #7 (2026-06-15): the sync was insert-only — it never re-synced
+  // invoices already in the DB. So when an invoice was PAID in Xero it stayed
+  // 'overdue'/'authorised' in Stato forever (deriveDisplayStatus kept showing
+  // it overdue). Re-sync the mutable fields (status, due date, amounts, paid
+  // date) for every existing invoice so paid/voided state flips through.
+  const toUpdate = xeroInvoices.filter((i) => existing.has(i.xeroInvoiceId));
+  let updated = 0;
+  for (const i of toUpdate) {
+    const status = mapXeroStatus(i.status);
+    const [row] = await db
+      .update(invoices)
+      .set({
+        invoiceNumber: i.invoiceNumber,
+        status,
+        currency: i.currency,
+        // Money stays decimal-on-the-wire (string), never floated.
+        subtotal: i.subtotal,
+        vatAmount: i.totalTax,
+        total: i.total,
+        dueDate: i.dueDate ? new Date(i.dueDate) : null,
+        // Stamp a paidDate when Xero now reports paid and we don't have one;
+        // clear it if Xero moved the invoice back out of paid.
+        paidDate: status === 'paid' ? new Date() : null,
+        daysOverdue: daysOverdue(i.dueDate, status),
+        updatedAt: new Date(),
+      })
+      .where(eq(invoices.xeroInvoiceId, i.xeroInvoiceId))
+      .returning({ id: invoices.id });
+    if (row) updated += 1;
+  }
+
   return {
     synced: toInsert.length,
     skipped: xeroInvoices.length - toInsert.length,
+    updated,
     totalRemote: xeroInvoices.length,
     linkedContact,
   };
