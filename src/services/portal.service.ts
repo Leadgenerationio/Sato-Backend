@@ -873,6 +873,13 @@ export async function getLeadsBySource(
   validLeadsByCampaign?: Record<string, number>;
 }> {
   const clientId = requireClientId(requester);
+  // Fix 6b (2026-06-15): the portal Ad Spend card is built primarily from this
+  // data and had NO clientType gate — so pay-per-lead clients leaked per-
+  // platform ad spend. Mirror getDashboard's gate (portal.service:381-389):
+  // only 'managed' clients ever see spend; PPL clients get lead counts/sources
+  // (those are fine) but their spend is zeroed. Load the client once up front.
+  const client = await loadClientOrThrow(clientId);
+  const isManaged = (client.clientType ?? 'ppl') === 'managed';
   const { from, to } = resolveLeadsRange(range);
   const linkedCampaignIds = await campaignIdsForClient(clientId);
   if (linkedCampaignIds.length === 0) {
@@ -918,7 +925,12 @@ export async function getLeadsBySource(
         for (const r of rs) m.set(r.name, r.id);
         return m;
       }),
-    aggregateClientAdSpendByCampaignAndPlatform(linkedCampaignIds, from, to),
+    // Fix 6b: PPL clients must never see ad spend. Skip the spend aggregation
+    // entirely for them (mirrors getDashboard short-circuiting to []), so the
+    // By Source rows are derived purely from LeadByte lead counts.
+    isManaged
+      ? aggregateClientAdSpendByCampaignAndPlatform(linkedCampaignIds, from, to)
+      : Promise.resolve([] as Awaited<ReturnType<typeof aggregateClientAdSpendByCampaignAndPlatform>>),
   ]);
   const ownCampaignNames = new Set(ownCampaignNameToId.keys());
 

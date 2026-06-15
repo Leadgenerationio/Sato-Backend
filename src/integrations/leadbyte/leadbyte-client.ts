@@ -264,12 +264,22 @@ export function windowToRange(win: DeliveryWindow): { from: string; to: string }
   }
 }
 
-/** Both as query params. Preset is preferred when supported; otherwise ISO range. */
-function windowToQuery(win: DeliveryWindow): Record<string, string> {
+/**
+ * Both as query params. Preset is preferred when supported; otherwise an
+ * explicit date range.
+ *
+ * Fix (2026-06-15): LeadByte's REST API expects plain `YYYY-MM-DD` date-only
+ * strings on `from`/`to`. The only window without a preset is `ytd`, which was
+ * sending full ISO timestamps (`2026-01-01T00:00:00Z`) — LeadByte returned no
+ * rows, so "Year to Date" spend showed £0. Slice off the time component on the
+ * query path (matching report.service's `.split('T')[0]` convention). The YTD
+ * boundary math in `windowToRange` (Jan 1 → now) is unchanged.
+ */
+export function windowToQuery(win: DeliveryWindow): Record<string, string> {
   const preset = windowToPreset(win);
   if (preset) return { datePreset: preset };
   const { from, to } = windowToRange(win);
-  return { from, to };
+  return { from: from.slice(0, 10), to: to.slice(0, 10) };
 }
 
 // ─── Mock data (fallback when LEADBYTE_API_KEY not set) ─────────────────────

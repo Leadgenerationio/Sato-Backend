@@ -348,6 +348,34 @@ describe('Client API', () => {
       expect(res.status).toBe(200);
       expect(res.body.data.client.notes).toBe('Updated via test');
     });
+
+    // Fix 6a (2026-06-15): client_type already exists in the DB (default 'ppl')
+    // but wasn't exposed through the API. The detail DTO must return it and the
+    // update path must accept + persist it.
+    it('detail DTO returns clientType (defaults to ppl)', async () => {
+      const res = await request(app).get(`/api/v1/clients/${realClientId}`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(['managed', 'ppl']).toContain(res.body.data.client.clientType);
+    });
+
+    it("updating clientType to 'managed' persists and is returned by the detail DTO", async () => {
+      const put = await request(app)
+        .put(`/api/v1/clients/${realClientId}`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ clientType: 'managed' });
+      expect(put.status).toBe(200);
+      expect(put.body.data.client.clientType).toBe('managed');
+
+      const get = await request(app).get(`/api/v1/clients/${realClientId}`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(get.status).toBe(200);
+      expect(get.body.data.client.clientType).toBe('managed');
+
+      // Restore default so other tests aren't surprised.
+      await request(app)
+        .put(`/api/v1/clients/${realClientId}`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ clientType: 'ppl' });
+    });
   });
 
   describe('GET /api/v1/clients/:id/credit-history', () => {
