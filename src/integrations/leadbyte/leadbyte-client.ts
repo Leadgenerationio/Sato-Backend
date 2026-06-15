@@ -455,6 +455,38 @@ export async function getSupplierSpend(window: DeliveryWindow): Promise<LeadByte
     showSupplier: 'Yes',
     ...windowToQuery(window),
   });
+  return parseSupplierReport(res, window);
+}
+
+/**
+ * Same as {@link getSupplierSpend} but for an explicit `from`/`to` date range
+ * rather than a named preset. LeadByte's `/reports/supplier` accepts plain
+ * `YYYY-MM-DD` from/to (the same path the YTD window uses — see windowToQuery),
+ * so the portal By Source breakdown can show real per-source leads for ANY
+ * range the user picks in the calendar, not just the named presets. Still real
+ * data only — no estimates (mock mode returns []).
+ */
+export async function getSupplierSpendByRange(from: string, to: string): Promise<LeadByteSupplierSpend[]> {
+  if (!isConfigured()) {
+    // Strict no-fake-data policy (mirrors getSupplierSpend's empty MOCK_SUPPLIERS).
+    return [];
+  }
+  const res = await lbGet<unknown>('/reports/supplier', {
+    campaignId: 'all',
+    groupBy: 'campaign',
+    showSupplier: 'Yes',
+    from: from.slice(0, 10),
+    to: to.slice(0, 10),
+  });
+  return parseSupplierReport(res, 'custom');
+}
+
+// Shared row parser for the supplier report — used by both the preset and the
+// explicit-range fetchers above so they normalize identically.
+function parseSupplierReport(
+  res: unknown,
+  windowLabel: DeliveryWindow | 'custom',
+): LeadByteSupplierSpend[] {
   return unwrapReport<LeadByteSupplierReportRow>(res).map((r, i): LeadByteSupplierSpend => {
     // LeadByte returns supplier as a `{name, id}` ref or a flat string. For
     // direct/internal traffic (no supplier configured on the campaign) the
@@ -474,7 +506,7 @@ export async function getSupplierSpend(window: DeliveryWindow): Promise<LeadByte
       platform,
       campaignId: refId(r.campaign) || campaignName,
       campaignName,
-      window,
+      window: windowLabel,
       spend: r.payout,
       leads: r.leads,
       validLeads: r.valid,

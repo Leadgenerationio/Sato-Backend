@@ -10,13 +10,15 @@ import { adSpend } from '../db/schema/ad-spend.js';
 import type { AuthPayload } from '../types/index.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
-import { cached } from '../utils/cache.js';
-import { canonicalPlatformSql } from '../utils/catchr-platform.js';
+import { cached, LEADBYTE_SHARED_CACHE_TTL_SECONDS } from '../utils/cache.js';
+import { canonicalPlatformSql, canonicalizePlatform } from '../utils/catchr-platform.js';
 
-// Cache TTL for LeadByte report calls used by /reports/unified. Mirrors the
-// TTL used by campaign.service so the key/TTL pairing is consistent across
-// consumers of `lb:report:{w}:v5` and `lb:supplier-spend:{w}:v1`.
-const UNIFIED_REPORT_TTL_SECONDS = 900;
+
+// Days since the most recent Monday (Mon=0 … Sun=6) — LeadByte's week starts
+// Monday, so all "this_week"/"last_week" math across the platform uses this.
+function mondayOffset(d: Date): number {
+  return d.getDay() === 0 ? 6 : d.getDay() - 1;
+}
 
 // LeadByte DeliveryWindow → ISO date range. Mirrors leadbyte-client.windowToRange
 // but lives here so report.service can run its own Catchr ad_spend query.
@@ -31,11 +33,15 @@ function deliveryWindowToRange(win: DeliveryWindow): { from: string; to: string 
       return { from: iso(y), to: iso(y) };
     }
     case 'this_week': {
-      const start = startOfDay(now); start.setDate(start.getDate() - start.getDay());
+      // Monday-start to match LeadByte (leadbyte-client.windowToRange) and the
+      // portal — getDay() is Sunday=0, so a bare getDate()-getDay() gave a
+      // Sunday start, making this report's Catchr-spend week cover a different
+      // day-set than the LeadByte leads week it's divided against.
+      const start = startOfDay(now); start.setDate(start.getDate() - mondayOffset(now));
       return { from: iso(start), to: iso(now) };
     }
     case 'last_week': {
-      const end = startOfDay(now); end.setDate(end.getDate() - end.getDay() - 1);
+      const end = startOfDay(now); end.setDate(end.getDate() - mondayOffset(now) - 1);
       const start = new Date(end); start.setDate(start.getDate() - 6);
       return { from: iso(start), to: iso(end) };
     }
@@ -68,14 +74,13 @@ function deliveryWindowToRange(win: DeliveryWindow): { from: string; to: string 
 // platforms Catchr supports but we haven't wired up (Outbrain, LinkedIn,
 // Snapchat, etc.) so we don't lookup a key that never returns rows.
 export function supplierNameToCatchrPlatform(supplierName: string): string | null {
-  const n = supplierName.toLowerCase().trim();
-  if (!n) return null;
-  if (n.includes('facebook') || n === 'meta' || n.includes('meta ads')) return 'facebook-ads';
-  if (n.includes('google')) return 'google-ads';
-  if (n.includes('tiktok') || n.includes('tik tok') || n.includes('tik-tok')) return 'tik-tok';
-  if (n.includes('taboola')) return 'taboola';
-  if (n.includes('microsoft') || n === 'bing' || n.includes('bing ads')) return 'bing-ads';
-  return null;
+  // Delegate to the single source of truth (utils/catchr-platform) so the
+  // LeadByte-supplier → Catchr-platform mapping uses the EXACT same synonym
+  // set as canonicalPlatformSql (the SQL join) and canonicalizePlatform. They
+  // had drifted — e.g. this used to require an exact "bing" and dropped
+  // "Bing Search", so such a supplier's spend was bucketed by the SQL path but
+  // attributed 0 leads here.
+  return canonicalizePlatform(supplierName);
 }
 
 export interface CampaignReportRow {
@@ -921,8 +926,8 @@ export async function getUnifiedReport(
   // update campaign.service + the prewarm worker to match. Until then,
   // keeping them global is the correct semantics, not a leak.
   const [campaignRows, supplierRows, campaignMeta, sourcesRows, allCampaignRows] = await Promise.all([
-    cached(`lb:report:${window}:v5`, UNIFIED_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport(window)),
-    cached(`lb:supplier-spend:${window}:v1`, UNIFIED_REPORT_TTL_SECONDS, () => leadbyte.getSupplierSpend(window)),
+    cached(`lb:report:${window}:v5`, LEADBYTE_SHARED_CACHE_TTL_SECONDS, () => leadbyte.getCampaignReport(window)),
+    cached(`lb:supplier-spend:${window}:v1`, LEADBYTE_SHARED_CACHE_TTL_SECONDS, () => leadbyte.getSupplierSpend(window)),
     loadCampaignMetaByName(businessId),
     // Pull Catchr NCP URLs keyed by (campaignId-or-name, platform). Both keys
     // are stored on traffic_sources rows; we resolve them after the join.
@@ -1276,7 +1281,12 @@ export async function getPnlSummary(
     .where(
       and(
         eq(clients.businessId, businessId),
-        eq(invoices.status, 'paid'),
+        // Revenue recognition must match the rest of the platform
+        // (RECOGNISED_INVOICE_STATUSES = paid + authorised). Filtering to
+        // 'paid' only dropped issued-but-unpaid revenue, so the P&L Summary
+        // showed lower revenue/margin than the dashboard + financial-overview
+        // for the same window.
+        inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]),
         gte(invoices.createdAt, fromDate),
         lte(invoices.createdAt, today),
       ),
@@ -1405,7 +1415,7 @@ export async function getPnlSummary(
           LEFT JOIN client_campaigns cc ON cc.campaign_id = c.id
           JOIN ${clients} cl ON (cl.id = cc.client_id OR cl.id = c.client_id)
           WHERE cl.business_id = ${businessId}
-            AND ts.platform = ${adSpend.platform}
+            AND ${sql.raw(canonicalPlatformSql('ts.platform'))} = ${sql.raw(canonicalPlatformSql('ad_spend.platform'))}
             AND (
               ts.account_id = ${adSpend.accountId}
               OR ts.account_ids ? ${adSpend.accountId}

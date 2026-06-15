@@ -15,6 +15,20 @@ import { logger } from './logger.js';
  */
 const REDIS_OP_TIMEOUT_MS = 1000;
 
+/**
+ * Single source of truth for the TTL of the GLOBAL (non-tenant-scoped) LeadByte
+ * report caches — `lb:report:{window}:v5` and `lb:supplier-spend:{window}:v1`.
+ *
+ * These exact keys are written from several call sites (the leadbyte routes,
+ * the unified report, campaign.service, portal.service, the integration
+ * controller, and the prewarm worker). Because they share one key, the LAST
+ * writer's TTL wins — so the TTL must be identical everywhere or freshness
+ * becomes non-deterministic. The 90s prewarmer keeps these hot; this value is
+ * the documented staleness cap if the worker dies. Import this everywhere
+ * rather than re-declaring 300/900 locally.
+ */
+export const LEADBYTE_SHARED_CACHE_TTL_SECONDS = 300;
+
 function isRedisReady(): boolean {
   // ioredis reports 'ready' once a connection + handshake completes.
   // Any other status (connecting, reconnecting, end, disconnecting) means

@@ -5,7 +5,7 @@ import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { clients } from '../db/schema/clients.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import { proRateDailyMoney } from '../integrations/leadbyte/leadbyte-client.js';
-import { cached } from '../utils/cache.js';
+import { cached, LEADBYTE_SHARED_CACHE_TTL_SECONDS } from '../utils/cache.js';
 import { logger } from '../utils/logger.js';
 import { pickVertical } from '../utils/vertical.js';
 import {
@@ -35,7 +35,7 @@ async function fetchAllCampaignReports(
   const result = new Map<DeliveryWindow, Awaited<ReturnType<typeof leadbyte.getCampaignReport>>>();
   for (const w of wins) {
     try {
-      const rows = await cached(`lb:report:${w}:v5`, DELIVERY_REPORT_TTL_SECONDS, () => leadbyte.getCampaignReport(w));
+      const rows = await cached(`lb:report:${w}:v5`, LEADBYTE_SHARED_CACHE_TTL_SECONDS, () => leadbyte.getCampaignReport(w));
       result.set(w, rows);
     } catch (err) {
       logger.warn(
@@ -59,7 +59,6 @@ async function fetchAllCampaignReports(
 //   responses on /campaigns when cache TTL expired between visits during
 //   a demo-prep walkthrough.
 const CAMPAIGN_LIST_TTL_SECONDS = 900;
-const DELIVERY_REPORT_TTL_SECONDS = 900;
 const TYPE_MAP_TTL_SECONDS = 1800;
 
 export type CampaignType = 'pay_per_lead' | 'managed' | 'internal';

@@ -241,7 +241,7 @@ export async function listInvoices(
       filters.push(sql`(
         ${invoices.status} = 'overdue'
         OR (
-          ${invoices.status} IN ('sent', 'authorised')
+          ${invoices.status} IN ('sent', 'authorised', 'submitted')
           AND ${invoices.paidDate} IS NULL
           AND ${invoices.dueDate} IS NOT NULL
           AND ${invoices.dueDate} < now()
@@ -553,12 +553,16 @@ export async function getOutstandingInvoices(
   const businessId = requester.businessId;
   if (!businessId) return { invoices: [], count: 0, totalOutstanding: '0' };
 
+  // 'submitted' is part of OUTSTANDING_STATUSES (and the portal pending count),
+  // so it must be treated like 'sent'/'authorised' here too — otherwise a
+  // submitted invoice is counted as outstanding by the helpers but missing from
+  // the owed list/totals. Keep these in lock-step with OUTSTANDING_STATUSES.
   const bucketFilter =
     bucket === 'overdue'
       ? sql`(
           ${invoices.status} = 'overdue'
           OR (
-            ${invoices.status} IN ('sent', 'authorised')
+            ${invoices.status} IN ('sent', 'authorised', 'submitted')
             AND ${invoices.paidDate} IS NULL
             AND ${invoices.dueDate} IS NOT NULL
             AND ${invoices.dueDate} < now()
@@ -566,10 +570,10 @@ export async function getOutstandingInvoices(
         )`
       : bucket === 'due'
       ? sql`(
-          ${invoices.status} IN ('sent', 'authorised')
+          ${invoices.status} IN ('sent', 'authorised', 'submitted')
           AND (${invoices.dueDate} IS NULL OR ${invoices.dueDate} >= now() OR ${invoices.paidDate} IS NOT NULL)
         )`
-      : inArray(invoices.status, ['sent', 'authorised', 'overdue']);
+      : inArray(invoices.status, [...OUTSTANDING_STATUSES]);
 
   // T5 (Sam, 2026-05-20): the structural guard — every bucket excludes
   // rows that were never pushed to Xero (xero_invoice_id IS NULL). See
