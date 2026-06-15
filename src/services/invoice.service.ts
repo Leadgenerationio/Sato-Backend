@@ -499,9 +499,12 @@ export async function syncInvoicesFromXero(
         vatAmount: i.totalTax,
         total: i.total,
         dueDate: i.dueDate ? new Date(i.dueDate) : null,
-        // Stamp a paidDate when Xero now reports paid and we don't have one;
-        // clear it if Xero moved the invoice back out of paid.
-        paidDate: status === 'paid' ? new Date() : null,
+        // Stamp a paidDate only on the FIRST transition to paid and keep it
+        // stable thereafter (Xero gives us no paid-date on the wire, so today
+        // is best-effort). COALESCE preserves any existing paidDate so the
+        // hourly re-sync doesn't drift it forward each run; clear it if Xero
+        // moved the invoice back out of paid.
+        paidDate: status === 'paid' ? sql`COALESCE(${invoices.paidDate}, now())` : null,
         daysOverdue: daysOverdue(i.dueDate, status),
         updatedAt: new Date(),
       })
