@@ -79,8 +79,10 @@ export function computeDaysOverdue(dueDate: Date | null, paidDate: Date | null, 
 export function deriveDisplayStatus(storedStatus: string | null, daysOverdue: number): string {
   const s = storedStatus ?? 'draft';
   if (s === 'paid' || s === 'overdue' || s === 'draft') return s;
-  // 'sent' or 'authorised' but past due → present as 'overdue' to the UI.
-  if ((s === 'sent' || s === 'authorised') && daysOverdue > 0) return 'overdue';
+  // An outstanding-but-not-yet-overdue status that is past due → present as
+  // 'overdue' to the UI. Keep this set in lock-step with OUTSTANDING_STATUSES
+  // (sent/authorised/submitted) so the displayed status matches the SQL bucket.
+  if ((s === 'sent' || s === 'authorised' || s === 'submitted') && daysOverdue > 0) return 'overdue';
   return s;
 }
 
