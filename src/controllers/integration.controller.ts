@@ -22,7 +22,7 @@ import {
 } from '../integrations/catchr/catchr-client.js';
 import { getLastCatchrSyncAt } from './ad-spend.controller.js';
 import { syncQueue } from '../jobs/queue.js';
-import { cached } from '../utils/cache.js';
+import { cached, LEADBYTE_SHARED_CACHE_TTL_SECONDS } from '../utils/cache.js';
 import { redis } from '../config/redis.js';
 import { logger } from '../utils/logger.js';
 
@@ -671,10 +671,10 @@ async function buildOverview() {
     // Hot-path the cached LeadByte campaign report. Sum total leads across
     // all campaigns. Returns 0 leads when LeadByte is unconfigured (mock mode).
     isLeadByteConfigured()
-      // TTL 300s matches the same `lb:report:${window}:v5` key used by
-      // leadbyte.routes.ts so the Dashboard and Reports pages don't drift
-      // (one writing at 5min, the other expecting 15min). Same key, one TTL.
-      ? cached('lb:report:this_month:v5', 300, () => getCampaignReport('this_month'))
+      // Shared TTL constant for the `lb:report:${window}:v5` key so the
+      // Dashboard and Reports pages don't drift (one writing at 5min, the
+      // other expecting 15min). Same key, one TTL — see cache.ts.
+      ? cached('lb:report:this_month:v5', LEADBYTE_SHARED_CACHE_TTL_SECONDS, () => getCampaignReport('this_month'))
           .then((rows) => rows.reduce((s, r) => s + (r.leads ?? 0), 0))
           .catch(() => 0)
       : Promise.resolve(0),

@@ -17,7 +17,8 @@ import { getSignedDownloadUrl } from '../integrations/r2/r2-client.js';
 import { supplierNameToCatchrPlatform } from './report.service.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
-import { cached } from '../utils/cache.js';
+import { cached, LEADBYTE_SHARED_CACHE_TTL_SECONDS } from '../utils/cache.js';
+import { computeEffectiveAgreementStatus } from './agreement.service.js';
 import { logger } from '../utils/logger.js';
 import { normalizeCurrencyCode } from '../utils/currency.js';
 import { canonicalPlatformSql } from '../utils/catchr-platform.js';
@@ -174,7 +175,9 @@ export interface PortalInvoice {
   id: string;
   invoiceNumber: string;
   status: string;
-  total: number;
+  /** Money on the wire is a decimal STRING (matches the admin /invoices
+   *  endpoint and the FE PortalInvoice type); the FE parses with toMoney(). */
+  total: string;
   currency: string;
   dueDate: string;
   paidDate: string | null;
@@ -401,7 +404,7 @@ export async function getDashboard(requester: AuthPayload): Promise<PortalDashbo
   try {
     const lbRows = await cached(
       'lb:supplier-spend:this_month:v1',
-      900,
+      LEADBYTE_SHARED_CACHE_TTL_SECONDS,
       () => leadbyte.getSupplierSpend('this_month'),
     );
     const ownCampaignNamesArr = await db
@@ -609,11 +612,12 @@ export interface PortalLeadsBySource {
   currency: string;
 }
 
-/** Returned alongside the breakdown so the FE can explain why the card
- *  is empty when the user has picked a custom range. */
+/** Returned alongside the breakdown so the FE knows whether the range mapped
+ *  to a named LeadByte preset ('preset') or was fetched by an explicit
+ *  from/to date range ('custom'). Both carry a real per-source breakdown. */
 export type PortalLeadsBySourceWindow =
   | { kind: 'preset'; preset: DeliveryWindow }
-  | { kind: 'custom-no-preset-match' };
+  | { kind: 'custom' };
 
 async function aggregateLeadsByCampaign(
   clientId: string,
@@ -771,7 +775,7 @@ async function getCampaignMetricsForCampaigns(
   try {
     const lbRows = await cached(
       'lb:supplier-spend:this_month:v1',
-      900,
+      LEADBYTE_SHARED_CACHE_TTL_SECONDS,
       () => leadbyte.getSupplierSpend('this_month'),
     );
     const campaignNameToId = new Map<string, string>();
@@ -820,12 +824,13 @@ async function getCampaignMetricsForCampaigns(
   return result;
 }
 
-// Sam (jam-video #3, 29-May-2026): no more spend-share estimates. The
-// LeadByte supplier report is preset-window only, so we map the
-// requester's date range onto the closest preset and only return data
-// when that mapping is exact. Custom ranges that don't hit a preset
-// return an empty array with kind='custom-no-preset-match' so the FE
-// can show a "pick a preset for per-source breakdown" hint.
+// Sam (jam-video #3, 29-May-2026): no more spend-share estimates — every
+// number is real LeadByte data. We map the requester's range onto a named
+// LeadByte preset when it matches exactly (so we reuse the warm preset cache
+// shared with admin /reports); when it doesn't, getLeadsBySource fetches the
+// supplier report by the explicit from/to range instead (getSupplierSpendByRange).
+// Either path is real per-source data, so YTD and arbitrary calendar ranges
+// now get a breakdown too — not just the named presets.
 function isoDate(d: Date): string {
   return d.toISOString().split('T')[0];
 }
@@ -869,7 +874,8 @@ export async function getLeadsBySource(
    *  the By Campaign table so the table matches the summary tile (110) and
    *  not lead_deliveries.lead_count (144 — includes Direct + unmapped
    *  suppliers Sam objected to in jam-video #3 as "not the real number").
-   *  Undefined when the date range is custom-no-preset-match. */
+   *  Populated for both preset and custom ranges; only omitted on the
+   *  no-linked-campaigns / LeadByte-unreachable early returns. */
   validLeadsByCampaign?: Record<string, number>;
 }> {
   const clientId = requireClientId(requester);
@@ -881,20 +887,18 @@ export async function getLeadsBySource(
   const client = await loadClientOrThrow(clientId);
   const isManaged = (client.clientType ?? 'ppl') === 'managed';
   const { from, to } = resolveLeadsRange(range);
+  // When the range maps to a named LeadByte preset we use it (reuses the warm
+  // `lb:supplier-spend:<preset>` cache shared with the admin /reports view);
+  // otherwise we fetch the supplier report by the explicit from/to range.
+  // Either way the breakdown is real LeadByte data — no estimates.
+  const lbWindow = rangeToLeadByteWindow(from, to);
+  const responseWindow: PortalLeadsBySourceWindow = lbWindow
+    ? { kind: 'preset', preset: lbWindow }
+    : { kind: 'custom' };
+
   const linkedCampaignIds = await campaignIdsForClient(clientId);
   if (linkedCampaignIds.length === 0) {
-    const lbWindow = rangeToLeadByteWindow(from, to);
-    return {
-      rows: [],
-      window: lbWindow ? { kind: 'preset', preset: lbWindow } : { kind: 'custom-no-preset-match' },
-    };
-  }
-
-  const lbWindow = rangeToLeadByteWindow(from, to);
-  // Custom range without a preset match → no estimate, no fake numbers.
-  // FE shows "Switch to a preset to see per-source breakdown."
-  if (!lbWindow) {
-    return { rows: [], window: { kind: 'custom-no-preset-match' } };
+    return { rows: [], window: responseWindow };
   }
 
   // Both LeadByte supplier rows AND Catchr spend in parallel — Catchr is
@@ -903,16 +907,22 @@ export async function getLeadsBySource(
   // `campaigns.name`).
   let supplierRows: Awaited<ReturnType<typeof leadbyte.getSupplierSpend>>;
   try {
-    supplierRows = await cached(
-      `lb:supplier-spend:${lbWindow}:v1`,
-      900,
-      () => leadbyte.getSupplierSpend(lbWindow),
-    );
+    supplierRows = lbWindow
+      ? await cached(
+          `lb:supplier-spend:${lbWindow}:v1`,
+          LEADBYTE_SHARED_CACHE_TTL_SECONDS,
+          () => leadbyte.getSupplierSpend(lbWindow),
+        )
+      : await cached(
+          `lb:supplier-spend:range:${from}:${to}:v1`,
+          LEADBYTE_SHARED_CACHE_TTL_SECONDS,
+          () => leadbyte.getSupplierSpendByRange(from, to),
+        );
   } catch (err) {
-    // LeadByte unreachable → return empty with the preset window so the
+    // LeadByte unreachable → return empty with the resolved window so the
     // FE shows "couldn't fetch report data" rather than estimates.
-    logger.warn({ err, lbWindow, clientId }, 'portal getLeadsBySource: LeadByte supplier-spend fetch failed');
-    return { rows: [], window: { kind: 'preset', preset: lbWindow } };
+    logger.warn({ err, lbWindow, from, to, clientId }, 'portal getLeadsBySource: LeadByte supplier-spend fetch failed');
+    return { rows: [], window: responseWindow };
   }
 
   const [ownCampaignNameToId, campaignSpendRows] = await Promise.all([
@@ -1011,7 +1021,7 @@ export async function getLeadsBySource(
 
   return {
     rows,
-    window: { kind: 'preset', preset: lbWindow },
+    window: responseWindow,
     validLeadsByCampaign,
   };
 }
@@ -1056,7 +1066,7 @@ export async function getInvoices(requester: AuthPayload): Promise<PortalInvoice
         id: r.id,
         invoiceNumber: r.invoiceNumber ?? '',
         status: deriveDisplayStatus(r.status, daysOverdue),
-        total: Number(r.total ?? 0),
+        total: String(r.total ?? '0'),
         currency: r.currency ?? 'GBP',
         dueDate: (r.dueDate ?? new Date()).toISOString(),
         paidDate: r.paidDate ? r.paidDate.toISOString() : null,
@@ -1368,23 +1378,26 @@ export async function getAgreement(requester: AuthPayload): Promise<PortalAgreem
   });
   const row = visibleRows[0];
 
-  // Yash (29-May-2026): Dashboard tile reads `client.agreementSigned`
-  // (admin-toggleable boolean), Agreement tab was reading only the
-  // `agreements` row's `signedAt` timestamp. The two drift apart when
-  // Sam toggles the flag on the client record without the agreements
-  // row being updated — e.g. for Benson Goldstein, status='sent' and
-  // signedAt=null but client.agreementSigned=true. Dashboard then said
-  // "Signed" while Agreement tab said "Pending". The admin-side boolean
-  // is the source-of-truth Sam wants honoured, so upgrade the derived
-  // status to 'signed' when that flag is set, and fall back to the
-  // row's sentAt / createdAt for the displayed timestamp.
-  let status: PortalAgreement['status'] =
-    row.signedAt ? 'signed' : row.sentAt ? 'sent' : 'pending';
-  let signedAt = row.signedAt;
-  if (status !== 'signed' && client.agreementSigned === true) {
-    status = 'signed';
-    signedAt = row.signedAt ?? row.sentAt ?? row.updatedAt ?? row.createdAt ?? null;
-  }
+  // Derive "signed" with the SAME shared helper the admin uses
+  // (computeEffectiveAgreementStatus) so the portal Agreement tab, the admin
+  // /agreements list, and the portal dashboard tile can never disagree. It
+  // treats an agreement as signed when the row status is signed/completed, OR
+  // a signedAt timestamp exists, OR the admin-toggled client.agreementSigned
+  // flag is set (e.g. Benson Goldstein: status='sent', signedAt=null, flag on).
+  // Previously this read signedAt/sentAt only and ignored a raw 'signed'/
+  // 'completed' status with a null signedAt, so it showed "Pending" while
+  // admin showed "Signed". The portal type is 3-state, so completed→signed.
+  const effective = computeEffectiveAgreementStatus({
+    status: row.status,
+    signedAt: row.signedAt,
+    clientAgreementSigned: client.agreementSigned,
+  });
+  const status: PortalAgreement['status'] = effective.effectiveSigned
+    ? 'signed'
+    : row.sentAt ? 'sent' : 'pending';
+  const signedAt = effective.effectiveSigned
+    ? (row.signedAt ?? row.sentAt ?? row.updatedAt ?? row.createdAt ?? null)
+    : row.signedAt;
 
   return {
     id: row.id,

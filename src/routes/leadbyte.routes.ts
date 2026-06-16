@@ -3,12 +3,13 @@ import { authMiddleware } from '../middleware/auth.middleware.js';
 import { requireRole } from '../middleware/rbac.middleware.js';
 import * as lb from '../integrations/leadbyte/leadbyte-client.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
-import { cached } from '../utils/cache.js';
+import { cached, LEADBYTE_SHARED_CACHE_TTL_SECONDS } from '../utils/cache.js';
 
 // Read-through TTL for the dashboard caches. The 90s prewarmer keeps these
 // keys hot, so user requests almost always hit a warm Redis entry; this TTL
 // is the safety net if the worker dies and acts as the cap on staleness.
-const DASHBOARD_TTL_SECONDS = 300;
+// The lb:report / lb:supplier-spend keys use the shared constant so every
+// writer of those keys agrees on the TTL (see LEADBYTE_SHARED_CACHE_TTL_SECONDS).
 const LIST_TTL_SECONDS = 300;
 
 export const leadbyteRoutes: RouterType = Router();
@@ -104,13 +105,13 @@ function parseWindow(req: Request): DeliveryWindow {
 /** Per-campaign summary (leads/valid/revenue/payout/profit) for a given time window. */
 leadbyteRoutes.get('/reports/campaign', ops, wrap((req) => {
   const window = parseWindow(req);
-  return cached(`lb:report:${window}:v5`, DASHBOARD_TTL_SECONDS, () => lb.getCampaignReport(window));
+  return cached(`lb:report:${window}:v5`, LEADBYTE_SHARED_CACHE_TTL_SECONDS, () => lb.getCampaignReport(window));
 }));
 
 /** Supplier-level spend breakdown for a given time window. */
 leadbyteRoutes.get('/reports/supplier-spend', ops, wrap((req) => {
   const window = parseWindow(req);
-  return cached(`lb:supplier-spend:${window}:v1`, DASHBOARD_TTL_SECONDS, () => lb.getSupplierSpend(window));
+  return cached(`lb:supplier-spend:${window}:v1`, LEADBYTE_SHARED_CACHE_TTL_SECONDS, () => lb.getSupplierSpend(window));
 }));
 
 /**
@@ -124,7 +125,7 @@ leadbyteRoutes.get('/reports/supplier-spend', ops, wrap((req) => {
  */
 leadbyteRoutes.get('/reports/summary', ops, wrap(async (req) => {
   const window = parseWindow(req);
-  const rows = await cached(`lb:report:${window}:v5`, DASHBOARD_TTL_SECONDS, () => lb.getCampaignReport(window));
+  const rows = await cached(`lb:report:${window}:v5`, LEADBYTE_SHARED_CACHE_TTL_SECONDS, () => lb.getCampaignReport(window));
   const totals = rows.reduce(
     (acc, r) => {
       acc.leads += Number(r.leads || 0);

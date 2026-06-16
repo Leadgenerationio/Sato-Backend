@@ -1,4 +1,5 @@
 import { redis } from '../config/redis.js';
+import { LEADBYTE_SHARED_CACHE_TTL_SECONDS } from '../utils/cache.js';
 import { logger } from '../utils/logger.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import { recordLeadByteSync } from '../controllers/integration.controller.js';
@@ -80,7 +81,8 @@ export async function prewarmLeadByteCache(): Promise<{
     try {
       const rows = await leadbyte.getCampaignReport(w);
       if (rows.length > 0) {
-        await redis.set(key, JSON.stringify(rows), 'EX', CACHE_TTL_SECONDS);
+        // Shared key with the read-through paths — must use the same TTL.
+        await redis.set(key, JSON.stringify(rows), 'EX', LEADBYTE_SHARED_CACHE_TTL_SECONDS);
         reportsCached++;
       } else {
         logger.warn({ key, window: w }, 'Cache prewarm: report came back empty — skip cache write');
@@ -97,7 +99,8 @@ export async function prewarmLeadByteCache(): Promise<{
     try {
       const rows = await leadbyte.getSupplierSpend(w);
       if (rows.length > 0) {
-        await redis.set(key, JSON.stringify(rows), 'EX', CACHE_TTL_SECONDS);
+        // Shared key with the read-through paths — must use the same TTL.
+        await redis.set(key, JSON.stringify(rows), 'EX', LEADBYTE_SHARED_CACHE_TTL_SECONDS);
         supplierSpendCached++;
       }
     } catch (err) {

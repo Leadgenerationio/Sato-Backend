@@ -1,0 +1,6 @@
+# Authorize postinstall build scripts for these dependencies so pnpm doesn't
+# skip them (the ERR_PNPM_IGNORED_BUILDS warning). `onlyBuiltDependencies` is
+# the supported pnpm key — `allowBuilds` is not recognized.
+onlyBuiltDependencies:
+  - esbuild
+  - msgpackr-extract

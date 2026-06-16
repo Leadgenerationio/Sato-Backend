@@ -735,6 +735,26 @@ describe('Portal API', () => {
         expect(r.spend).toBe(0);
       }
     });
+
+    // 2026-06-15: a manually-picked calendar range (no matching LeadByte preset)
+    // used to short-circuit to kind:'custom-no-preset-match' with NO breakdown,
+    // so the FE showed a "pick a preset" hint and leads stuck at 0. The breakdown
+    // is now fetched by the explicit from/to range — window is 'custom' and the
+    // bySource array is still computed (real data; empty only if there genuinely
+    // is none for the range).
+    it('custom (non-preset) date range returns a custom window with a real breakdown, not custom-no-preset-match', async () => {
+      await db.update(clients).set({ clientType: 'managed' }).where(eq(clients.id, DEMO_CLIENT_ID));
+
+      // An arbitrary mid-month span that does not line up with any preset.
+      const res = await request(app)
+        .get('/api/v1/portal/leads?from=2026-02-03&to=2026-02-19')
+        .set('Authorization', `Bearer ${clientToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.bySourceWindow).toEqual({ kind: 'custom' });
+      // Breakdown is computed for custom ranges (array present), never the old
+      // "no preset → skip entirely" behaviour.
+      expect(Array.isArray(res.body.data.bySource)).toBe(true);
+    });
   });
 
   // The portal Creatives tab opened R2 assets via the stored fileUrl, which is

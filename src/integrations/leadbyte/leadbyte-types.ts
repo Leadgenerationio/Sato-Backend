@@ -141,7 +141,9 @@ export interface LeadByteSupplierSpend {
   platform: string;
   campaignId: string;
   campaignName: string;
-  window: DeliveryWindow;
+  /** The preset window this row was fetched for, or 'custom' when fetched by
+   *  an explicit from/to date range (no matching LeadByte preset). */
+  window: DeliveryWindow | 'custom';
   /** Equals LeadByte `payout`. */
   spend: number;
   /** Total leads (valid + invalid + pending + rejected) — keep for legacy callers. */

@@ -549,6 +549,55 @@ describe('LeadByte client — API calls (fetch mocked)', () => {
     expect(rows[0].cpl).toBe(7.5);
   });
 
+  // The portal By Source breakdown needs per-source leads for ANY date range
+  // (YTD, manual calendar selection), not just named presets. getSupplierSpendByRange
+  // hits /reports/supplier with explicit date-only from/to and parses leads the
+  // same way getSupplierSpend does.
+  it('getSupplierSpendByRange queries /reports/supplier with date-only from/to and parses valid leads', async () => {
+    fetchMock.mockResolvedValue(
+      mockJsonResponse({
+        status: 'Success',
+        data: [
+          {
+            campaign: { id: '85', name: 'Conservatory Upgrades' },
+            supplier: { id: 's-9', name: 'Google Ads UK' },
+            leads: 200,
+            valid: 180,
+            invalid: 20,
+            payout: 1500,
+            revenue: 4000,
+            profit: 2500,
+            eCPL: 7.5,
+            currency: 'Britain (United Kingdom), Pounds',
+          },
+        ],
+      }),
+    );
+    const rows = await lb.getSupplierSpendByRange('2026-01-01', '2026-06-15');
+    const url = fetchMock.mock.calls[0][0] as string;
+    // Real range path: explicit date-only from/to, NOT a datePreset.
+    expect(url).toContain('/reports/supplier');
+    expect(url).toContain('from=2026-01-01');
+    expect(url).toContain('to=2026-06-15');
+    expect(url).not.toContain('datePreset');
+    // Leads parse identically to the preset path; window is tagged 'custom'.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].validLeads).toBe(180);
+    expect(rows[0].leads).toBe(200);
+    expect(rows[0].spend).toBe(1500);
+    expect(rows[0].window).toBe('custom');
+  });
+
+  it('getSupplierSpendByRange slices off any time component before sending from/to', async () => {
+    fetchMock.mockResolvedValue(mockJsonResponse({ status: 'Success', data: [] }));
+    await lb.getSupplierSpendByRange('2026-01-01T00:00:00Z', '2026-06-15T23:59:59Z');
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).toContain('from=2026-01-01');
+    expect(url).toContain('to=2026-06-15');
+    expect(url).not.toContain('T00');
+    expect(url).not.toContain('%3A'); // no encoded ':' from a timestamp
+  });
+
   it('getEmailReport accepts both `data` (real API) and `report` (legacy) envelopes', async () => {
     fetchMock.mockResolvedValueOnce(
       mockJsonResponse({
