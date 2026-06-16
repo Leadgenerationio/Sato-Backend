@@ -7,6 +7,8 @@ import { campaigns } from '../db/schema/campaigns.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { invoices } from '../db/schema/invoices.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
+import { trafficSources } from '../db/schema/traffic-sources.js';
+import { largestRemainderAllocate } from '../utils/allocate.js';
 import { creatives } from '../db/schema/creatives.js';
 import { landingPages } from '../db/schema/landing-pages.js';
 import { agreements } from '../db/schema/agreements.js';
@@ -21,7 +23,7 @@ import { cached, LEADBYTE_SHARED_CACHE_TTL_SECONDS } from '../utils/cache.js';
 import { computeEffectiveAgreementStatus } from './agreement.service.js';
 import { logger } from '../utils/logger.js';
 import { normalizeCurrencyCode } from '../utils/currency.js';
-import { canonicalPlatformSql } from '../utils/catchr-platform.js';
+import { canonicalPlatformSql, canonicalizePlatform } from '../utils/catchr-platform.js';
 import type { AuthPayload } from '../types/index.js';
 
 /**
@@ -968,6 +970,23 @@ export async function getLeadsBySource(
     }
   }
 
+  // Per-platform leads to display. Normally this is LeadByte's per-supplier
+  // truth. But LeadByte only returns per-source valid leads for its NAMED
+  // presets — for YTD / custom date ranges the supplier report comes back with
+  // spend but zero per-source leads, so every platform row showed 0 even though
+  // lead_deliveries clearly had data (the "Total 272 but Facebook/Google 0"
+  // mismatch). When LeadByte gives nothing, derive per-platform leads by
+  // attributing each campaign's lead_deliveries valid leads to its canonical ad
+  // platform(s) — the same campaign→platform mapping the spend buckets use.
+  const leadsByPlatform = new Map<string, number>(lbValidLeadsByPlatform);
+  const lbLeadsTotal = Array.from(lbValidLeadsByPlatform.values()).reduce((s, v) => s + v, 0);
+  if (lbLeadsTotal === 0 && linkedCampaignIds.length > 0) {
+    const derived = await deriveLeadsByPlatformFromDeliveries(
+      clientId, linkedCampaignIds, from, to, campaignSpendRows,
+    );
+    for (const [platform, leads] of derived) leadsByPlatform.set(platform, leads);
+  }
+
   // Bucket spend per (platform, currency). LeadByte tells us what leads
   // there are; Catchr tells us what was spent. Platforms with spend but no
   // LeadByte supplier row land with leads=0 (Catchr connected, LB supplier
@@ -989,12 +1008,12 @@ export async function getLeadsBySource(
   }
   for (const [key, b] of buckets.entries()) {
     const platform = key.split('|')[0];
-    b.leads = lbValidLeadsByPlatform.get(platform) ?? 0;
+    b.leads = leadsByPlatform.get(platform) ?? 0;
   }
-  // Also surface platforms that have LeadByte leads but no recorded
-  // Catchr spend (free traffic, or Catchr ingestion missing). Spend = 0,
-  // currency defaults to GBP. Sam wants the leads visible regardless.
-  for (const [platform, leads] of lbValidLeadsByPlatform.entries()) {
+  // Also surface platforms that have leads but no recorded Catchr spend (free
+  // traffic, or Catchr ingestion missing). Spend = 0, currency defaults to GBP.
+  // Sam wants the leads visible regardless.
+  for (const [platform, leads] of leadsByPlatform.entries()) {
     const key = `${platform}|`;
     const matched = Array.from(buckets.keys()).some((k) => k.startsWith(`${platform}|`));
     if (!matched) {
@@ -1024,6 +1043,93 @@ export async function getLeadsBySource(
     window: responseWindow,
     validLeadsByCampaign,
   };
+}
+
+/**
+ * Fallback per-platform valid-lead attribution for ranges where LeadByte's
+ * supplier report returns no per-source leads (YTD / custom). Sums each
+ * campaign's lead_deliveries valid leads and attributes them to the campaign's
+ * canonical ad platform(s) from traffic_sources:
+ *   - single-platform campaign → all its leads to that platform (exact);
+ *   - multi-platform campaign → split by that campaign's Catchr spend share
+ *     (or evenly when no spend), using largest-remainder so the integer parts
+ *     still sum to the campaign's total (no leads gained/lost).
+ * Campaigns with no canonical ad platform (e.g. Direct-only) are left out of
+ * the per-source breakdown — honest, since we can't attribute them.
+ */
+async function deriveLeadsByPlatformFromDeliveries(
+  clientId: string,
+  campaignIds: string[],
+  from: string,
+  to: string,
+  spendRows: Array<{ campaignId: string; platform: string; spend: number }>,
+): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  if (campaignIds.length === 0) return result;
+
+  const [leadRows, tsRows] = await Promise.all([
+    db
+      .select({
+        campaignId: leadDeliveries.campaignId,
+        // Match getLeads()' validLeads (validLeadCount ?? leadCount) so the
+        // derived per-source rows sum to the same "Total Leads" the daily rows
+        // produce — otherwise rows would total less than the headline.
+        leads: sql<number>`coalesce(sum(coalesce(${leadDeliveries.validLeadCount}, ${leadDeliveries.leadCount}, 0)), 0)::int`,
+      })
+      .from(leadDeliveries)
+      .where(and(
+        eq(leadDeliveries.clientId, clientId),
+        gte(leadDeliveries.deliveryDate, from),
+        lte(leadDeliveries.deliveryDate, to),
+      ))
+      .groupBy(leadDeliveries.campaignId),
+    db
+      .select({
+        campaignId: trafficSources.campaignId,
+        platform: sql<string | null>`${sql.raw(canonicalPlatformSql('platform'))}`,
+      })
+      .from(trafficSources)
+      .where(and(inArray(trafficSources.campaignId, campaignIds), eq(trafficSources.isActive, true))),
+  ]);
+
+  const platformsByCampaign = new Map<string, Set<string>>();
+  for (const r of tsRows) {
+    if (!r.campaignId || !r.platform) continue;
+    let set = platformsByCampaign.get(r.campaignId);
+    if (!set) { set = new Set<string>(); platformsByCampaign.set(r.campaignId, set); }
+    set.add(r.platform);
+  }
+
+  // Canonicalize the spend platform so it matches the canonical platform keys
+  // derived from traffic_sources below — aggregateClientAdSpendByCampaignAndPlatform
+  // projects the RAW ad_spend.platform, so without this a synonym (e.g. 'meta',
+  // 'Google') would never match and the multi-platform split would silently
+  // fall back to an even split instead of the intended spend-share split.
+  const spendByCampaignPlatform = new Map<string, number>();
+  for (const s of spendRows) {
+    const platform = canonicalizePlatform(s.platform) ?? s.platform;
+    const key = `${s.campaignId}|${platform}`;
+    spendByCampaignPlatform.set(key, (spendByCampaignPlatform.get(key) ?? 0) + s.spend);
+  }
+
+  for (const lr of leadRows) {
+    const leads = lr.leads ?? 0;
+    if (leads <= 0 || !lr.campaignId) continue;
+    const platforms = Array.from(platformsByCampaign.get(lr.campaignId) ?? []);
+    if (platforms.length === 0) continue; // no ad-platform mapping → unattributable
+    if (platforms.length === 1) {
+      result.set(platforms[0], (result.get(platforms[0]) ?? 0) + leads);
+      continue;
+    }
+    const weights = platforms.map((p) => spendByCampaignPlatform.get(`${lr.campaignId}|${p}`) ?? 0);
+    const weightSum = weights.reduce((s, w) => s + w, 0);
+    const shares = weightSum > 0 ? weights.map((w) => w / weightSum) : platforms.map(() => 1 / platforms.length);
+    const alloc = largestRemainderAllocate(leads, shares);
+    platforms.forEach((p, i) => {
+      if (alloc[i] > 0) result.set(p, (result.get(p) ?? 0) + alloc[i]);
+    });
+  }
+  return result;
 }
 
 export async function getInvoices(requester: AuthPayload): Promise<PortalInvoice[]> {
