@@ -58,12 +58,15 @@ export const WORKFLOW_HANDLERS: Record<string, () => Promise<HandlerResult>> = {
   },
 
   /**
-   * auto-invoice — creates a draft Xero invoice for every active
-   * weekly_auto client based on the last 7 days of LeadByte deliveries.
+   * auto-invoice — reconciles every active weekly_auto client against Xero.
    *
-   * For each eligible client: sums leadCount × leadPrice over the past 7
-   * days from lead_deliveries, creates a draft invoice via invoice.service,
-   * then pushes to Xero. Skips clients with zero leads in the window.
+   * Xero is the billing source of truth (2026-06-16, Sam): this handler used
+   * to fabricate a draft invoice from leadCount × leadPrice and push it to
+   * Xero, which risked double-billing and amounts that didn't match what Sam
+   * actually raised. It now PULLS each eligible client's real invoices from
+   * Xero via `invoiceService.syncInvoicesFromXero()` (idempotent — dedupes by
+   * xeroInvoiceId, re-syncs status/amounts on existing rows). Clients with no
+   * leads in the last 7 days are skipped.
    */
   'auto-invoice': async () => {
     const eligible = await db
@@ -75,8 +78,9 @@ export const WORKFLOW_HANDLERS: Record<string, () => Promise<HandlerResult>> = {
 
     const sevenDaysAgo = new Date(Date.now() - 7 * 86_400_000).toISOString().split('T')[0];
 
-    let invoicesCreated = 0;
-    let invoicesPushed = 0;
+    let clientsReconciled = 0;
+    let invoicesSynced = 0;
+    let invoicesUpdated = 0;
     let skippedNoLeads = 0;
     const errors: string[] = [];
 
@@ -98,47 +102,23 @@ export const WORKFLOW_HANDLERS: Record<string, () => Promise<HandlerResult>> = {
           continue;
         }
 
-        const leadPrice = Number(client.leadPrice ?? 0);
-        if (leadPrice === 0) {
-          errors.push(`${client.companyName}: leadPrice not set`);
+        const result = await invoiceService.syncInvoicesFromXero(client.id, requester);
+        if (!result || result.totalRemote === 0) {
+          // Client got leads but Xero holds no invoice — flag, don't fabricate.
+          errors.push(`${client.companyName}: ${result?.message ?? 'no Xero invoice found'}`);
           continue;
         }
-
-        const lineItem = {
-          description: `Lead generation — ${leadCount} leads (week ending ${new Date().toISOString().split('T')[0]})`,
-          quantity: leadCount,
-          unitPrice: leadPrice,
-          amount: Math.round(leadCount * leadPrice * 100) / 100,
-        };
-
-        const created = await invoiceService.createInvoice(
-          {
-            clientId: client.id,
-            currency: client.currency ?? 'GBP',
-            lineItems: [lineItem],
-            addVat: client.vatRegistered ?? false,
-          },
-          requester,
-        );
-        invoicesCreated++;
-
-        try {
-          await invoiceService.pushInvoiceToXero(created.id, requester);
-          invoicesPushed++;
-        } catch (err) {
-          // Invoice exists in DB; Xero push failed (e.g., not configured).
-          // Don't fail the whole batch — log and continue.
-          logger.error({ err, clientId: client.id, invoiceId: created.id }, 'auto-invoice: Xero push failed');
-          errors.push(`${client.companyName}: Xero push failed`);
-        }
+        clientsReconciled++;
+        invoicesSynced += result.synced;
+        invoicesUpdated += result.updated ?? 0;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        logger.error({ err, clientId: client.id }, 'auto-invoice: per-client failure');
+        logger.error({ err, clientId: client.id }, 'auto-invoice: per-client Xero sync failure');
         errors.push(`${client.companyName}: ${msg}`);
       }
     }
 
-    const summary = `Auto-invoice: ${invoicesCreated} created, ${invoicesPushed} pushed to Xero, ${skippedNoLeads} skipped (no leads). ${errors.length} errors.`;
+    const summary = `Auto-invoice (Xero sync): ${clientsReconciled} clients reconciled, ${invoicesSynced} imported, ${invoicesUpdated} updated, ${skippedNoLeads} skipped (no leads). ${errors.length} errors.`;
     return { ok: errors.length === 0, summary };
   },
 
