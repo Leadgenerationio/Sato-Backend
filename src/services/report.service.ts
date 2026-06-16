@@ -1268,7 +1268,8 @@ export async function getPnlSummary(
     };
   }
 
-  // Revenue = sum(invoices.total) where status='paid' AND createdAt in window.
+  // Revenue = sum(invoices.total) for RECOGNISED_INVOICE_STATUSES (paid +
+  // authorised) AND createdAt in window.
   // OCT-46: `invoices` has no `business_id` column, so we tenant-scope via
   // INNER JOIN through `clients` (invoices.client_id → clients.business_id),
   // matching the pattern getClientPnl already uses. Without this guard the
