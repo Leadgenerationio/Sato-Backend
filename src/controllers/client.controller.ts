@@ -44,6 +44,15 @@ export async function updateClient(req: Request, res: Response) {
   res.json({ status: 'success', data: { client } });
 }
 
+export async function deleteClient(req: Request, res: Response) {
+  const deleted = await clientService.deleteClient(req.params.id as string, req.user!);
+  if (!deleted) {
+    res.status(404).json({ status: 'error', message: 'Client not found' });
+    return;
+  }
+  res.json({ status: 'success', data: { deleted: true } });
+}
+
 export async function getCreditHistory(req: Request, res: Response) {
   const clientId = req.params.id as string;
   // Confirm the client belongs to the caller's business before exposing

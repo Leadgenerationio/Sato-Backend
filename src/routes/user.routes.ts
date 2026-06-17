@@ -73,3 +73,5 @@ userRoutes.patch('/:id/role', validate(updateRoleSchema), userController.updateR
 userRoutes.patch('/:id/toggle-active', userController.toggleActive);
 userRoutes.patch('/:id/allowed-tabs', validate(updateAllowedTabsSchema), userController.updateAllowedTabs);
 userRoutes.patch('/:id/password', validate(resetPasswordSchema), userController.resetPassword);
+// Sam (2026-06-17): permanently remove a portal user (Portal Users card).
+userRoutes.delete('/:id', userController.deleteUser);

@@ -19,7 +19,8 @@ export type CreativeApprovalStatus = 'pending' | 'approved' | 'rejected' | 'chan
 export interface CreativeApprovalEvent {
   id: string;
   action: CreativeApprovalAction;
-  decidedByUserId: string;
+  // null when the deciding user was later permanently removed (migration 0038).
+  decidedByUserId: string | null;
   decidedByName: string | null;
   decidedByEmail: string | null;
   ipAddress: string | null;

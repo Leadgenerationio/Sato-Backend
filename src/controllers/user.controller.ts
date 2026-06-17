@@ -62,6 +62,14 @@ export async function toggleActive(req: Request, res: Response) {
   });
 }
 
+// Sam (2026-06-17): permanently remove a portal user from the Portal Users
+// card. Service enforces portal-role-only + can't-remove-self/primary-owner.
+export async function deleteUser(req: Request, res: Response) {
+  const id = req.params.id as string;
+  const result = await userService.deleteUser(id, req.user!);
+  res.json({ status: 'success', data: result });
+}
+
 // Sam (2026-06-10): admin resets a password for any client/staff user
 // from User Management. Does not require the user's current password.
 export async function resetPassword(req: Request, res: Response) {

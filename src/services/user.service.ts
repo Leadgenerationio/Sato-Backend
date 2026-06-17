@@ -285,6 +285,42 @@ export async function toggleUserActive(userId: string, requester: AuthPayload) {
   };
 }
 
+// Sam (2026-06-17): "Add option to remove the user as well" on the Portal
+// Users card. Permanently deletes a PORTAL user login. Scoped to portal roles
+// (client / client_admin) only — staff/owner accounts have references
+// (auto-invoice runs, bank-feed, etc.) we don't clean here, and User
+// Management owns staff lifecycle. The FK refs a portal user can hold are
+// handled by migration 0038 (creative_approvals → SET NULL, notifications →
+// CASCADE); the remaining user FKs are already ON DELETE SET NULL.
+export async function deleteUser(userId: string, requester: AuthPayload) {
+  const user = await findById(userId);
+  if (!user) throw new NotFoundError('User');
+
+  if (userId === requester.userId) {
+    throw new ForbiddenError('Cannot remove yourself');
+  }
+
+  // Business scoping — same guard as the other admin user mutations.
+  if (requester.role !== 'owner' && requester.businessId && user.businessId !== requester.businessId) {
+    throw new ForbiddenError('Cannot remove users outside your business');
+  }
+
+  // Belt-and-braces: the primary owner can never be removed.
+  if (user.isPrimaryOwner) {
+    throw new ForbiddenError('The primary owner account cannot be removed');
+  }
+
+  // Only portal users are removable here. Staff/owner deletion is out of scope
+  // (their references aren't cleaned by migration 0038).
+  if (user.role !== 'client' && user.role !== 'client_admin') {
+    throw new ForbiddenError('Only portal users can be removed here');
+  }
+
+  await db.delete(users).where(eq(users.id, userId));
+
+  return { id: userId };
+}
+
 // ─── Self-service profile + password ───
 // Sam (2026-05-28 follow-up to jam-video #2): admin-side per-portal-user
 // tab visibility. Refuses for staff roles (they don't see /portal at all)

@@ -30,7 +30,11 @@ export const creativeApprovals = pgTable('creative_approvals', {
   id: uuid('id').primaryKey().defaultRandom(),
   creativeId: uuid('creative_id').references(() => creatives.id).notNull(),
   action: creativeApprovalActionEnum('action').notNull(),
-  decidedByUserId: uuid('decided_by_user_id').references(() => users.id).notNull(),
+  // Nullable + ON DELETE SET NULL so a portal user can be permanently removed
+  // without destroying this audit row — the "who" pointer is anonymised, but
+  // the decision record/timeline and creatives.status (current state) survive.
+  // See migration 0038.
+  decidedByUserId: uuid('decided_by_user_id').references(() => users.id, { onDelete: 'set null' }),
   // IPv4 = max 15 chars, IPv6 (with brackets/zones) up to 45.
   ipAddress: varchar('ip_address', { length: 45 }),
   userAgent: varchar('user_agent', { length: 500 }),
