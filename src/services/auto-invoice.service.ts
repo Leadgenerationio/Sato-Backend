@@ -1,33 +1,37 @@
-import { and, desc, eq, gte, lte, sql, isNull } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { clients } from '../db/schema/clients.js';
-import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { businesses } from '../db/schema/businesses.js';
 import {
   autoInvoiceRuns,
   type AutoInvoiceClientDetail,
 } from '../db/schema/auto-invoice-runs.js';
 import * as invoiceService from './invoice.service.js';
-import { emailQueue } from '../jobs/queue.js';
 import { logger } from '../utils/logger.js';
 import type { AuthPayload } from '../types/index.js';
-import type { ResendSendRequest } from '../integrations/resend/resend-types.js';
 
 /**
- * Sam Loom #14 — auto-invoice cron.
+ * Sam Loom #14 — weekly invoice-reconciliation cron.
  *
- * Replaces Sam's Make.com automation. Once a week (Monday morning), for each
- * client with deliveries in the previous Mon-Sun, generate a Stato invoice
- * priced from the deliveries' stored `revenue` (or, if absent, the
- * client_campaigns per-client `lead_price` × validLeadCount). The chase
- * cron + Xero push happen via the existing infrastructure.
+ * Xero is the billing source of truth. This cron does NOT fabricate invoices
+ * from lead values any more (2026-06-16, Sam): the previous behaviour computed
+ * an amount from `lead_deliveries.revenue` (or lead_price × validLeadCount) and
+ * inserted a local draft, which could silently diverge from what Sam actually
+ * raised in Xero and even emailed clients about invoices that never existed in
+ * Xero.
+ *
+ * New behaviour: once a week (Monday morning), for each client with deliveries
+ * in the previous Mon-Sun, PULL that client's real invoices from Xero via
+ * `invoiceService.syncInvoicesFromXero()`. The week's deliveries only decide
+ * WHICH clients to reconcile; every amount, number, and status comes from Xero.
  *
  * Idempotency: each run records its (businessId, periodFrom, periodTo).
  * If a successful run already exists for the same window, the next tick
  * is a no-op (status='skipped'). This guards against:
  *   - cron firing twice on the same day after a Redis restart
  *   - someone clicking "Run now" right after the scheduled one fired
+ * (The per-client sync is itself idempotent — it dedupes by xeroInvoiceId.)
  *
  * Per-client errors are caught + logged on the run's `details` jsonb so a
  * single client failing doesn't blank the entire run.
@@ -64,21 +68,22 @@ interface RunContext {
 interface ClientRollup {
   clientId: string;
   clientName: string;
-  contactEmail: string | null;
   currency: string;
   validLeadCount: number;
-  revenue: number; // sum from lead_deliveries.revenue
 }
 
+/**
+ * Which clients received leads in the billing window? These are the clients
+ * we reconcile against Xero. We no longer sum `revenue` here — the amount
+ * comes from Xero, not from the deliveries.
+ */
 async function loadDeliveriesByClient(ctx: RunContext): Promise<ClientRollup[]> {
   const rows = await db
     .select({
       clientId: leadDeliveries.clientId,
       clientName: clients.companyName,
-      contactEmail: clients.contactEmail,
       currency: clients.currency,
       validLeadCount: sql<number>`coalesce(sum(${leadDeliveries.validLeadCount}), 0)::int`,
-      revenue: sql<string>`coalesce(sum(${leadDeliveries.revenue}::numeric), 0)::text`,
     })
     .from(leadDeliveries)
     .innerJoin(clients, eq(clients.id, leadDeliveries.clientId))
@@ -89,36 +94,14 @@ async function loadDeliveriesByClient(ctx: RunContext): Promise<ClientRollup[]> 
         lte(leadDeliveries.deliveryDate, ctx.periodTo),
       ),
     )
-    .groupBy(leadDeliveries.clientId, clients.companyName, clients.contactEmail, clients.currency);
+    .groupBy(leadDeliveries.clientId, clients.companyName, clients.currency);
 
   return rows.map((r) => ({
     clientId: r.clientId,
     clientName: r.clientName,
-    contactEmail: r.contactEmail,
     currency: r.currency ?? 'GBP',
     validLeadCount: r.validLeadCount,
-    revenue: parseFloat(r.revenue) || 0,
   }));
-}
-
-async function loadClientLeadPrice(clientId: string): Promise<number | null> {
-  // Per-client price comes from the client_campaigns join (Sam's "different
-  // buyers on the same vertical pay different rates"). Falls back to the
-  // client's default lead_price if no campaign-specific row.
-  const [campaignPrice] = await db
-    .select({ price: clientCampaigns.leadPrice })
-    .from(clientCampaigns)
-    .where(and(eq(clientCampaigns.clientId, clientId), isNull(clientCampaigns.endedAt)))
-    .limit(1);
-  if (campaignPrice?.price) return parseFloat(campaignPrice.price);
-
-  const [client] = await db
-    .select({ price: clients.leadPrice })
-    .from(clients)
-    .where(eq(clients.id, clientId))
-    .limit(1);
-  if (client?.price) return parseFloat(client.price);
-  return null;
 }
 
 /**
@@ -143,96 +126,53 @@ async function hasCompletedRun(ctx: RunContext): Promise<boolean> {
 }
 
 async function buildClientDetail(
-  ctx: RunContext,
+  _ctx: RunContext,
   rollup: ClientRollup,
   systemAuth: AuthPayload,
 ): Promise<AutoInvoiceClientDetail> {
-  // Prefer the deliveries' stored revenue when present (handles per-day
-  // price changes); fall back to validLeadCount × lead_price.
-  let amount = rollup.revenue;
-  if (amount === 0 && rollup.validLeadCount > 0) {
-    const leadPrice = await loadClientLeadPrice(rollup.clientId);
-    if (leadPrice == null) {
-      return {
-        clientId: rollup.clientId,
-        clientName: rollup.clientName,
-        leads: rollup.validLeadCount,
-        amount: '0',
-        currency: rollup.currency,
-        status: 'no_lead_price',
-        reason: 'Client has deliveries but no lead_price configured on client_campaigns or clients',
-      };
-    }
-    amount = Math.round(rollup.validLeadCount * leadPrice * 100) / 100;
-  }
-
-  if (amount <= 0 || rollup.validLeadCount === 0) {
-    return {
-      clientId: rollup.clientId,
-      clientName: rollup.clientName,
-      leads: rollup.validLeadCount,
-      amount: '0',
-      currency: rollup.currency,
-      status: 'no_deliveries',
-    };
-  }
+  const base = {
+    clientId: rollup.clientId,
+    clientName: rollup.clientName,
+    leads: rollup.validLeadCount,
+    amount: '0', // amounts live on the per-invoice rows pulled from Xero
+    currency: rollup.currency,
+    synced: 0,
+    updated: 0,
+    totalRemote: 0,
+  };
 
   try {
-    const lineItem = {
-      description: `Lead deliveries ${ctx.periodFrom} → ${ctx.periodTo} (${rollup.validLeadCount} leads)`,
-      quantity: rollup.validLeadCount,
-      unitPrice: Math.round((amount / rollup.validLeadCount) * 100) / 100,
-      amount,
-    };
+    // PULL the client's real invoices from Xero. This imports new ones,
+    // re-syncs amounts/status/paid-date on existing ones, and is fully
+    // idempotent (dedupes by xeroInvoiceId).
+    const result = await invoiceService.syncInvoicesFromXero(rollup.clientId, systemAuth);
 
-    const invoice = await invoiceService.createInvoice(
-      {
-        clientId: rollup.clientId,
-        currency: rollup.currency,
-        lineItems: [lineItem],
-        addVat: true,
-      },
-      systemAuth,
-    );
+    // null = client not found under this business (shouldn't happen — we
+    // selected it from the same business — but treat defensively as failed).
+    if (!result) {
+      return { ...base, status: 'failed', reason: 'client not found for Xero sync' };
+    }
 
-    // Best-effort email — failure here doesn't fail the run; the invoice is
-    // created and the client can still be billed via the standard chase flow.
-    if (emailQueue && rollup.contactEmail) {
-      try {
-        await emailQueue.add('send-email', {
-          to: rollup.contactEmail,
-          subject: `Invoice ${invoice.invoiceNumber} — week of ${ctx.periodFrom}`,
-          html: `<p>Hi ${rollup.clientName},</p><p>Your weekly invoice is ready: <strong>${invoice.invoiceNumber}</strong> for ${rollup.validLeadCount} leads delivered ${ctx.periodFrom}–${ctx.periodTo}. Total: ${rollup.currency} ${amount.toFixed(2)}.</p>`,
-          // Have the worker log this outbound to client_emails + activity feed.
-          clientId: rollup.clientId,
-        } satisfies ResendSendRequest);
-      } catch (err) {
-        logger.warn({ err, invoiceId: invoice.id }, 'Auto-invoice email enqueue failed (invoice still created)');
-      }
+    // Client got leads this week but Xero holds no invoice for them (no
+    // contact link, Xero not configured, or simply nothing raised yet).
+    // Surface it so Sam knows to raise it in Xero — we no longer fabricate
+    // one locally.
+    if (result.totalRemote === 0) {
+      return { ...base, status: 'no_xero_invoices', reason: result.message };
     }
 
     return {
-      clientId: rollup.clientId,
-      clientName: rollup.clientName,
-      leads: rollup.validLeadCount,
-      amount: amount.toFixed(2),
-      currency: rollup.currency,
-      invoiceId: invoice.id,
-      invoiceNumber: invoice.invoiceNumber,
-      status: 'invoiced',
+      ...base,
+      synced: result.synced,
+      updated: result.updated ?? 0,
+      totalRemote: result.totalRemote,
+      status: 'synced',
+      reason: result.linkedContact ? 'auto-linked Xero contact by name' : undefined,
     };
   } catch (err) {
-    const reason = err instanceof Error ? err.message : 'invoice creation failed';
-    logger.error({ err, clientId: rollup.clientId }, 'Auto-invoice client failed');
-    return {
-      clientId: rollup.clientId,
-      clientName: rollup.clientName,
-      leads: rollup.validLeadCount,
-      amount: amount.toFixed(2),
-      currency: rollup.currency,
-      status: 'failed',
-      reason,
-    };
+    const reason = err instanceof Error ? err.message : 'Xero invoice sync failed';
+    logger.error({ err, clientId: rollup.clientId }, 'Auto-invoice Xero sync failed for client');
+    return { ...base, status: 'failed', reason };
   }
 }
 
@@ -304,18 +244,18 @@ export async function runAutoInvoiceForBusiness(
   try {
     const rollups = await loadDeliveriesByClient(ctx);
     const details: AutoInvoiceClientDetail[] = [];
-    let billed = 0;
-    let skipped = 0;
+    let reconciled = 0;       // clients with ≥1 Xero invoice reconciled
+    let skipped = 0;          // no Xero invoice (or no deliveries) — nothing to reconcile
     let failed = 0;
-    let total = 0;
+    let invoicesSynced = 0;   // new Xero invoices imported across all clients
     let currency = 'GBP';
 
     for (const r of rollups) {
       const detail = await buildClientDetail(ctx, r, systemAuth);
       details.push(detail);
-      if (detail.status === 'invoiced') {
-        billed += 1;
-        total += parseFloat(detail.amount);
+      if (detail.status === 'synced') {
+        reconciled += 1;
+        invoicesSynced += detail.synced ?? 0;
         currency = detail.currency;
       } else if (detail.status === 'failed') failed += 1;
       else skipped += 1;
@@ -324,28 +264,34 @@ export async function runAutoInvoiceForBusiness(
     await db
       .update(autoInvoiceRuns)
       .set({
-        status: failed > 0 && billed === 0 ? 'failed' : 'completed',
-        clientsBilled: billed,
+        status: failed > 0 && reconciled === 0 ? 'failed' : 'completed',
+        // `clientsBilled` now means "clients reconciled against Xero";
+        // `invoicesCreated` now means "new Xero invoices imported". Amounts
+        // are sourced per-invoice from Xero, so the run roll-up stays at 0.
+        clientsBilled: reconciled,
         clientsSkipped: skipped,
         clientsFailed: failed,
-        invoicesCreated: billed,
-        totalAmount: total.toFixed(2),
+        invoicesCreated: invoicesSynced,
+        totalAmount: '0',
         currency,
         details,
         finishedAt: new Date(),
       })
       .where(eq(autoInvoiceRuns.id, runRow.id));
 
-    logger.info({ runId: runRow.id, billed, skipped, failed, total }, 'Auto-invoice run complete');
+    logger.info(
+      { runId: runRow.id, reconciled, skipped, failed, invoicesSynced },
+      'Auto-invoice (Xero reconciliation) run complete',
+    );
     return {
       runId: runRow.id,
-      status: failed > 0 && billed === 0 ? 'failed' : 'completed',
+      status: failed > 0 && reconciled === 0 ? 'failed' : 'completed',
       periodFrom: ctx.periodFrom,
       periodTo: ctx.periodTo,
-      clientsBilled: billed,
+      clientsBilled: reconciled,
       clientsSkipped: skipped,
       clientsFailed: failed,
-      totalAmount: total.toFixed(2),
+      totalAmount: '0',
       details,
     };
   } catch (err) {
@@ -398,7 +344,7 @@ export async function runAutoInvoiceAllBusinesses(): Promise<{
           periodTo: week.toDate,
           triggeredBy: 'scheduled',
         },
-        // System auth — invoice creation needs a businessId-aware requester.
+        // System auth — the per-client Xero sync needs a businessId-aware requester.
         { userId: 'system', role: 'owner', email: 'system@stato.local', businessId: b.id },
       );
       runs.push(result);

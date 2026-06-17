@@ -126,11 +126,15 @@ new Worker('invoice', async (job) => {
       // errors are caught + logged in auto_invoice_runs without aborting the
       // whole sweep.
       //
-      // T4 (Sam, 2026-05-20): admin can pause this automation via the
-      // workflows row whose handler_key = 'auto-invoice'. The BullMQ
-      // cron still fires on schedule but the handler short-circuits.
-      // This is the path that was creating £17,880 + £21,465 draft
-      // invoices Sam couldn't easily stop.
+      // 2026-06-16 (Sam): this no longer fabricates invoices from lead values
+      // — it PULLS each client's real invoices from Xero (the billing source
+      // of truth). The week's deliveries only decide which clients to
+      // reconcile. This removes the £17,880 + £21,465 fabricated-draft class
+      // of bug at the root.
+      //
+      // T4 (Sam, 2026-05-20): admin can still pause this automation via the
+      // workflows row whose handler_key = 'auto-invoice'. The BullMQ cron
+      // still fires on schedule but the handler short-circuits.
       if (await isAutomationPaused('auto-invoice')) {
         logger.info('auto-invoice-weekly: workflow paused, skipping');
         return { skipped: 'paused' };
