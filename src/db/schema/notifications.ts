@@ -3,7 +3,10 @@ import { users } from './users.js';
 
 export const notifications = pgTable('notifications', {
   id: uuid('id').primaryKey().defaultRandom(),
-  userId: uuid('user_id').references(() => users.id),
+  // Cascade-delete: a notification is personal to its user, so removing the
+  // user removes their notifications (also lets a user be hard-deleted without
+  // an FK RESTRICT). See migration 0038.
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
   type: varchar('type', { length: 100 }).notNull(),
   title: varchar('title', { length: 255 }).notNull(),
   message: text('message'),
