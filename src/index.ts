@@ -10,6 +10,7 @@ import { seedDefaultUsers } from './data/users.js';
 import { registerSchedules } from './jobs/schedules.js';
 import { startWorkers } from './jobs/worker-entry.js';
 import { redis } from './config/redis.js';
+import { isOriginAllowed } from './utils/cors-origins.js';
 
 const app: Express = express();
 
@@ -22,7 +23,9 @@ app.set('trust proxy', 1);
 // Dev: a fixed localhost allow-list (no `origin: true` — even in dev we don't
 // want every site reading the API). Prod: explicit CORS_ORIGINS env var
 // (falls back to FRONTEND_URL for back-compat) — fail at startup if neither
-// is set.
+// is set. On top of either, first-party `*.stato.tech` portal domains are
+// always allowed (see isOriginAllowed) so each per-business portal subdomain
+// works without a CORS_ORIGINS edit.
 const DEV_ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:5174',
@@ -48,8 +51,9 @@ logger.info({ allowedOrigins: ALLOWED_ORIGINS }, 'CORS allow-list configured');
 app.use(
   cors({
     origin: (origin, cb) => {
-      // Server-to-server / curl / health checks have no Origin header — allow.
-      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      // Allows: no-Origin (server-to-server / curl / health), the configured
+      // allow-list, and first-party *.stato.tech portal domains.
+      if (isOriginAllowed(origin, ALLOWED_ORIGINS)) {
         cb(null, true);
       } else {
         cb(new Error(`CORS: origin not allowed: ${origin}`));
