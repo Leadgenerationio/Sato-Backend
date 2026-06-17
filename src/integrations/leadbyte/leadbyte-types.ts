@@ -16,7 +16,10 @@ export type LeadBytePreset =
   | 'lastweek'
   | 'last_30d'
   | 'this_month'
-  | 'last_month';
+  | 'last_month'
+  // LeadByte's year-to-date preset (Jan 1 → today). Named `this_year`, matching
+  // the this_week / this_month naming — this is what our `ytd` window maps to.
+  | 'this_year';
 
 /** Basic campaign payload from `GET /campaigns`. */
 export interface LeadByteCampaignRaw {

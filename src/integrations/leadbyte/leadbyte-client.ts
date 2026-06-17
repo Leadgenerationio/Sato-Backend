@@ -211,8 +211,14 @@ function toIsoCurrency(s: string | undefined | null): string {
 
 /**
  * Map our DeliveryWindow (matches Sam's handover sheet) to LeadByte's `datePreset`.
- * LeadByte doesn't have a `ytd` preset — we return undefined and the caller falls
- * back to explicit `from`/`to` ISO timestamps.
+ *
+ * Our `ytd` window maps to LeadByte's `this_year` preset (Jan 1 → today). We
+ * used to return undefined here and fall back to an explicit from/to range,
+ * but that range query came back with spend and ZERO per-source leads, which
+ * forced the portal By-Source breakdown to derive leads locally (dropping
+ * unmapped campaigns) and made campaign YTD revenue fall back to a ~60-day
+ * approximation. Using the real `this_year` preset returns proper per-source
+ * data, the same as the other presets.
  */
 export function windowToPreset(win: DeliveryWindow): LeadBytePreset | undefined {
   switch (win) {
@@ -222,7 +228,7 @@ export function windowToPreset(win: DeliveryWindow): LeadBytePreset | undefined 
     case 'last_week': return 'lastweek'; // LeadByte uses one-word spelling
     case 'this_month': return 'this_month';
     case 'last_month': return 'last_month';
-    case 'ytd': return undefined;
+    case 'ytd': return 'this_year';
   }
 }
 
@@ -268,12 +274,11 @@ export function windowToRange(win: DeliveryWindow): { from: string; to: string }
  * Both as query params. Preset is preferred when supported; otherwise an
  * explicit date range.
  *
- * Fix (2026-06-15): LeadByte's REST API expects plain `YYYY-MM-DD` date-only
- * strings on `from`/`to`. The only window without a preset is `ytd`, which was
- * sending full ISO timestamps (`2026-01-01T00:00:00Z`) — LeadByte returned no
- * rows, so "Year to Date" spend showed £0. Slice off the time component on the
- * query path (matching report.service's `.split('T')[0]` convention). The YTD
- * boundary math in `windowToRange` (Jan 1 → now) is unchanged.
+ * Every DeliveryWindow now maps to a LeadByte preset (incl. `ytd` → `this_year`
+ * as of 2026-06-17), so the date-range branch is effectively a safety net for
+ * any future preset-less window. If it ever fires, LeadByte's REST API expects
+ * DATE-ONLY `YYYY-MM-DD` on from/to (full ISO timestamps returned zero rows),
+ * so we slice the time component off — matching report.service's convention.
  */
 export function windowToQuery(win: DeliveryWindow): Record<string, string> {
   const preset = windowToPreset(win);
