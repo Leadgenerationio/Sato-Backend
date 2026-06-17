@@ -82,6 +82,7 @@ export const WORKFLOW_HANDLERS: Record<string, () => Promise<HandlerResult>> = {
     let invoicesSynced = 0;
     let invoicesUpdated = 0;
     let skippedNoLeads = 0;
+    let skippedNoInvoice = 0;
     const errors: string[] = [];
 
     for (const client of eligible) {
@@ -104,8 +105,11 @@ export const WORKFLOW_HANDLERS: Record<string, () => Promise<HandlerResult>> = {
 
         const result = await invoiceService.syncInvoicesFromXero(client.id, requester);
         if (!result || result.totalRemote === 0) {
-          // Client got leads but Xero holds no invoice — flag, don't fabricate.
-          errors.push(`${client.companyName}: ${result?.message ?? 'no Xero invoice found'}`);
+          // Nothing to reconcile: Xero not configured, contact not linked, or
+          // no invoice raised for this client yet. All expected states — count
+          // them for visibility but do NOT treat as an error (which would flip
+          // the whole run to failed for any tenant that isn't on Xero).
+          skippedNoInvoice++;
           continue;
         }
         clientsReconciled++;
@@ -118,7 +122,9 @@ export const WORKFLOW_HANDLERS: Record<string, () => Promise<HandlerResult>> = {
       }
     }
 
-    const summary = `Auto-invoice (Xero sync): ${clientsReconciled} clients reconciled, ${invoicesSynced} imported, ${invoicesUpdated} updated, ${skippedNoLeads} skipped (no leads). ${errors.length} errors.`;
+    const summary = `Auto-invoice (Xero sync): ${clientsReconciled} reconciled, ${invoicesSynced} imported, ${invoicesUpdated} updated, ${skippedNoLeads} no-leads, ${skippedNoInvoice} no-invoice. ${errors.length} errors.`;
+    // Only genuine per-client exceptions (caught above) count as failure;
+    // not-configured / no-invoice are expected and don't fail the run.
     return { ok: errors.length === 0, summary };
   },
 

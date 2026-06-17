@@ -49,12 +49,19 @@ async function fetchAllCampaignReports(
   return result;
 }
 
-/** Current year-to-date range: Jan 1 of this year → today, as YYYY-MM-DD. */
+/**
+ * Current year-to-date range: Jan 1 of this year → today, as YYYY-MM-DD.
+ * Both bounds are formatted from the SAME local-time basis — mixing a
+ * local-year `from` with a UTC-date `to` (via toISOString) could put
+ * `from > to` in the first hours of Jan 1 in ahead-of-UTC timezones,
+ * silently zeroing the YTD sum. Matches portal.service/report.service.
+ */
 function ytdRange(): { from: string; to: string } {
   const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
   return {
     from: `${now.getFullYear()}-01-01`,
-    to: now.toISOString().slice(0, 10),
+    to: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
   };
 }
 
@@ -412,15 +419,23 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
   // just LeadByte's singular `clientName`. Keyed by LeadByte campaign id
   // because that's what the per-row map step has in hand. Sorted alpha
   // for stable rendering.
-  const buyerLinkRows = await db
-    .select({
-      leadbyteCampaignId: campaignsTable.leadbyteCampaignId,
-      buyerName: clients.companyName,
-    })
-    .from(campaignsTable)
-    .innerJoin(clientCampaigns, eq(clientCampaigns.campaignId, campaignsTable.id))
-    .innerJoin(clients, eq(clients.id, clientCampaigns.clientId))
-    .where(sql`${campaignsTable.leadbyteCampaignId} IS NOT NULL`);
+  // Buyer-name links and the true-YTD rollup are independent DB queries — run
+  // them in parallel rather than sequentially on the campaign-list hot path.
+  // (ytdByLbId = true Jan 1 → today totals per LeadByte campaign id, summed
+  // from local lead_deliveries; preferred over LeadByte's flaky `ytd` report
+  // and the window approximation — see resolveYtdTotals.)
+  const [buyerLinkRows, ytdByLbId] = await Promise.all([
+    db
+      .select({
+        leadbyteCampaignId: campaignsTable.leadbyteCampaignId,
+        buyerName: clients.companyName,
+      })
+      .from(campaignsTable)
+      .innerJoin(clientCampaigns, eq(clientCampaigns.campaignId, campaignsTable.id))
+      .innerJoin(clients, eq(clients.id, clientCampaigns.clientId))
+      .where(sql`${campaignsTable.leadbyteCampaignId} IS NOT NULL`),
+    ytdTotalsByLbId(),
+  ]);
   const buyerNamesByLbId = new Map<string, string[]>();
   for (const r of buyerLinkRows) {
     if (!r.leadbyteCampaignId) continue;
@@ -429,11 +444,6 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
     buyerNamesByLbId.set(r.leadbyteCampaignId, list);
   }
   for (const list of buyerNamesByLbId.values()) list.sort((a, b) => a.localeCompare(b));
-
-  // True YTD (Jan 1 → today) totals per LeadByte campaign id, summed from
-  // local lead_deliveries. Used in preference to LeadByte's flaky `ytd`
-  // report and the window approximation — see resolveYtdTotals.
-  const ytdByLbId = await ytdTotalsByLbId();
 
   const empty: Awaited<ReturnType<typeof leadbyte.getCampaignReport>> = [];
   const todayReport = reports.get('today') ?? empty;
