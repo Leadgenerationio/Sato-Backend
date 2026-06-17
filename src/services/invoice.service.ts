@@ -338,35 +338,47 @@ export async function getInvoice(id: string, requester: AuthPayload): Promise<In
   return invoiceToDetail(row, client);
 }
 
-// ─── Invoice PDF (download the real Xero-rendered document) ─────────────────
-//
-// The FE "Download PDF" actions previously printed locally-built HTML. We now
-// stream the branded PDF straight from Xero. Scoping mirrors getInvoice(): the
-// invoice's client must belong to the requester's business. An invoice that
-// hasn't been pushed to Xero yet (xero_invoice_id IS NULL) has no PDF — the
-// caller surfaces that as a 409 rather than hitting Xero.
-export type InvoicePdfResult =
-  | { ok: true; pdf: Buffer; filename: string }
-  | { ok: false; reason: 'not_found' | 'not_in_xero' };
+/**
+ * Thrown when a download is requested for an invoice that was never pushed to
+ * Xero (xero_invoice_id is null) — a local-only draft. There is no "original"
+ * document to hand back, so the controller turns this into a 409 with a
+ * human-readable reason rather than a misleading 404 or 502.
+ */
+export class InvoiceNotInXeroError extends Error {
+  constructor() {
+    super('This invoice has not been issued in Xero yet, so there is no original document to download. Push it to Xero first.');
+    this.name = 'InvoiceNotInXeroError';
+  }
+}
 
-export async function getInvoicePdf(id: string, requester: AuthPayload): Promise<InvoicePdfResult> {
-  const businessId = requester.businessId;
-  if (!businessId) return { ok: false, reason: 'not_found' };
+export interface InvoicePdfResult {
+  filename: string;
+  pdf: Buffer;
+}
 
-  const [row] = await db.select().from(invoices).where(eq(invoices.id, id));
-  if (!row) return { ok: false, reason: 'not_found' };
+/**
+ * Resolve the ORIGINAL Xero PDF for an invoice (Sam, 2026-06-17). Scoped to the
+ * requester's business via getInvoice(). Returns null when the invoice doesn't
+ * exist / belongs to another business; throws InvoiceNotInXeroError for a
+ * local-only draft that has no Xero document yet.
+ */
+export async function getInvoicePdf(id: string, requester: AuthPayload): Promise<InvoicePdfResult | null> {
+  const detail = await getInvoice(id, requester);
+  if (!detail) return null;
+  if (!detail.xeroInvoiceId) throw new InvoiceNotInXeroError();
+  const pdf = await fetchXeroInvoicePdf(detail.xeroInvoiceId);
+  return { filename: toPdfFilename(detail.invoiceNumber), pdf };
+}
 
-  const [client] = await db
-    .select()
-    .from(clients)
-    .where(and(eq(clients.id, row.clientId), eq(clients.businessId, businessId)));
-  if (!client) return { ok: false, reason: 'not_found' }; // belongs to another business — deny
-
-  if (!row.xeroInvoiceId) return { ok: false, reason: 'not_in_xero' };
-
-  const pdf = await fetchXeroInvoicePdf(row.xeroInvoiceId);
-  const safeNumber = (row.invoiceNumber ?? id).replace(/[^A-Za-z0-9._-]/g, '_');
-  return { ok: true, pdf, filename: `${safeNumber}.pdf` };
+/**
+ * Build a safe download filename from an invoice number. Falls back to
+ * "invoice" when the number is blank, and strips anything that isn't
+ * filename-safe so the Content-Disposition header can't be broken by a stray
+ * quote or slash in a Xero-assigned number.
+ */
+export function toPdfFilename(invoiceNumber: string | null | undefined): string {
+  const base = (invoiceNumber || 'invoice').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+  return `${base || 'invoice'}.pdf`;
 }
 
 export async function getOverdueInvoices(requester: AuthPayload): Promise<InvoiceSummary[]> {

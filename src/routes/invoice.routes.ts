@@ -25,7 +25,7 @@ invoiceRoutes.get('/', validate(listInvoicesQuerySchema), invoiceController.list
 invoiceRoutes.get('/overdue', invoiceController.getOverdue);
 invoiceRoutes.get('/outstanding', invoiceController.getOutstanding);
 invoiceRoutes.get('/clients', invoiceController.getClients);
-invoiceRoutes.get('/:id/pdf', invoiceController.getInvoicePdf);
+invoiceRoutes.get('/:id/pdf', invoiceController.downloadInvoicePdf);
 invoiceRoutes.get('/:id', invoiceController.getInvoice);
 invoiceRoutes.post('/', validate(invoiceController.createInvoiceSchema), invoiceController.createInvoice);
 invoiceRoutes.post('/:id/push-to-xero', invoiceController.pushToXero);

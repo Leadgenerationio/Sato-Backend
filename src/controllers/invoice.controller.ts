@@ -41,19 +41,17 @@ export async function getInvoice(req: Request, res: Response) {
   res.json({ status: 'success', data: { invoice } });
 }
 
-export async function getInvoicePdf(req: Request, res: Response) {
+/**
+ * Stream the ORIGINAL Xero invoice PDF (Sam, 2026-06-17). Not a Stato-rendered
+ * lookalike — the exact document Xero issued, fetched live from Xero. 404 when
+ * the invoice doesn't exist; 409 when it's a local draft never pushed to Xero;
+ * Xero/transport failures are classified the same way as push-to-Xero.
+ */
+export async function downloadInvoicePdf(req: Request, res: Response) {
   try {
     const result = await invoiceService.getInvoicePdf(req.params.id as string, req.user!);
-    if (!result.ok) {
-      if (result.reason === 'not_found') {
-        res.status(404).json({ status: 'error', code: 'not_found', message: 'Invoice not found' });
-        return;
-      }
-      res.status(409).json({
-        status: 'error',
-        code: 'not_in_xero',
-        message: 'This invoice has not been pushed to Xero yet, so no PDF is available.',
-      });
+    if (!result) {
+      res.status(404).json({ status: 'error', message: 'Invoice not found' });
       return;
     }
     res.setHeader('Content-Type', 'application/pdf');
@@ -61,6 +59,10 @@ export async function getInvoicePdf(req: Request, res: Response) {
     res.setHeader('Content-Length', String(result.pdf.length));
     res.send(result.pdf);
   } catch (err) {
+    if (err instanceof invoiceService.InvoiceNotInXeroError) {
+      res.status(409).json({ status: 'error', code: 'not_in_xero', message: err.message });
+      return;
+    }
     const classified = classifyXeroError(err);
     res.status(classified.httpStatus).json({
       status: 'error',

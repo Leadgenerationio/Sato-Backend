@@ -1,7 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import * as portalService from '../services/portal.service.js';
 import * as approvalService from '../services/creative-approval.service.js';
-import { classifyXeroError } from '../utils/xero-errors.js';
 
 function handlePortalError(err: unknown, res: Response, next: NextFunction) {
   if (err instanceof Error && err.name === 'PortalAccessError') {
@@ -75,19 +74,16 @@ export async function invoices(req: Request, res: Response, next: NextFunction) 
   }
 }
 
+/**
+ * Stream the buyer's ORIGINAL Xero invoice PDF (Sam, 2026-06-17). 404 covers
+ * not-found / not-yours / not-yet-issued so we never reveal another client's
+ * invoice IDs; Xero/transport failures bubble to the global error handler.
+ */
 export async function invoicePdf(req: Request, res: Response, next: NextFunction) {
   try {
-    const result = await portalService.getInvoicePdf(req.user!, req.params.id as string);
-    if (!result.ok) {
-      if (result.reason === 'not_found') {
-        res.status(404).json({ status: 'error', code: 'not_found', message: 'Invoice not found' });
-        return;
-      }
-      res.status(409).json({
-        status: 'error',
-        code: 'not_in_xero',
-        message: 'This invoice is not available to download yet.',
-      });
+    const result = await portalService.getInvoicePdf(req.params.id as string, req.user!);
+    if (!result) {
+      res.status(404).json({ status: 'error', message: 'Invoice not found' });
       return;
     }
     res.setHeader('Content-Type', 'application/pdf');
@@ -95,15 +91,7 @@ export async function invoicePdf(req: Request, res: Response, next: NextFunction
     res.setHeader('Content-Length', String(result.pdf.length));
     res.send(result.pdf);
   } catch (err) {
-    // requireClientId access errors stay portal-style; the PDF is fetched live
-    // from Xero, so classify upstream Xero failures (401/429/timeout/5xx) into a
-    // structured code instead of letting them fall through to an opaque 500.
-    if (err instanceof Error && err.name === 'PortalAccessError') {
-      handlePortalError(err, res, next);
-      return;
-    }
-    const classified = classifyXeroError(err);
-    res.status(classified.httpStatus).json({ status: 'error', code: classified.code, message: classified.message });
+    handlePortalError(err, res, next);
   }
 }
 
