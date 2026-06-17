@@ -1,6 +1,7 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, gte, lte, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
+import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { clients } from '../db/schema/clients.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
@@ -13,7 +14,7 @@ import {
   aggregateCatchrSpendByLbId,
 } from './traffic-source-aggregation.service.js';
 import type { AuthPayload } from '../types/index.js';
-import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
+import type { DeliveryWindow, LeadByteCampaignReportRow } from '../integrations/leadbyte/leadbyte-types.js';
 
 /**
  * Sequentially fetch /reports/campaign for every window the dashboard +
@@ -46,6 +47,99 @@ async function fetchAllCampaignReports(
     }
   }
   return result;
+}
+
+/** Current year-to-date range: Jan 1 of this year → today, as YYYY-MM-DD. */
+function ytdRange(): { from: string; to: string } {
+  const now = new Date();
+  return {
+    from: `${now.getFullYear()}-01-01`,
+    to: now.toISOString().slice(0, 10),
+  };
+}
+
+interface YtdLocalTotals {
+  leads: number;
+  revenue: number;
+  cost: number;
+}
+
+/**
+ * True year-to-date (Jan 1 → today) totals per LeadByte campaign id, summed
+ * straight from the local `lead_deliveries` rows. Those daily rows carry the
+ * money pro-rated from LeadByte's per-window /reports/campaign (revenue +
+ * cost), so summing every day from Jan 1 gives a genuine YTD figure rather
+ * than the this_month + last_month approximation we fall back to otherwise.
+ *
+ * Keyed by `campaigns.leadbyte_campaign_id` so it lines up with the LeadByte
+ * campaign id the list/detail views key on. Pass `onlyLbId` to scope the scan
+ * to a single campaign (detail page) instead of every campaign (list view).
+ */
+async function ytdTotalsByLbId(onlyLbId?: string): Promise<Map<string, YtdLocalTotals>> {
+  const { from, to } = ytdRange();
+  const filters = [
+    sql`${campaignsTable.leadbyteCampaignId} IS NOT NULL`,
+    gte(leadDeliveries.deliveryDate, from),
+    lte(leadDeliveries.deliveryDate, to),
+  ];
+  if (onlyLbId) filters.push(eq(campaignsTable.leadbyteCampaignId, onlyLbId));
+
+  const rows = await db
+    .select({
+      lbId: campaignsTable.leadbyteCampaignId,
+      // Match the rest of the codebase: valid leads = validLeadCount ?? leadCount.
+      leads: sql<number>`coalesce(sum(coalesce(${leadDeliveries.validLeadCount}, ${leadDeliveries.leadCount}, 0)), 0)::int`,
+      revenue: sql<string>`coalesce(sum(${leadDeliveries.revenue}), 0)::text`,
+      cost: sql<string>`coalesce(sum(${leadDeliveries.cost}), 0)::text`,
+    })
+    .from(leadDeliveries)
+    .innerJoin(campaignsTable, eq(campaignsTable.id, leadDeliveries.campaignId))
+    .where(and(...filters))
+    .groupBy(campaignsTable.leadbyteCampaignId);
+
+  const map = new Map<string, YtdLocalTotals>();
+  for (const r of rows) {
+    if (!r.lbId) continue;
+    map.set(r.lbId, {
+      leads: r.leads,
+      revenue: Math.round((parseFloat(r.revenue) || 0) * 100) / 100,
+      cost: Math.round((parseFloat(r.cost) || 0) * 100) / 100,
+    });
+  }
+  return map;
+}
+
+const leadbyteRowCost = (r?: Pick<LeadByteCampaignReportRow, 'payout' | 'emailCost' | 'smsCost' | 'validationCost'>) =>
+  (r?.payout ?? 0) + (r?.emailCost ?? 0) + (r?.smsCost ?? 0) + (r?.validationCost ?? 0);
+
+/**
+ * Resolve a campaign's YTD leads / revenue / LeadByte-cost, preferring the
+ * truest source available:
+ *   1. local lead_deliveries Jan 1 → today (a genuine YTD sum) when present;
+ *   2. else LeadByte's own `ytd` report row when it carries data;
+ *   3. else the this_month + last_month window approximation (last resort —
+ *      ~60 non-overlapping days so today's leads aren't triple-counted).
+ * One source is chosen per campaign so its figures stay internally consistent.
+ */
+export function resolveYtdTotals(
+  ytdRow: LeadByteCampaignReportRow | undefined,
+  localYtd: YtdLocalTotals | undefined,
+  fallbackRows: Array<LeadByteCampaignReportRow | undefined>,
+): { leads: number; revenue: number; leadbyteCost: number; source: 'local' | 'leadbyte-ytd' | 'window-sum' } {
+  if (localYtd && (localYtd.leads > 0 || localYtd.revenue > 0)) {
+    return { leads: localYtd.leads, revenue: localYtd.revenue, leadbyteCost: localYtd.cost, source: 'local' };
+  }
+  if ((ytdRow?.leads ?? 0) > 0 || (ytdRow?.revenue ?? 0) > 0) {
+    return { leads: ytdRow?.leads ?? 0, revenue: ytdRow?.revenue ?? 0, leadbyteCost: leadbyteRowCost(ytdRow), source: 'leadbyte-ytd' };
+  }
+  const sum = (key: 'leads' | 'revenue' | 'payout' | 'emailCost' | 'smsCost' | 'validationCost') =>
+    fallbackRows.reduce((acc, r) => acc + ((r?.[key] as number | undefined) ?? 0), 0);
+  return {
+    leads: sum('leads'),
+    revenue: sum('revenue'),
+    leadbyteCost: sum('payout') + sum('emailCost') + sum('smsCost') + sum('validationCost'),
+    source: 'window-sum',
+  };
 }
 
 // LeadByte campaign aggregates change slowly relative to dashboard load
@@ -335,6 +429,12 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
     buyerNamesByLbId.set(r.leadbyteCampaignId, list);
   }
   for (const list of buyerNamesByLbId.values()) list.sort((a, b) => a.localeCompare(b));
+
+  // True YTD (Jan 1 → today) totals per LeadByte campaign id, summed from
+  // local lead_deliveries. Used in preference to LeadByte's flaky `ytd`
+  // report and the window approximation — see resolveYtdTotals.
+  const ytdByLbId = await ytdTotalsByLbId();
+
   const empty: Awaited<ReturnType<typeof leadbyte.getCampaignReport>> = [];
   const todayReport = reports.get('today') ?? empty;
   const weekReport = reports.get('this_week') ?? empty;
@@ -359,35 +459,18 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
     const lastMonth = lastMonthByName.get(c.name);
     const ytd = ytdByName.get(c.name);
 
-    // Revenue/cost/margin use the YTD figures when LeadByte returns them,
-    // otherwise we synthesise lifetime totals from the windows we have so the
-    // table never silently shows £0.
+    // Revenue/leads/cost for the lifetime ("YTD") column. A true Jan 1 → today
+    // sum from local lead_deliveries when present; else LeadByte's own ytd row;
+    // else the this_month + last_month approximation (last resort).
     //
-    // 2026-05-05: Sam reported every campaign showing rev=£0 in the demo —
-    // root cause: LeadByte's `ytd` window returns all zeros (campaigns:0,
-    // leads:0, revenue:0) even though `last_month` reports £308k revenue and
-    // `this_month` reports £30k. So when ytd has no row for the campaign,
-    // fall back to summing the windows we DO have. This is approximate
-    // (today + this_week + this_month + last_month) but always > 0 when
-    // there's real activity, instead of silently zeroing the table.
-    const sumWindows = (rows: Array<typeof today | undefined>, key: 'leads' | 'revenue' | 'payout' | 'emailCost' | 'smsCost' | 'validationCost') =>
-      rows.reduce((sum, r) => sum + ((r?.[key] as number | undefined) ?? 0), 0);
-
-    const ytdHasData = (ytd?.leads ?? 0) > 0 || (ytd?.revenue ?? 0) > 0;
-    // last_month + this_month covers ~60 days with zero overlap. Was
-    // [today, week, month] which double-counted today's leads (today ⊆
-    // this_week ⊆ this_month).
-    const fallbackRows = [month, lastMonth];
-    const totalLeads = ytdHasData ? (ytd?.leads ?? 0) : sumWindows(fallbackRows, 'leads');
-    const totalRevenue = ytdHasData ? (ytd?.revenue ?? 0) : sumWindows(fallbackRows, 'revenue');
-    const fallbackCost =
-      sumWindows(fallbackRows, 'payout') +
-      sumWindows(fallbackRows, 'emailCost') +
-      sumWindows(fallbackRows, 'smsCost') +
-      sumWindows(fallbackRows, 'validationCost');
-    const leadbyteCost = ytdHasData
-      ? (ytd?.payout ?? 0) + (ytd?.emailCost ?? 0) + (ytd?.smsCost ?? 0) + (ytd?.validationCost ?? 0)
-      : fallbackCost;
+    // 2026-05-05 context: LeadByte's `ytd` window often returns all zeros even
+    // when last_month/this_month report real revenue, which used to silently
+    // zero the table. Summing the local daily rows from Jan 1 fixes that with a
+    // genuine YTD figure rather than the ~60-day window approximation.
+    const ytdTotals = resolveYtdTotals(ytd, ytdByLbId.get(c.id), [month, lastMonth]);
+    const totalLeads = ytdTotals.leads;
+    const totalRevenue = ytdTotals.revenue;
+    const leadbyteCost = ytdTotals.leadbyteCost;
     // Fold the campaign's last-30d Catchr ad-spend into the displayed cost
     // (matches what getCampaign does on the detail page). Without this the
     // table reads £0 cost / "100% margin" for direct-traffic campaigns even
@@ -554,7 +637,7 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
   //      limiting LeadByte and silently dropping windows to empty
   //      (this_week was the canary). cached() keeps warm hits <5ms each
   //      so sequential only matters on cold cache.
-  const [deliveries, suppliers, satoMeta, reports] = await Promise.all([
+  const [deliveries, suppliers, satoMeta, reports, ytdByLbId] = await Promise.all([
     // LeadByte's /reports/leadactivity silently returns 0 rows for the
     // arbitrary-days-range overload (verified 2026-05-17). Pull last_month
     // + this_month named windows and merge — same ~30 days of coverage
@@ -575,6 +658,8 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
       'today', 'yesterday', 'this_week', 'last_week',
       'this_month', 'last_month', 'ytd',
     ]),
+    // True Jan 1 → today totals for this campaign from local lead_deliveries.
+    ytdTotalsByLbId(id),
   ]);
   const empty2: Awaited<ReturnType<typeof leadbyte.getCampaignReport>> = [];
   const todayReport = reports.get('today') ?? empty2;
@@ -603,6 +688,11 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
     ) / 100,
   });
 
+  // YTD totals — a true Jan 1 → today sum from local lead_deliveries when
+  // present, else LeadByte's ytd row, else the this_month + last_month
+  // approximation. Same source selection as listCampaigns (resolveYtdTotals).
+  const ytdTotals = resolveYtdTotals(ytdRow, ytdByLbId.get(id), [monthRow, lastMonthRow]);
+
   const windowReports = {
     today: rowToWindow(todayRow),
     yesterday: rowToWindow(yesterdayRow),
@@ -610,35 +700,23 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
     last_week: rowToWindow(lastWeekRow),
     this_month: rowToWindow(monthRow),
     last_month: rowToWindow(lastMonthRow),
-    ytd: rowToWindow(ytdRow),
+    // The YTD tab mirrors the resolved headline (true Jan 1 → today), not the
+    // raw LeadByte ytd row which is often zero. Cost here is LeadByte-only to
+    // match the other windows (Catchr ad-spend is folded into the headline
+    // totalCost below, not per-window).
+    ytd: {
+      leads: ytdTotals.leads,
+      revenue: Math.round(ytdTotals.revenue * 100) / 100,
+      cost: Math.round(ytdTotals.leadbyteCost * 100) / 100,
+    },
   };
 
-  // Same ytd-is-empty fallback used in listCampaigns: LeadByte's ytd window
-  // returns zeros for some campaigns even when last_month + this_month
-  // report real activity. Sum only the non-overlapping windows so we don't
-  // triple-count today's leads (today ⊆ this_week ⊆ this_month).
-  const sumWindows = (
-    rows: Array<typeof todayRow | undefined>,
-    key: 'leads' | 'revenue' | 'payout' | 'emailCost' | 'smsCost' | 'validationCost',
-  ) => rows.reduce((sum, r) => sum + ((r?.[key] as number | undefined) ?? 0), 0);
-  const ytdHasData = (ytdRow?.leads ?? 0) > 0 || (ytdRow?.revenue ?? 0) > 0;
-  // last_month + this_month covers ~60 days with zero overlap. Was
-  // [today, week, month, last_month] which triple-counted today's leads.
-  const fallbackRows = [monthRow, lastMonthRow];
-
-  const totalLeads = ytdHasData ? (ytdRow?.leads ?? 0) : sumWindows(fallbackRows, 'leads');
+  const totalLeads = ytdTotals.leads;
   const leadsToday = todayRow?.leads ?? 0;
   const leadsThisWeek = weekRow?.leads ?? 0;
   const leadsThisMonth = monthRow?.leads ?? 0;
-  const totalRevenue = ytdHasData ? (ytdRow?.revenue ?? 0) : sumWindows(fallbackRows, 'revenue');
-  const fallbackCost =
-    sumWindows(fallbackRows, 'payout') +
-    sumWindows(fallbackRows, 'emailCost') +
-    sumWindows(fallbackRows, 'smsCost') +
-    sumWindows(fallbackRows, 'validationCost');
-  const leadbyteCost = ytdHasData
-    ? (ytdRow?.payout ?? 0) + (ytdRow?.emailCost ?? 0) + (ytdRow?.smsCost ?? 0) + (ytdRow?.validationCost ?? 0)
-    : fallbackCost;
+  const totalRevenue = ytdTotals.revenue;
+  const leadbyteCost = ytdTotals.leadbyteCost;
 
   // Add the real Catchr ad-spend attributed to this campaign via active
   // traffic_sources mappings. LeadByte's `payout` field is zero for
