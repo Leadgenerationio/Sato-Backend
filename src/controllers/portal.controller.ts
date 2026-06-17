@@ -74,6 +74,30 @@ export async function invoices(req: Request, res: Response, next: NextFunction) 
   }
 }
 
+export async function invoicePdf(req: Request, res: Response, next: NextFunction) {
+  try {
+    const result = await portalService.getInvoicePdf(req.user!, req.params.id as string);
+    if (!result.ok) {
+      if (result.reason === 'not_found') {
+        res.status(404).json({ status: 'error', code: 'not_found', message: 'Invoice not found' });
+        return;
+      }
+      res.status(409).json({
+        status: 'error',
+        code: 'not_in_xero',
+        message: 'This invoice is not available to download yet.',
+      });
+      return;
+    }
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    res.setHeader('Content-Length', String(result.pdf.length));
+    res.send(result.pdf);
+  } catch (err) {
+    handlePortalError(err, res, next);
+  }
+}
+
 export async function compliance(req: Request, res: Response, next: NextFunction) {
   try {
     const compliance = await portalService.getCompliance(req.user!);

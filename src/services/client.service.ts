@@ -7,6 +7,12 @@ import { campaigns } from '../db/schema/campaigns.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { creditChecks } from '../db/schema/credit-checks.js';
 import { invoices } from '../db/schema/invoices.js';
+import { chaseHistory } from '../db/schema/chase-history.js';
+import { agreements } from '../db/schema/agreements.js';
+import { leadDeliveries } from '../db/schema/lead-deliveries.js';
+import { adSpend } from '../db/schema/ad-spend.js';
+import { workflows } from '../db/schema/workflows.js';
+import { users } from '../db/schema/users.js';
 import * as creditCheck from '../integrations/credit-check/index.js';
 import { scoreToRiskRating } from '../integrations/credit-check/types.js';
 import * as xero from '../integrations/xero/xero-client.js';
@@ -643,6 +649,64 @@ export async function updateClient(id: string, data: UpdateClientInput, requeste
     });
   }
   return toDetail(row, count ?? 0, revenue, contacts);
+}
+
+/**
+ * Hard-delete a client and everything tied to it. Owner-only at the route
+ * layer.
+ *
+ * Several child tables FK clients.id WITHOUT an `onDelete: cascade`
+ * (invoices, credit_checks, agreements, lead_deliveries, ad_spend, and
+ * portal users), so a bare `DELETE FROM clients` would trip a foreign-key
+ * violation. We clear those by hand in FK-dependency order inside one
+ * transaction; the cascade-backed tables (client_contacts, client_documents,
+ * client_campaigns, client_activity_log, client_emails) are removed
+ * automatically when the client row goes.
+ *
+ * Campaigns and workflows are *unlinked* (clientId → null) rather than
+ * destroyed — they carry performance/automation data that outlives the
+ * client relationship, and both columns are nullable.
+ *
+ * Returns false when the client doesn't exist in the caller's business
+ * (the controller maps that to a 404); true once the row is gone.
+ */
+export async function deleteClient(id: string, requester: AuthPayload): Promise<boolean> {
+  const businessId = requester.businessId;
+  if (!businessId) return false;
+
+  // Tenant guard: confirm the client is in the caller's business before we
+  // start tearing down related rows.
+  const [existing] = await db
+    .select({ id: clients.id })
+    .from(clients)
+    .where(and(eq(clients.id, id), eq(clients.businessId, businessId)))
+    .limit(1);
+  if (!existing) return false;
+
+  await db.transaction(async (tx) => {
+    // chase_history → invoices: must precede the invoice delete.
+    await tx.delete(chaseHistory).where(
+      inArray(
+        chaseHistory.invoiceId,
+        tx.select({ id: invoices.id }).from(invoices).where(eq(invoices.clientId, id)),
+      ),
+    );
+    await tx.delete(invoices).where(eq(invoices.clientId, id));
+    await tx.delete(creditChecks).where(eq(creditChecks.clientId, id));
+    await tx.delete(agreements).where(eq(agreements.clientId, id));
+    await tx.delete(leadDeliveries).where(eq(leadDeliveries.clientId, id));
+    await tx.delete(adSpend).where(eq(adSpend.clientId, id));
+    // Portal logins for this client — they have nowhere to sign in once the
+    // client is gone.
+    await tx.delete(users).where(eq(users.clientId, id));
+    // Preserve campaign + workflow data; just drop the dangling reference.
+    await tx.update(campaigns).set({ clientId: null }).where(eq(campaigns.clientId, id));
+    await tx.update(workflows).set({ clientId: null }).where(eq(workflows.clientId, id));
+    await tx.delete(clients).where(and(eq(clients.id, id), eq(clients.businessId, businessId)));
+  });
+
+  logger.info({ clientId: id, businessId, by: requester.userId }, 'client deleted');
+  return true;
 }
 
 export async function getCreditHistory(clientId: string, _requester: AuthPayload): Promise<CreditCheckEntry[]> {

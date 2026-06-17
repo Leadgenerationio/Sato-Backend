@@ -41,6 +41,35 @@ export async function getInvoice(req: Request, res: Response) {
   res.json({ status: 'success', data: { invoice } });
 }
 
+export async function getInvoicePdf(req: Request, res: Response) {
+  try {
+    const result = await invoiceService.getInvoicePdf(req.params.id as string, req.user!);
+    if (!result.ok) {
+      if (result.reason === 'not_found') {
+        res.status(404).json({ status: 'error', code: 'not_found', message: 'Invoice not found' });
+        return;
+      }
+      res.status(409).json({
+        status: 'error',
+        code: 'not_in_xero',
+        message: 'This invoice has not been pushed to Xero yet, so no PDF is available.',
+      });
+      return;
+    }
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    res.setHeader('Content-Length', String(result.pdf.length));
+    res.send(result.pdf);
+  } catch (err) {
+    const classified = classifyXeroError(err);
+    res.status(classified.httpStatus).json({
+      status: 'error',
+      code: classified.code,
+      message: classified.message,
+    });
+  }
+}
+
 export async function getOverdue(req: Request, res: Response) {
   const invoices = await invoiceService.getOverdueInvoices(req.user!);
   res.json({ status: 'success', data: { invoices } });

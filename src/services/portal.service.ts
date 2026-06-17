@@ -16,6 +16,7 @@ import { getApprovalStatesForCreatives } from './creative-approval.service.js';
 import { computeDaysOverdue, deriveDisplayStatus } from './invoice.service.js';
 import { resolveR2Location } from './creative.service.js';
 import { getSignedDownloadUrl } from '../integrations/r2/r2-client.js';
+import { getInvoicePdf as fetchXeroInvoicePdf } from '../integrations/xero/xero-client.js';
 import { supplierNameToCatchrPlatform } from './report.service.js';
 import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js';
@@ -1179,6 +1180,30 @@ export async function getInvoices(requester: AuthPayload): Promise<PortalInvoice
         daysOverdue,
       };
     });
+}
+
+// Stream the Xero-rendered PDF for one of the portal client's own invoices.
+// Scoped to requireClientId so a buyer can only ever download an invoice that
+// belongs to their own client. Same visibility gates as getInvoices apply: a
+// hidden-status row, or one not yet pushed to Xero (xero_invoice_id IS NULL),
+// is treated as "no PDF" rather than reaching Xero.
+export type PortalInvoicePdfResult =
+  | { ok: true; pdf: Buffer; filename: string }
+  | { ok: false; reason: 'not_found' | 'not_in_xero' };
+
+export async function getInvoicePdf(requester: AuthPayload, invoiceId: string): Promise<PortalInvoicePdfResult> {
+  const clientId = requireClientId(requester);
+
+  const [row] = await db.select().from(invoices).where(eq(invoices.id, invoiceId));
+  if (!row || row.clientId !== clientId) return { ok: false, reason: 'not_found' };
+  if (PORTAL_INVOICE_HIDDEN_STATUSES.has((row.status ?? 'draft').toLowerCase())) {
+    return { ok: false, reason: 'not_found' };
+  }
+  if (!row.xeroInvoiceId) return { ok: false, reason: 'not_in_xero' };
+
+  const pdf = await fetchXeroInvoicePdf(row.xeroInvoiceId);
+  const safeNumber = (row.invoiceNumber ?? invoiceId).replace(/[^A-Za-z0-9._-]/g, '_');
+  return { ok: true, pdf, filename: `${safeNumber}.pdf` };
 }
 
 export async function getCompliance(requester: AuthPayload): Promise<PortalCompliance[]> {

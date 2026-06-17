@@ -18,6 +18,7 @@ portalRoutes.get('/dashboard', portalController.dashboard);
 portalRoutes.get('/campaigns', portalController.campaigns);
 portalRoutes.get('/leads', portalController.leads);
 portalRoutes.get('/invoices', portalController.invoices);
+portalRoutes.get('/invoices/:id/pdf', portalController.invoicePdf);
 portalRoutes.get('/compliance', portalController.compliance);
 portalRoutes.get('/agreement', portalController.agreement);
 

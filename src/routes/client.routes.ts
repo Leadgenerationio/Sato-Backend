@@ -118,6 +118,10 @@ clientRoutes.post('/import/attio', validate(importAttioSchema), clientImportCont
 clientRoutes.get('/:id', clientController.getClient);
 clientRoutes.post('/', validate(createClientSchema), clientController.createClient);
 clientRoutes.put('/:id', validate(updateClientSchema), clientController.updateClient);
+// Hard delete is owner-only — narrower than the router-wide guard above
+// (owner / finance_admin / ops_manager). Cascades through every related
+// table; see clientService.deleteClient.
+clientRoutes.delete('/:id', requireRole('owner'), clientController.deleteClient);
 clientRoutes.get('/:id/credit-history', clientController.getCreditHistory);
 clientRoutes.post('/:id/credit-check', clientController.runCreditCheck);
 

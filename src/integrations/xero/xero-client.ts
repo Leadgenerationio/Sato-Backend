@@ -884,6 +884,35 @@ export async function getInvoicesForContact(contactId: string): Promise<XeroInvo
   return out;
 }
 
+/**
+ * Fetch the rendered PDF for a single Xero invoice.
+ *
+ * Xero returns the branded invoice PDF from the standard
+ * `GET /Invoices/{InvoiceID}` endpoint when the request `Accept`s
+ * `application/pdf` (rather than JSON). The body is the raw PDF bytes.
+ *
+ * Required scope: accounting.transactions (already in SCOPES) — same as the
+ * JSON invoice read.
+ */
+export async function getInvoicePdf(xeroInvoiceId: string): Promise<Buffer> {
+  const { accessToken, tenantId } = await getValidToken();
+  const url = `${API_HOST}/api.xro/2.0/Invoices/${encodeURIComponent(xeroInvoiceId)}`;
+  const res = await xeroFetchWithBackoff(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'xero-tenant-id': tenantId,
+      Accept: 'application/pdf',
+    },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    logger.error({ status: res.status, body, xeroInvoiceId }, 'Xero invoice PDF fetch failed');
+    throw new Error(`Xero invoice PDF failed: ${res.status}`);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  return buf;
+}
+
 export interface XeroContactDetail {
   contactId: string;
   name: string;

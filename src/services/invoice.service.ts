@@ -5,6 +5,7 @@ import { clients } from '../db/schema/clients.js';
 import {
   getValidToken,
   getInvoicesForContact,
+  getInvoicePdf as fetchXeroInvoicePdf,
   findContactByName,
   isXeroConfigured,
   type XeroInvoice,
@@ -335,6 +336,37 @@ export async function getInvoice(id: string, requester: AuthPayload): Promise<In
   if (!client) return null; // client belongs to another business — deny
 
   return invoiceToDetail(row, client);
+}
+
+// ─── Invoice PDF (download the real Xero-rendered document) ─────────────────
+//
+// The FE "Download PDF" actions previously printed locally-built HTML. We now
+// stream the branded PDF straight from Xero. Scoping mirrors getInvoice(): the
+// invoice's client must belong to the requester's business. An invoice that
+// hasn't been pushed to Xero yet (xero_invoice_id IS NULL) has no PDF — the
+// caller surfaces that as a 409 rather than hitting Xero.
+export type InvoicePdfResult =
+  | { ok: true; pdf: Buffer; filename: string }
+  | { ok: false; reason: 'not_found' | 'not_in_xero' };
+
+export async function getInvoicePdf(id: string, requester: AuthPayload): Promise<InvoicePdfResult> {
+  const businessId = requester.businessId;
+  if (!businessId) return { ok: false, reason: 'not_found' };
+
+  const [row] = await db.select().from(invoices).where(eq(invoices.id, id));
+  if (!row) return { ok: false, reason: 'not_found' };
+
+  const [client] = await db
+    .select()
+    .from(clients)
+    .where(and(eq(clients.id, row.clientId), eq(clients.businessId, businessId)));
+  if (!client) return { ok: false, reason: 'not_found' }; // belongs to another business — deny
+
+  if (!row.xeroInvoiceId) return { ok: false, reason: 'not_in_xero' };
+
+  const pdf = await fetchXeroInvoicePdf(row.xeroInvoiceId);
+  const safeNumber = (row.invoiceNumber ?? id).replace(/[^A-Za-z0-9._-]/g, '_');
+  return { ok: true, pdf, filename: `${safeNumber}.pdf` };
 }
 
 export async function getOverdueInvoices(requester: AuthPayload): Promise<InvoiceSummary[]> {
