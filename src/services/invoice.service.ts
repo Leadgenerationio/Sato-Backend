@@ -5,6 +5,7 @@ import { clients } from '../db/schema/clients.js';
 import {
   getValidToken,
   getInvoicesForContact,
+  getInvoicePdf as fetchXeroInvoicePdf,
   findContactByName,
   isXeroConfigured,
   type XeroInvoice,
@@ -335,6 +336,49 @@ export async function getInvoice(id: string, requester: AuthPayload): Promise<In
   if (!client) return null; // client belongs to another business — deny
 
   return invoiceToDetail(row, client);
+}
+
+/**
+ * Thrown when a download is requested for an invoice that was never pushed to
+ * Xero (xero_invoice_id is null) — a local-only draft. There is no "original"
+ * document to hand back, so the controller turns this into a 409 with a
+ * human-readable reason rather than a misleading 404 or 502.
+ */
+export class InvoiceNotInXeroError extends Error {
+  constructor() {
+    super('This invoice has not been issued in Xero yet, so there is no original document to download. Push it to Xero first.');
+    this.name = 'InvoiceNotInXeroError';
+  }
+}
+
+export interface InvoicePdfResult {
+  filename: string;
+  pdf: Buffer;
+}
+
+/**
+ * Resolve the ORIGINAL Xero PDF for an invoice (Sam, 2026-06-17). Scoped to the
+ * requester's business via getInvoice(). Returns null when the invoice doesn't
+ * exist / belongs to another business; throws InvoiceNotInXeroError for a
+ * local-only draft that has no Xero document yet.
+ */
+export async function getInvoicePdf(id: string, requester: AuthPayload): Promise<InvoicePdfResult | null> {
+  const detail = await getInvoice(id, requester);
+  if (!detail) return null;
+  if (!detail.xeroInvoiceId) throw new InvoiceNotInXeroError();
+  const pdf = await fetchXeroInvoicePdf(detail.xeroInvoiceId);
+  return { filename: toPdfFilename(detail.invoiceNumber), pdf };
+}
+
+/**
+ * Build a safe download filename from an invoice number. Falls back to
+ * "invoice" when the number is blank, and strips anything that isn't
+ * filename-safe so the Content-Disposition header can't be broken by a stray
+ * quote or slash in a Xero-assigned number.
+ */
+export function toPdfFilename(invoiceNumber: string | null | undefined): string {
+  const base = (invoiceNumber || 'invoice').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+  return `${base || 'invoice'}.pdf`;
 }
 
 export async function getOverdueInvoices(requester: AuthPayload): Promise<InvoiceSummary[]> {

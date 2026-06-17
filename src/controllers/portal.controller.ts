@@ -74,6 +74,27 @@ export async function invoices(req: Request, res: Response, next: NextFunction) 
   }
 }
 
+/**
+ * Stream the buyer's ORIGINAL Xero invoice PDF (Sam, 2026-06-17). 404 covers
+ * not-found / not-yours / not-yet-issued so we never reveal another client's
+ * invoice IDs; Xero/transport failures bubble to the global error handler.
+ */
+export async function invoicePdf(req: Request, res: Response, next: NextFunction) {
+  try {
+    const result = await portalService.getInvoicePdf(req.params.id as string, req.user!);
+    if (!result) {
+      res.status(404).json({ status: 'error', message: 'Invoice not found' });
+      return;
+    }
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    res.setHeader('Content-Length', String(result.pdf.length));
+    res.send(result.pdf);
+  } catch (err) {
+    handlePortalError(err, res, next);
+  }
+}
+
 export async function compliance(req: Request, res: Response, next: NextFunction) {
   try {
     const compliance = await portalService.getCompliance(req.user!);

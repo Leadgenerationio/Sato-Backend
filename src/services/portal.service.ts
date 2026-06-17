@@ -13,7 +13,8 @@ import { creatives } from '../db/schema/creatives.js';
 import { landingPages } from '../db/schema/landing-pages.js';
 import { agreements } from '../db/schema/agreements.js';
 import { getApprovalStatesForCreatives } from './creative-approval.service.js';
-import { computeDaysOverdue, deriveDisplayStatus } from './invoice.service.js';
+import { computeDaysOverdue, deriveDisplayStatus, toPdfFilename } from './invoice.service.js';
+import { getInvoicePdf as fetchXeroInvoicePdf } from '../integrations/xero/xero-client.js';
 import { resolveR2Location } from './creative.service.js';
 import { getSignedDownloadUrl } from '../integrations/r2/r2-client.js';
 import { supplierNameToCatchrPlatform } from './report.service.js';
@@ -1179,6 +1180,35 @@ export async function getInvoices(requester: AuthPayload): Promise<PortalInvoice
         daysOverdue,
       };
     });
+}
+
+/**
+ * Stream the ORIGINAL Xero PDF for one of the buyer's invoices (Sam,
+ * 2026-06-17). The buyer downloads the exact document Xero issued — what large
+ * customers keep for their records — not a portal-rendered lookalike.
+ *
+ * Scoped hard to the requesting client: the row must belong to this client AND
+ * pass the same visibility gate the invoices list uses (no drafts/voided, must
+ * have a xero_invoice_id). Returns null for not-found / not-visible / not-mine
+ * so the controller can answer 404 without leaking another client's invoices.
+ */
+export async function getInvoicePdf(
+  invoiceId: string,
+  requester: AuthPayload,
+): Promise<{ filename: string; pdf: Buffer } | null> {
+  const clientId = requireClientId(requester);
+  const [row] = await db.select().from(invoices).where(eq(invoices.id, invoiceId));
+  if (!row || row.clientId !== clientId) return null;
+  // Mirror getInvoices' visibility gate: a hidden status or an unpushed row is
+  // never downloadable by the buyer. Both also imply there's no Xero document.
+  if (
+    PORTAL_INVOICE_HIDDEN_STATUSES.has((row.status ?? 'draft').toLowerCase()) ||
+    !row.xeroInvoiceId
+  ) {
+    return null;
+  }
+  const pdf = await fetchXeroInvoicePdf(row.xeroInvoiceId);
+  return { filename: toPdfFilename(row.invoiceNumber), pdf };
 }
 
 export async function getCompliance(requester: AuthPayload): Promise<PortalCompliance[]> {

@@ -18,6 +18,10 @@ portalRoutes.get('/dashboard', portalController.dashboard);
 portalRoutes.get('/campaigns', portalController.campaigns);
 portalRoutes.get('/leads', portalController.leads);
 portalRoutes.get('/invoices', portalController.invoices);
+// Original Xero PDF for one of the buyer's invoices (Sam, 2026-06-17). Path
+// param before any narrower static route is fine — '/invoices/:id/pdf' has its
+// own segment count and won't shadow '/invoices'.
+portalRoutes.get('/invoices/:id/pdf', portalController.invoicePdf);
 portalRoutes.get('/compliance', portalController.compliance);
 portalRoutes.get('/agreement', portalController.agreement);
 

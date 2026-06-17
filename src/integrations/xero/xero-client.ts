@@ -884,6 +884,48 @@ export async function getInvoicesForContact(contactId: string): Promise<XeroInvo
   return out;
 }
 
+/**
+ * Fetch the ORIGINAL invoice PDF that Xero generated for an invoice.
+ *
+ * Sam (2026-06-16/17): the downloaded invoice MUST be the exact document Xero
+ * issues — his large customers keep the original on file when an invoice is
+ * sent, so a Stato-rendered lookalike isn't acceptable for their records. Xero
+ * serves the real PDF from the SAME GET /Invoices/{id} endpoint via content
+ * negotiation: ask for `Accept: application/pdf` instead of JSON and the body
+ * is the PDF bytes — identical to what Xero emails / lets you download in its
+ * own UI.
+ *
+ * Required scope: accounting.transactions (already in SCOPES — same scope the
+ * JSON read above uses). Returns the raw PDF bytes; the caller streams them.
+ */
+export async function getInvoicePdf(xeroInvoiceId: string): Promise<Buffer> {
+  const { accessToken, tenantId } = await getValidToken();
+  const url = `${API_HOST}/api.xro/2.0/Invoices/${encodeURIComponent(xeroInvoiceId)}`;
+  const res = await xeroFetchWithBackoff(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'xero-tenant-id': tenantId,
+      Accept: 'application/pdf',
+    },
+  });
+  if (!res.ok) {
+    // Xero returns its error as JSON/text even on the PDF endpoint; capture it
+    // for the logs so a 403 (scope) vs 404 (deleted invoice) is debuggable.
+    const body = await res.text().catch(() => '');
+    logger.error({ status: res.status, body, xeroInvoiceId }, 'Xero invoice PDF fetch failed');
+    throw new Error(`Xero invoice PDF fetch failed: ${res.status}`);
+  }
+  const bytes = Buffer.from(await res.arrayBuffer());
+  // A 0-byte body means Xero handed back something other than the document
+  // (e.g. a synthesized timeout response). Treat it as a hard failure rather
+  // than letting the browser save an empty, corrupt "invoice.pdf".
+  if (bytes.length === 0) {
+    logger.error({ xeroInvoiceId }, 'Xero returned an empty invoice PDF');
+    throw new Error('Xero returned an empty invoice PDF');
+  }
+  return bytes;
+}
+
 export interface XeroContactDetail {
   contactId: string;
   name: string;
