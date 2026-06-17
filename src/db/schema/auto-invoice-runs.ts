@@ -4,10 +4,10 @@ import { businesses } from './businesses.js';
 import { users } from './users.js';
 
 export type AutoInvoiceClientDetailStatus =
-  | 'invoiced'        // invoice successfully created (and pushed to Xero if configured)
-  | 'no_deliveries'   // client had zero deliveries in the week — nothing to bill
-  | 'no_lead_price'   // client has deliveries but no lead_price configured
-  | 'failed';         // invoice creation threw; reason captured
+  | 'synced'           // ≥1 real Xero invoice pulled/reconciled for this client
+  | 'no_deliveries'    // client had zero deliveries in the week — nothing to reconcile
+  | 'no_xero_invoices' // client had deliveries but Xero has no invoice (or no contact link)
+  | 'failed';          // Xero sync threw; reason captured
 
 export interface AutoInvoiceClientDetail {
   clientId: string;
@@ -17,6 +17,12 @@ export interface AutoInvoiceClientDetail {
   currency: string;
   invoiceId?: string;
   invoiceNumber?: string;
+  // Xero-sync counts (Sam, 2026-06-16): the cron now PULLS invoices from
+  // Xero rather than fabricating them from lead values, so we record what
+  // the sync did per client instead of a single created-invoice id.
+  synced?: number;            // new Xero invoices imported on this run
+  updated?: number;           // existing invoices whose fields were re-synced
+  totalRemote?: number;       // total invoices Xero holds for this contact
   status: AutoInvoiceClientDetailStatus;
   reason?: string;
 }
