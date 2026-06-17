@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import * as portalService from '../services/portal.service.js';
 import * as approvalService from '../services/creative-approval.service.js';
+import { classifyXeroError } from '../utils/xero-errors.js';
 
 function handlePortalError(err: unknown, res: Response, next: NextFunction) {
   if (err instanceof Error && err.name === 'PortalAccessError') {
@@ -94,7 +95,15 @@ export async function invoicePdf(req: Request, res: Response, next: NextFunction
     res.setHeader('Content-Length', String(result.pdf.length));
     res.send(result.pdf);
   } catch (err) {
-    handlePortalError(err, res, next);
+    // requireClientId access errors stay portal-style; the PDF is fetched live
+    // from Xero, so classify upstream Xero failures (401/429/timeout/5xx) into a
+    // structured code instead of letting them fall through to an opaque 500.
+    if (err instanceof Error && err.name === 'PortalAccessError') {
+      handlePortalError(err, res, next);
+      return;
+    }
+    const classified = classifyXeroError(err);
+    res.status(classified.httpStatus).json({ status: 'error', code: classified.code, message: classified.message });
   }
 }
 

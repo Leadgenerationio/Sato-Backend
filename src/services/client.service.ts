@@ -697,8 +697,12 @@ export async function deleteClient(id: string, requester: AuthPayload): Promise<
     await tx.delete(leadDeliveries).where(eq(leadDeliveries.clientId, id));
     await tx.delete(adSpend).where(eq(adSpend.clientId, id));
     // Portal logins for this client — they have nowhere to sign in once the
-    // client is gone.
-    await tx.delete(users).where(eq(users.clientId, id));
+    // client is gone. Restrict to portal roles: a (mis-configured) staff user
+    // with a clientId set carries staff-only FK refs (auto-invoice runs,
+    // bank-feed, creatives) that aren't cleaned here and would FK-violate.
+    await tx
+      .delete(users)
+      .where(and(eq(users.clientId, id), inArray(users.role, ['client', 'client_admin'])));
     // Preserve campaign + workflow data; just drop the dangling reference.
     await tx.update(campaigns).set({ clientId: null }).where(eq(campaigns.clientId, id));
     await tx.update(workflows).set({ clientId: null }).where(eq(workflows.clientId, id));
