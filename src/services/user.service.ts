@@ -1,10 +1,18 @@
 import bcryptjs from 'bcryptjs';
 import { eq } from 'drizzle-orm';
 import { db } from '../config/database.js';
+import { env } from '../config/env.js';
 import { users } from '../db/schema/index.js';
 import { clients } from '../db/schema/clients.js';
 import { NotFoundError, ForbiddenError, ValidationError, UnauthorizedError } from '../utils/errors.js';
+import { sendEmail } from '../integrations/resend/resend-client.js';
+import { templates, renderEmailHtml, renderEmailText } from '../integrations/resend/resend-templates.js';
+import { logger } from '../utils/logger.js';
 import type { UserRole, AuthPayload } from '../types/index.js';
+
+// Brand shown on client-facing portal emails. Phase 1 is leadgeneration.io
+// only; an env override keeps it ready for the multi-business rollout.
+const PORTAL_BRAND_NAME = process.env.PORTAL_BRAND_NAME || 'leadgeneration.io';
 
 type UserRow = {
   id: string;
@@ -283,6 +291,51 @@ export async function toggleUserActive(userId: string, requester: AuthPayload) {
     isActive: u.isActive,
     isPrimaryOwner: u.isPrimaryOwner,
   };
+}
+
+// ─── Portal welcome / invite email ───
+// Sam (2026-06-18): onboarding the first portal client. Sends a branded
+// (leadgeneration.io) welcome email with the user's login email + a deep
+// link to /login?welcome=1 where the FE opens the set-password flow.
+// Admin-triggered from the Portal Users card; safe to re-send any time.
+export async function sendWelcomeEmail(
+  userId: string,
+  requester: AuthPayload,
+): Promise<{ sent: boolean; email: string }> {
+  const user = await findById(userId);
+  if (!user) throw new NotFoundError('User');
+
+  // Business scoping — same stance as the other admin user mutations.
+  if (requester.role !== 'owner' && requester.businessId && user.businessId !== requester.businessId) {
+    throw new ForbiddenError('Cannot email users outside your business');
+  }
+
+  // Welcome emails are a portal-onboarding tool — only client portal users.
+  if (user.role !== 'client' && user.role !== 'client_admin') {
+    throw new ValidationError('Welcome emails are only for portal users');
+  }
+
+  if (!user.isActive) {
+    throw new ValidationError('Cannot send a welcome email to a deactivated portal user');
+  }
+
+  const loginUrl = `${env.FRONTEND_URL.replace(/\/$/, '')}/login?welcome=1`;
+  const tpl = templates.portalWelcome({
+    name: user.name,
+    email: user.email,
+    loginUrl,
+    brandName: PORTAL_BRAND_NAME,
+  });
+
+  await sendEmail({
+    to: user.email,
+    subject: tpl.subject,
+    html: renderEmailHtml(tpl),
+    text: renderEmailText(tpl),
+  });
+
+  logger.info({ userId, email: user.email }, 'Portal welcome email sent');
+  return { sent: true, email: user.email };
 }
 
 // Sam (2026-06-17): "Add option to remove the user as well" on the Portal

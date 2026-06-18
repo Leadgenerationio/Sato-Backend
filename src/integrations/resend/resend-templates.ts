@@ -5,27 +5,56 @@ interface TemplateVars {
   body: string;
   ctaLabel?: string;
   ctaUrl?: string;
+  // Brand shown in the header/footer. Defaults to 'Stato' for internal
+  // (team-facing) notifications; client-facing emails pass the client brand
+  // (e.g. 'leadgeneration.io') so the portal invite matches the portal skin.
+  brandName?: string;
+  footerNote?: string;
 }
 
+// Statto brand palette — kept in sync with the portal theme (lime/ink).
+const LIME = '#9FE870';
+const INK = '#062F28';
+
 export function renderEmailHtml(v: TemplateVars): string {
+  const brand = escape(v.brandName ?? 'Stato');
+  const mark = brand.charAt(0).toUpperCase() || 'S';
+  const footer = escape(
+    v.footerNote ?? `${v.brandName ?? 'Stato'} — automated notification. Reply to this email to reach the team.`,
+  );
   const cta = v.ctaLabel && v.ctaUrl
-    ? `<a href="${escape(v.ctaUrl)}" style="display:inline-block;margin-top:16px;padding:10px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px;font-size:14px">${escape(v.ctaLabel)}</a>`
+    ? `<a href="${escape(v.ctaUrl)}" style="display:inline-block;padding:13px 22px;background:${LIME};color:${INK};text-decoration:none;border-radius:12px;font-size:15px;font-weight:600">${escape(v.ctaLabel)}</a>`
     : '';
 
   return `<!doctype html>
-<html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111">
-  <h1 style="font-size:20px;margin:0 0 12px">${escape(v.headline)}</h1>
-  <div style="font-size:14px;line-height:1.6;color:#333">${v.body}</div>
-  ${cta}
-  <hr style="margin:32px 0;border:none;border-top:1px solid #eee">
-  <p style="font-size:12px;color:#888">Stato — automated notification. Reply to this email to reach the team.</p>
+<html>
+<body style="margin:0;padding:0;background:#E7E7E9;font-family:'Poppins',-apple-system,'Segoe UI',Roboto,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#E7E7E9;padding:28px 16px">
+    <tr><td align="center">
+      <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 6px 20px rgba(6,47,40,.06)">
+        <tr><td style="background:${INK};padding:20px 28px">
+          <span style="display:inline-block;width:32px;height:32px;border-radius:9px;background:${LIME};color:${INK};text-align:center;line-height:32px;font-weight:700;font-size:15px;vertical-align:middle">${escape(mark)}</span>
+          <span style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:-.02em;margin-left:10px;vertical-align:middle">${brand}</span>
+        </td></tr>
+        <tr><td style="padding:32px 28px 4px">
+          <h1 style="font-size:22px;line-height:1.3;margin:0 0 14px;color:${INK};font-weight:600;letter-spacing:-.01em">${escape(v.headline)}</h1>
+          <div style="font-size:14.5px;line-height:1.65;color:#3a3a3a">${v.body}</div>
+        </td></tr>
+        ${cta ? `<tr><td style="padding:18px 28px 4px">${cta}</td></tr>` : ''}
+        <tr><td style="padding:24px 28px 28px">
+          <hr style="border:none;border-top:1px solid #ECECEE;margin:8px 0 16px">
+          <p style="font-size:12px;color:#7B7B7B;margin:0;line-height:1.5">${footer}</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
 </body></html>`;
 }
 
 export function renderEmailText(v: TemplateVars): string {
   const cta = v.ctaLabel && v.ctaUrl ? `\n\n${v.ctaLabel}: ${v.ctaUrl}` : '';
   const body = v.body.replace(/<[^>]+>/g, '');
-  return `${v.headline}\n\n${body}${cta}\n\n—\nStato`;
+  return `${v.headline}\n\n${body}${cta}\n\n—\n${v.brandName ?? 'Stato'}`;
 }
 
 function escape(s: string): string {
@@ -90,5 +119,22 @@ export const templates = {
     body: `<p>Use this code to reset your Stato password:</p>`
       + `<p style="font-size:30px;font-weight:700;letter-spacing:6px;margin:18px 0;font-family:monospace">${escape(vars.code)}</p>`
       + `<p>This code is valid for ${vars.minutes} minutes. If you didn't request a password reset, you can safely ignore this email — your password won't change.</p>`,
+  }),
+
+  // Portal client onboarding invite. Client-facing, so it carries the client
+  // brand (brandName) rather than 'Stato'. The CTA deep-links to
+  // /login?welcome=1 where the FE pre-opens the set-password flow.
+  portalWelcome: (vars: { name?: string; email: string; loginUrl: string; brandName: string }) => ({
+    subject: `Welcome to your ${vars.brandName} client portal`,
+    headline: `Welcome${vars.name ? `, ${vars.name}` : ''} 👋`,
+    brandName: vars.brandName,
+    footerNote: `You're receiving this because a ${vars.brandName} portal account was created for you. If you weren't expecting this, you can ignore this email.`,
+    body:
+      `<p>Your client portal is ready. Sign in to track lead delivery, invoices, ad creatives, compliance, and your service agreement — all in one place.</p>`
+      + `<p style="margin:18px 0 6px;color:#7B7B7B;font-size:13px">Your sign-in email</p>`
+      + `<p style="margin:0 0 4px"><span style="display:inline-block;background:#F1FCE7;color:#062F28;font-weight:600;padding:8px 14px;border-radius:10px;font-size:14.5px">${escape(vars.email)}</span></p>`
+      + `<p style="margin-top:18px">Click below to set your password and sign in for the first time.</p>`,
+    ctaLabel: 'Set your password & sign in',
+    ctaUrl: vars.loginUrl,
   }),
 };
