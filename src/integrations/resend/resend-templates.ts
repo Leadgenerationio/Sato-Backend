@@ -20,14 +20,15 @@ export function renderEmailHtml(v: TemplateVars): string {
   const brand = escape(v.brandName ?? 'Stato');
   const mark = brand.charAt(0).toUpperCase() || 'S';
   const footer = escape(
-    v.footerNote ?? `${v.brandName ?? 'Stato'} — automated notification. Reply to this email to reach the team.`,
+    v.footerNote ?? `${v.brandName ?? 'Stato'} - automated notification. Reply to this email to reach the team.`,
   );
   const cta = v.ctaLabel && v.ctaUrl
     ? `<a href="${escape(v.ctaUrl)}" style="display:inline-block;padding:13px 22px;background:${LIME};color:${INK};text-decoration:none;border-radius:12px;font-size:15px;font-weight:600">${escape(v.ctaLabel)}</a>`
     : '';
 
   return `<!doctype html>
-<html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="margin:0;padding:0;background:#E7E7E9;font-family:'Poppins',-apple-system,'Segoe UI',Roboto,sans-serif;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#E7E7E9;padding:28px 16px">
     <tr><td align="center">
@@ -54,7 +55,7 @@ export function renderEmailHtml(v: TemplateVars): string {
 export function renderEmailText(v: TemplateVars): string {
   const cta = v.ctaLabel && v.ctaUrl ? `\n\n${v.ctaLabel}: ${v.ctaUrl}` : '';
   const body = v.body.replace(/<[^>]+>/g, '');
-  return `${v.headline}\n\n${body}${cta}\n\n—\n${v.brandName ?? 'Stato'}`;
+  return `${v.headline}\n\n${body}${cta}\n\n--\n${v.brandName ?? 'Stato'}`;
 }
 
 function escape(s: string): string {
@@ -118,7 +119,7 @@ export const templates = {
     headline: `Password reset code`,
     body: `<p>Use this code to reset your Stato password:</p>`
       + `<p style="font-size:30px;font-weight:700;letter-spacing:6px;margin:18px 0;font-family:monospace">${escape(vars.code)}</p>`
-      + `<p>This code is valid for ${vars.minutes} minutes. If you didn't request a password reset, you can safely ignore this email — your password won't change.</p>`,
+      + `<p>This code is valid for ${vars.minutes} minutes. If you didn't request a password reset, you can safely ignore this email and your password won't change.</p>`,
   }),
 
   // Portal client onboarding invite. Client-facing, so it carries the client
@@ -126,11 +127,11 @@ export const templates = {
   // /login?welcome=1 where the FE pre-opens the set-password flow.
   portalWelcome: (vars: { name?: string; email: string; loginUrl: string; brandName: string }) => ({
     subject: `Welcome to your ${vars.brandName} client portal`,
-    headline: `Welcome${vars.name ? `, ${vars.name}` : ''} 👋`,
+    headline: `Welcome${vars.name ? `, ${vars.name}` : ''}`,
     brandName: vars.brandName,
     footerNote: `You're receiving this because a ${vars.brandName} portal account was created for you. If you weren't expecting this, you can ignore this email.`,
     body:
-      `<p>Your client portal is ready. Sign in to track lead delivery, invoices, ad creatives, compliance, and your service agreement — all in one place.</p>`
+      `<p>Your client portal is ready. Sign in to track lead delivery, invoices, ad creatives, compliance, and your service agreement, all in one place.</p>`
       + `<p style="margin:18px 0 6px;color:#7B7B7B;font-size:13px">Your sign-in email</p>`
       + `<p style="margin:0 0 4px"><span style="display:inline-block;background:#F1FCE7;color:#062F28;font-weight:600;padding:8px 14px;border-radius:10px;font-size:14.5px">${escape(vars.email)}</span></p>`
       + `<p style="margin-top:18px">Click below to set your password and sign in for the first time.</p>`,
