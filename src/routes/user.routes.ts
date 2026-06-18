@@ -75,3 +75,5 @@ userRoutes.patch('/:id/allowed-tabs', validate(updateAllowedTabsSchema), userCon
 userRoutes.patch('/:id/password', validate(resetPasswordSchema), userController.resetPassword);
 // Sam (2026-06-17): permanently remove a portal user (Portal Users card).
 userRoutes.delete('/:id', userController.deleteUser);
+// Sam (2026-06-18): (re)send the branded portal welcome/invite email.
+userRoutes.post('/:id/welcome-email', userController.sendWelcomeEmail);

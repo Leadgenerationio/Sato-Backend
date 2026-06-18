@@ -82,3 +82,15 @@ export async function resetPassword(req: Request, res: Response) {
     data: { user },
   });
 }
+
+// Sam (2026-06-18): send/re-send the branded portal welcome (invite) email
+// to a portal user from the Portal Users card.
+export async function sendWelcomeEmail(req: Request, res: Response) {
+  const id = req.params.id as string;
+  const result = await userService.sendWelcomeEmail(id, req.user!);
+
+  res.json({
+    status: 'success',
+    data: result,
+  });
+}
