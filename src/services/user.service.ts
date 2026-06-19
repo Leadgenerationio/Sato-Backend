@@ -319,7 +319,9 @@ export async function sendWelcomeEmail(
     throw new ValidationError('Cannot send a welcome email to a deactivated portal user');
   }
 
-  const loginUrl = `${env.FRONTEND_URL.replace(/\/$/, '')}/login?welcome=1`;
+  // Carry the email so the login page can pre-fill + auto-send the set-password
+  // code (the client never knows the admin's temporary password).
+  const loginUrl = `${env.FRONTEND_URL.replace(/\/$/, '')}/login?welcome=1&email=${encodeURIComponent(user.email)}`;
   const tpl = templates.portalWelcome({
     name: user.name,
     email: user.email,
