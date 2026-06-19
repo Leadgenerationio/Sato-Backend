@@ -1,6 +1,11 @@
 import { Request, Response } from 'express';
+import { randomBytes } from 'node:crypto';
 import * as clientService from '../services/client.service.js';
+import * as userService from '../services/user.service.js';
+import { logger } from '../utils/logger.js';
 import { NotFoundError } from '../utils/errors.js';
+
+interface CreateContactBody { contactType?: string; name?: string; email?: string }
 
 export async function listClients(req: Request, res: Response) {
   const result = await clientService.listClients(req.user!, {
@@ -32,6 +37,27 @@ export async function getClient(req: Request, res: Response) {
 
 export async function createClient(req: Request, res: Response) {
   const client = await clientService.createClient(req.body, req.user!);
+
+  // Sam (2026-06-19): onboard the primary contact automatically — create a
+  // portal login for their email and send the branded welcome. Best-effort:
+  // never fail client creation if there's no contact email, the email already
+  // has a login, or the send fails.
+  try {
+    const contacts: CreateContactBody[] = Array.isArray(req.body.contacts) ? req.body.contacts : [];
+    const primary = contacts.find((c) => c?.contactType === 'primary') ?? contacts[0];
+    const contactEmail = String(req.body.contactEmail ?? primary?.email ?? '').trim();
+    const contactName = String(primary?.name ?? req.body.contactName ?? 'Client').trim() || 'Client';
+    if (contactEmail) {
+      const tempPassword = randomBytes(18).toString('base64url');
+      const portalUser = await userService.createUser(
+        contactEmail, contactName, tempPassword, 'client', req.user!, client.id,
+      );
+      await userService.sendWelcomeEmail(portalUser.id, req.user!);
+    }
+  } catch (err) {
+    logger.error({ err, clientId: client.id }, 'Auto portal-user onboarding failed on client create');
+  }
+
   res.status(201).json({ status: 'success', data: { client } });
 }
 

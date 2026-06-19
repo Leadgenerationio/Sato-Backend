@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import * as userService from '../services/user.service.js';
+import { logger } from '../utils/logger.js';
 
 export async function getUsers(req: Request, res: Response) {
   const users = await userService.listUsers(req.user!);
@@ -13,6 +14,17 @@ export async function getUsers(req: Request, res: Response) {
 export async function createUser(req: Request, res: Response) {
   const { email, name, password, role, clientId, allowedTabs } = req.body;
   const user = await userService.createUser(email, name, password, role, req.user!, clientId, allowedTabs);
+
+  // Sam (2026-06-19): auto-send the branded welcome/invite to a portal user the
+  // moment they're created — no separate "Send welcome" click. Best-effort: a
+  // send failure must not fail user creation (admin can re-send from the card).
+  if (user.role === 'client' || user.role === 'client_admin') {
+    try {
+      await userService.sendWelcomeEmail(user.id, req.user!);
+    } catch (err) {
+      logger.error({ err, userId: user.id }, 'Auto welcome email failed on portal user create');
+    }
+  }
 
   res.status(201).json({
     status: 'success',
