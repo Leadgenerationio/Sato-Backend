@@ -18,6 +18,8 @@ const CODE_TTL_MINUTES = 10;
 const MAX_ATTEMPTS = 5;
 const RESET_TOKEN_EXPIRY = '10m';
 const SALT_ROUNDS = 12;
+// Brand shown on reset emails — kept consistent with the portal welcome email.
+const BRAND_NAME = process.env.PORTAL_BRAND_NAME || 'leadgenerationio.stato.tech';
 
 // Short-lived token returned after a code is verified, so the final
 // set-password step doesn't re-transmit the code. purpose-tagged so a
@@ -66,7 +68,7 @@ export async function requestPasswordReset(rawEmail: string): Promise<{ sent: tr
 
   await db.insert(passwordResets).values({ email, codeHash, expiresAt });
 
-  const tpl = templates.passwordReset({ code, minutes: CODE_TTL_MINUTES });
+  const tpl = templates.passwordReset({ code, minutes: CODE_TTL_MINUTES, brandName: BRAND_NAME });
   try {
     await sendEmail({
       to: email,
