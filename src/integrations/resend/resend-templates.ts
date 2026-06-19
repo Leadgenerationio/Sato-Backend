@@ -9,6 +9,9 @@ interface TemplateVars {
   // (team-facing) notifications; client-facing emails pass the client brand
   // (e.g. 'leadgeneration.io') so the portal invite matches the portal skin.
   brandName?: string;
+  // Absolute URL to a brand logo image (PNG) shown in the header instead of the
+  // text wordmark — avoids email clients auto-linking the "brand.tld" text.
+  brandLogoUrl?: string;
   footerNote?: string;
 }
 
@@ -26,6 +29,10 @@ export function renderEmailHtml(v: TemplateVars): string {
   const cta = v.ctaLabel && v.ctaUrl
     ? `<a href="${escape(v.ctaUrl)}" style="display:inline-block;padding:14px 24px;background:${INK};color:#ffffff;text-decoration:none;border-radius:12px;font-size:15px;font-weight:600">${escape(v.ctaLabel)}</a>`
     : '';
+  // Logo image when provided (avoids auto-linked text); else the text wordmark.
+  const logoMark = v.brandLogoUrl
+    ? `<img src="${escape(v.brandLogoUrl)}" alt="${brand}" height="30" style="display:block;height:30px;width:auto;border:0;outline:none;text-decoration:none">`
+    : `<span style="color:#ffffff;font-size:22px;font-weight:700;letter-spacing:-.02em">${brand}</span>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -35,7 +42,7 @@ export function renderEmailHtml(v: TemplateVars): string {
     <tr><td align="center">
       <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 6px 20px rgba(6,47,40,.06)">
         <tr><td style="background-color:${INK};background-image:radial-gradient(circle at 92% -25%, rgba(199,245,156,0.65) 0%, rgba(199,245,156,0) 24%),radial-gradient(circle at 90% -20%, rgba(159,232,112,0.75) 0%, rgba(159,232,112,0) 46%),radial-gradient(circle at 2% 155%, rgba(132,212,81,0.5) 0%, rgba(132,212,81,0) 50%);padding:34px 28px">
-          <span style="color:#ffffff;font-size:22px;font-weight:700;letter-spacing:-.02em">${brand}</span>
+          ${logoMark}
         </td></tr>
         <tr><td style="padding:32px 28px 4px">
           <h1 style="font-size:22px;line-height:1.3;margin:0 0 14px;color:${INK};font-weight:600;letter-spacing:-.01em">${escape(v.headline)}</h1>
@@ -114,10 +121,11 @@ export const templates = {
   // Sam (2026-06-10): self-service forgot-password. The 6-digit code is the
   // whole payload — render it large and unmissable. No CTA link; the user
   // types the code back into the sign-in screen.
-  passwordReset: (vars: { code: string; minutes: number; brandName?: string }) => ({
+  passwordReset: (vars: { code: string; minutes: number; brandName?: string; brandLogoUrl?: string }) => ({
     subject: `Your ${vars.brandName ?? 'Stato'} password reset code`,
     headline: `Password reset code`,
     brandName: vars.brandName,
+    brandLogoUrl: vars.brandLogoUrl,
     body: `<p>Use this code to reset your ${escape(vars.brandName ?? 'Stato')} password:</p>`
       + `<p style="font-size:30px;font-weight:700;letter-spacing:6px;margin:18px 0;font-family:monospace">${escape(vars.code)}</p>`
       + `<p>This code is valid for ${vars.minutes} minutes. If you didn't request a password reset, you can safely ignore this email and your password won't change.</p>`,
@@ -126,10 +134,11 @@ export const templates = {
   // Portal client onboarding invite. Client-facing, so it carries the client
   // brand (brandName) rather than 'Stato'. The CTA deep-links to
   // /login?welcome=1 where the FE pre-opens the set-password flow.
-  portalWelcome: (vars: { name?: string; email: string; loginUrl: string; brandName: string }) => ({
+  portalWelcome: (vars: { name?: string; email: string; loginUrl: string; brandName: string; brandLogoUrl?: string }) => ({
     subject: `Welcome to your ${vars.brandName} client portal`,
     headline: `Welcome${vars.name ? `, ${vars.name}` : ''}`,
     brandName: vars.brandName,
+    brandLogoUrl: vars.brandLogoUrl,
     footerNote: `You're receiving this because a ${vars.brandName} portal account was created for you. If you weren't expecting this, you can ignore this email.`,
     body:
       `<p>Your client portal is ready. Sign in to track lead delivery, invoices, ad creatives, compliance, and your service agreement, all in one place.</p>`
