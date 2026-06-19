@@ -19,20 +19,25 @@ interface TemplateVars {
 const LIME = '#9FE870';
 const INK = '#062F28';
 
+// Default brand + logo for ALL emails (Phase 1 = leadgeneration.io). Any
+// template may still override via brandName / brandLogoUrl.
+const DEFAULT_BRAND = process.env.PORTAL_BRAND_NAME || 'leadgeneration.io';
+const PORTAL_BASE = (process.env.PORTAL_URL || '').split(',')[0].trim().replace(/\/$/, '') || 'https://leadgenerationio.stato.tech';
+const DEFAULT_LOGO_URL = process.env.PORTAL_LOGO_URL || `${PORTAL_BASE}/email-logo.png`;
+
 export function renderEmailHtml(v: TemplateVars): string {
-  const brand = escape(v.brandName ?? 'Stato');
+  const brand = escape(v.brandName ?? DEFAULT_BRAND);
+  const logoUrl = v.brandLogoUrl ?? DEFAULT_LOGO_URL;
   const footer = escape(
-    v.footerNote ?? `${v.brandName ?? 'Stato'} - automated notification. Reply to this email to reach the team.`,
+    v.footerNote ?? `${v.brandName ?? DEFAULT_BRAND} - automated notification. Reply to this email to reach the team.`,
   );
   // Dark (ink) button with white text — high contrast in light AND dark mode,
   // and avoids the low-contrast white-on-lime combination.
   const cta = v.ctaLabel && v.ctaUrl
     ? `<a href="${escape(v.ctaUrl)}" style="display:inline-block;padding:14px 24px;background:${INK};color:#ffffff;text-decoration:none;border-radius:12px;font-size:15px;font-weight:600">${escape(v.ctaLabel)}</a>`
     : '';
-  // Logo image when provided (avoids auto-linked text); else the text wordmark.
-  const logoMark = v.brandLogoUrl
-    ? `<img src="${escape(v.brandLogoUrl)}" alt="${brand}" height="30" style="display:block;height:30px;width:auto;border:0;outline:none;text-decoration:none">`
-    : `<span style="color:#ffffff;font-size:22px;font-weight:700;letter-spacing:-.02em">${brand}</span>`;
+  // Always show the logo image (avoids email clients auto-linking brand text).
+  const logoMark = `<img src="${escape(logoUrl)}" alt="${brand}" height="30" style="display:block;height:30px;width:auto;border:0;outline:none;text-decoration:none">`;
 
   return `<!doctype html>
 <html lang="en">
