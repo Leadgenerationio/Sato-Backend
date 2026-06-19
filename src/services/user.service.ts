@@ -333,6 +333,7 @@ export async function sendWelcomeEmail(
     email: user.email,
     loginUrl,
     brandName: PORTAL_BRAND_NAME,
+    brandLogoUrl: process.env.PORTAL_LOGO_URL || `${portalBase}/email-logo.png`,
   });
 
   await sendEmail({
