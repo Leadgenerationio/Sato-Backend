@@ -321,7 +321,13 @@ export async function sendWelcomeEmail(
 
   // Carry the email so the login page can pre-fill + auto-send the set-password
   // code (the client never knows the admin's temporary password).
-  const loginUrl = `${env.FRONTEND_URL.replace(/\/$/, '')}/login?welcome=1&email=${encodeURIComponent(user.email)}`;
+  // FRONTEND_URL is a comma-separated CORS list in prod — take the first entry
+  // (or an explicit PORTAL_URL) so the link is a single valid portal URL.
+  const portalBase = (process.env.PORTAL_URL || env.FRONTEND_URL || '')
+    .split(',')[0]
+    .trim()
+    .replace(/\/$/, '');
+  const loginUrl = `${portalBase}/login?welcome=1&email=${encodeURIComponent(user.email)}`;
   const tpl = templates.portalWelcome({
     name: user.name,
     email: user.email,
