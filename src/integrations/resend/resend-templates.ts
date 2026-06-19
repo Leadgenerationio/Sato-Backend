@@ -18,24 +18,24 @@ const INK = '#062F28';
 
 export function renderEmailHtml(v: TemplateVars): string {
   const brand = escape(v.brandName ?? 'Stato');
-  const mark = brand.charAt(0).toUpperCase() || 'S';
   const footer = escape(
     v.footerNote ?? `${v.brandName ?? 'Stato'} - automated notification. Reply to this email to reach the team.`,
   );
+  // Dark (ink) button with white text — high contrast in light AND dark mode,
+  // and avoids the low-contrast white-on-lime combination.
   const cta = v.ctaLabel && v.ctaUrl
-    ? `<a href="${escape(v.ctaUrl)}" style="display:inline-block;padding:13px 22px;background:${LIME};color:${INK};text-decoration:none;border-radius:12px;font-size:15px;font-weight:600">${escape(v.ctaLabel)}</a>`
+    ? `<a href="${escape(v.ctaUrl)}" style="display:inline-block;padding:14px 24px;background:${INK};color:#ffffff;text-decoration:none;border-radius:12px;font-size:15px;font-weight:600">${escape(v.ctaLabel)}</a>`
     : '';
 
   return `<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light only"><meta name="supported-color-schemes" content="light only"></head>
 <body style="margin:0;padding:0;background:#E7E7E9;font-family:'Poppins',-apple-system,'Segoe UI',Roboto,sans-serif;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#E7E7E9;padding:28px 16px">
     <tr><td align="center">
       <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 6px 20px rgba(6,47,40,.06)">
-        <tr><td style="background:${INK};padding:20px 28px">
-          <span style="display:inline-block;width:32px;height:32px;border-radius:9px;background:${LIME};color:${INK};text-align:center;line-height:32px;font-weight:700;font-size:15px;vertical-align:middle">${escape(mark)}</span>
-          <span style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:-.02em;margin-left:10px;vertical-align:middle">${brand}</span>
+        <tr><td style="background-color:${INK};background-image:radial-gradient(circle at 92% -25%, rgba(199,245,156,0.65) 0%, rgba(199,245,156,0) 24%),radial-gradient(circle at 90% -20%, rgba(159,232,112,0.75) 0%, rgba(159,232,112,0) 46%),radial-gradient(circle at 2% 155%, rgba(132,212,81,0.5) 0%, rgba(132,212,81,0) 50%);padding:34px 28px">
+          <span style="color:#ffffff;font-size:22px;font-weight:700;letter-spacing:-.02em">${brand}</span>
         </td></tr>
         <tr><td style="padding:32px 28px 4px">
           <h1 style="font-size:22px;line-height:1.3;margin:0 0 14px;color:${INK};font-weight:600;letter-spacing:-.01em">${escape(v.headline)}</h1>

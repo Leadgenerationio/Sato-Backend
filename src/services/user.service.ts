@@ -12,7 +12,7 @@ import type { UserRole, AuthPayload } from '../types/index.js';
 
 // Brand shown on client-facing portal emails. Phase 1 is leadgeneration.io
 // only; an env override keeps it ready for the multi-business rollout.
-const PORTAL_BRAND_NAME = process.env.PORTAL_BRAND_NAME || 'leadgenerationio.stato.tech';
+const PORTAL_BRAND_NAME = process.env.PORTAL_BRAND_NAME || 'leadgeneration.io';
 
 type UserRow = {
   id: string;
