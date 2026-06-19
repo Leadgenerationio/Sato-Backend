@@ -19,7 +19,7 @@ const MAX_ATTEMPTS = 5;
 const RESET_TOKEN_EXPIRY = '10m';
 const SALT_ROUNDS = 12;
 // Brand shown on reset emails — kept consistent with the portal welcome email.
-const BRAND_NAME = process.env.PORTAL_BRAND_NAME || 'leadgenerationio.stato.tech';
+const BRAND_NAME = process.env.PORTAL_BRAND_NAME || 'leadgeneration.io';
 
 // Short-lived token returned after a code is verified, so the final
 // set-password step doesn't re-transmit the code. purpose-tagged so a
