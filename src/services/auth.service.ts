@@ -1,6 +1,6 @@
 import bcryptjs from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { env } from '../config/env.js';
 import { db } from '../config/database.js';
 import { users } from '../db/schema/index.js';
@@ -47,7 +47,9 @@ export function verifyRefreshToken(token: string): AuthPayload {
 }
 
 async function findByEmail(email: string): Promise<UserRow | undefined> {
-  const [row] = await db.select().from(users).where(eq(users.email, email));
+  // Case-insensitive: emails may be stored with mixed case (e.g. Sam@…), so
+  // match on lower() to avoid login/reset failing on case differences.
+  const [row] = await db.select().from(users).where(sql`lower(${users.email}) = ${email.trim().toLowerCase()}`);
   return row as UserRow | undefined;
 }
 

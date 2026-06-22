@@ -1,6 +1,6 @@
 import bcryptjs from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { env } from '../config/env.js';
 import { db } from '../config/database.js';
 import { users, passwordResets } from '../db/schema/index.js';
@@ -42,7 +42,10 @@ function generateCode(): string {
 }
 
 async function findActiveUserByEmail(email: string) {
-  const [row] = await db.select().from(users).where(eq(users.email, email));
+  // Case-insensitive — `email` is already normalized to lowercase; match on
+  // lower() so a user stored with mixed case (e.g. Sam@…) is still found and
+  // actually receives the reset code.
+  const [row] = await db.select().from(users).where(sql`lower(${users.email}) = ${email}`);
   return row;
 }
 
