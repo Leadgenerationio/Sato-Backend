@@ -1,6 +1,6 @@
 import bcryptjs from 'bcryptjs';
 import { randomBytes } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { env } from '../config/env.js';
 import { users } from '../db/schema/index.js';
@@ -36,7 +36,7 @@ async function findById(id: string): Promise<UserRow | undefined> {
 }
 
 async function findByEmail(email: string): Promise<UserRow | undefined> {
-  const [row] = await db.select().from(users).where(eq(users.email, email));
+  const [row] = await db.select().from(users).where(sql`lower(${users.email}) = ${email.trim().toLowerCase()}`);
   return row as UserRow | undefined;
 }
 
@@ -102,6 +102,9 @@ export async function createUser(
   clientId?: string,
   allowedTabs?: string[] | null,
 ) {
+  // Normalize so logins, lookups, and the reset/welcome flows all match
+  // regardless of the case the admin typed (emails are case-insensitive).
+  email = email.trim().toLowerCase();
   if (await findByEmail(email)) {
     throw new ValidationError('Email already registered');
   }
