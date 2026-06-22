@@ -1,4 +1,5 @@
 import bcryptjs from 'bcryptjs';
+import { randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { env } from '../config/env.js';
@@ -95,7 +96,7 @@ function normalizeAllowedTabs(input: unknown): PortalTabSlug[] | null {
 export async function createUser(
   email: string,
   name: string,
-  password: string,
+  password: string | undefined,
   role: UserRole,
   requester: AuthPayload,
   clientId?: string,
@@ -137,7 +138,12 @@ export async function createUser(
     throw new ValidationError('clientId is only allowed when role is "client"');
   }
 
-  const passwordHash = await bcryptjs.hash(password, 12);
+  // Portal users set their own password via the welcome email; if the admin
+  // didn't supply one, generate a strong random temporary password.
+  const effectivePassword = password && password.length >= 8
+    ? password
+    : randomBytes(18).toString('base64url');
+  const passwordHash = await bcryptjs.hash(effectivePassword, 12);
   // Per-portal-user tab visibility — admin (Sam) picks which tabs a
   // role='client' user can see. client_admin + staff roles ignore the
   // column at render time (admins always see everything).
