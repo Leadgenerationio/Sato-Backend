@@ -27,7 +27,10 @@ const createUserSchema = z.object({
   body: z.object({
     email: z.string().email(),
     name: z.string().min(1).max(200),
-    password: z.string().min(8).max(200),
+    // Optional: portal users set their own password via the welcome email, so
+    // the admin no longer supplies one. When omitted the service generates a
+    // random temporary password. Internal roles may still pass one.
+    password: z.string().min(8).max(200).optional(),
     role: roleEnum,
     // Required when role='client' — links the portal user to the client row
     // whose data they're allowed to see. Must be omitted for internal roles.
