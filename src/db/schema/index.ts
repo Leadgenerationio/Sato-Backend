@@ -25,6 +25,7 @@ export * from './creative-approvals.js';
 export * from './sos-help.js';
 export * from './client-activity.js';
 export * from './client-emails.js';
+export * from './email-deliveries.js';
 export * from './auto-invoice-runs.js';
 export * from './agreement-templates.js';
 export * from './password-resets.js';

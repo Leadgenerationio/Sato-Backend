@@ -7,6 +7,7 @@ import { users } from '../db/schema/index.js';
 import { clients } from '../db/schema/clients.js';
 import { NotFoundError, ForbiddenError, ValidationError, UnauthorizedError } from '../utils/errors.js';
 import { sendEmail } from '../integrations/resend/resend-client.js';
+import * as emailDeliveryService from './email-delivery.service.js';
 import { templates, renderEmailHtml, renderEmailText } from '../integrations/resend/resend-templates.js';
 import { logger } from '../utils/logger.js';
 import type { UserRole, AuthPayload } from '../types/index.js';
@@ -350,10 +351,73 @@ export async function sendWelcomeEmail(
     subject: tpl.subject,
     html: renderEmailHtml(tpl),
     text: renderEmailText(tpl),
+    kind: 'portal_welcome',
+    // A real monitored Reply-To reads as a genuine business email rather than
+    // a bulk no-reply blast — one of the few deliverability levers available
+    // without changing the sending domain (see RESEND_REPLY_TO in env.ts).
+    replyTo: env.RESEND_REPLY_TO || undefined,
   });
 
   logger.info({ userId, email: user.email }, 'Portal welcome email sent');
   return { sent: true, email: user.email };
+}
+
+// Sam (2026-08-20, Barry @ media-active.org.uk): Resend accepting a message is
+// NOT delivery. This reads the email_deliveries ledger for the user's address
+// and classifies the latest attempt.
+//
+// The subtle case this exists for: Microsoft 365 quarantines a suspicious
+// message silently — no NDR, no Resend bounce event — so the send sits on
+// 'sent' forever. An accepted message with no 'delivered' confirmation after
+// STUCK_AFTER_MINUTES is therefore treated as suspected-filtered, which is the
+// only signal available for a silent quarantine.
+const STUCK_AFTER_MINUTES = 15;
+
+export async function getEmailDeliveryStatus(
+  userId: string,
+  requester: AuthPayload,
+): Promise<{
+  email: string;
+  status: string | null;
+  lastEvent: string | null;
+  failureType: string | null;
+  failureReason: string | null;
+  sentAt: Date | null;
+  suspectedFiltered: boolean;
+  history: Array<{ status: string; subject: string | null; sentAt: Date; kind: string | null }>;
+}> {
+  const user = await findById(userId);
+  if (!user) throw new NotFoundError('User');
+
+  // Same business scoping as every other admin user read.
+  if (requester.role !== 'owner' && requester.businessId && user.businessId !== requester.businessId) {
+    throw new ForbiddenError('Cannot view users outside your business');
+  }
+
+  const rows = await emailDeliveryService.listForEmail(user.email);
+  const latest = rows[0] ?? null;
+
+  const ageMinutes = latest?.sentAt
+    ? (Date.now() - new Date(latest.sentAt).getTime()) / 60_000
+    : 0;
+  const suspectedFiltered =
+    !!latest && latest.status === 'sent' && ageMinutes > STUCK_AFTER_MINUTES;
+
+  return {
+    email: user.email,
+    status: latest?.status ?? null,
+    lastEvent: latest?.lastEvent ?? null,
+    failureType: latest?.failureType ?? null,
+    failureReason: latest?.failureReason ?? null,
+    sentAt: latest?.sentAt ?? null,
+    suspectedFiltered,
+    history: rows.map((r) => ({
+      status: r.status,
+      subject: r.subject,
+      sentAt: r.sentAt,
+      kind: r.kind,
+    })),
+  };
 }
 
 // Sam (2026-06-17): "Add option to remove the user as well" on the Portal

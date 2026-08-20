@@ -80,3 +80,6 @@ userRoutes.patch('/:id/password', validate(resetPasswordSchema), userController.
 userRoutes.delete('/:id', userController.deleteUser);
 // Sam (2026-06-18): (re)send the branded portal welcome/invite email.
 userRoutes.post('/:id/welcome-email', userController.sendWelcomeEmail);
+// Sam (2026-08-20): real delivery outcome for this user's emails, so
+// "he never got the invite" is answerable without digging in Railway logs.
+userRoutes.get('/:id/email-status', userController.getEmailStatus);

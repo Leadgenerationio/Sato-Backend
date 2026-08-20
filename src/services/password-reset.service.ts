@@ -80,6 +80,11 @@ export async function requestPasswordReset(rawEmail: string): Promise<{ sent: tr
       subject: tpl.subject,
       html: renderEmailHtml(tpl),
       text: renderEmailText(tpl),
+      kind: 'password_reset',
+      // Same reasoning as the welcome email — the reset code is the other
+      // message a new portal user MUST receive to get in at all, so it needs
+      // the same deliverability signals.
+      replyTo: env.RESEND_REPLY_TO || undefined,
     });
   } catch (err) {
     // Don't surface send failures to the caller — that would leak which

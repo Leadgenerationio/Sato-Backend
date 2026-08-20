@@ -1,5 +1,6 @@
 import { env } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
+import * as emailDeliveryService from '../../services/email-delivery.service.js';
 import type { ResendSendRequest, ResendSendResponse } from './resend-types.js';
 
 const RESEND_API = 'https://api.resend.com';
@@ -51,5 +52,23 @@ export async function sendEmail(req: ResendSendRequest): Promise<ResendSendRespo
 
   const data = (await res.json()) as ResendSendResponse;
   logger.info({ id: data.id, to: req.to, subject: req.subject }, 'Email sent');
+
+  // Record every accepted send in the delivery ledger. Sam (2026-08-20):
+  // Resend returning 200 only means "accepted for delivery" — Barry's invite
+  // was accepted twice and still never reached his Microsoft 365 mailbox.
+  // The webhook updates these rows with the real outcome.
+  const recipients = Array.isArray(req.to) ? req.to : [req.to];
+  await Promise.all(
+    recipients.map((to) =>
+      emailDeliveryService.recordSend({
+        messageId: data.id,
+        toAddress: to,
+        fromAddress: from,
+        subject: req.subject,
+        kind: req.kind,
+      }),
+    ),
+  );
+
   return data;
 }

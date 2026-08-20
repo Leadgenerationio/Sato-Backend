@@ -14,6 +14,13 @@ export interface ResendSendRequest {
    * Forwarded-to-Resend payload ignores this field — it's worker-only.
    */
   clientId?: string;
+  /**
+   * Coarse label for what produced this send ('portal_welcome',
+   * 'password_reset', …). Stored on the email_deliveries ledger so invite
+   * failures can be filtered without string-matching subject lines.
+   * Worker-only — not forwarded to Resend.
+   */
+  kind?: string;
 }
 
 export interface ResendSendResponse {

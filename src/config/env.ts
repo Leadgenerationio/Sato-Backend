@@ -68,6 +68,14 @@ export const env = {
   // .local is a placeholder so dev doesn't accidentally email anyone.
   RESEND_FROM_EMAIL: v('RESEND_FROM_EMAIL', 'notifications@stato.local'),
   RESEND_FROM_NAME: v('RESEND_FROM_NAME', 'Stato Notifications'),
+  // Sam (2026-08-20): a Reply-To pointing at a real monitored mailbox is one
+  // of the signals Microsoft 365 weighs when deciding whether a message is a
+  // genuine business email or a spoof. Barry's invite (media-active.org.uk, an
+  // M365 tenant) was accepted by Resend and silently quarantined; a
+  // no-reply-only sender with a display name claiming a different domain than
+  // it sends from is the profile that gets filtered. Optional — omitted from
+  // the payload when unset.
+  RESEND_REPLY_TO: v('RESEND_REPLY_TO'),
 
   // SignNow (replaces DocuSign).
   // Default base URL is the production endpoint — `api-eval.signnow.com` is the

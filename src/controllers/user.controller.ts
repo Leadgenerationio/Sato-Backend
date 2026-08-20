@@ -97,6 +97,23 @@ export async function resetPassword(req: Request, res: Response) {
 
 // Sam (2026-06-18): send/re-send the branded portal welcome (invite) email
 // to a portal user from the Portal Users card.
+// Sam (2026-08-20): "Barry hasn't received his welcome email." Resend's 200
+// only means ACCEPTED — it says nothing about the inbox. This surfaces the
+// real per-send outcome so the answer to "did it arrive?" stops being a guess.
+//
+// `suspectedFiltered` is the important one: Microsoft 365 quarantines silently,
+// producing NO bounce event, so an invite stuck on 'sent' long after it was
+// accepted is the only evidence we get that it was filtered.
+export async function getEmailStatus(req: Request, res: Response) {
+  const id = req.params.id as string;
+  const result = await userService.getEmailDeliveryStatus(id, req.user!);
+
+  res.json({
+    status: 'success',
+    data: result,
+  });
+}
+
 export async function sendWelcomeEmail(req: Request, res: Response) {
   const id = req.params.id as string;
   const result = await userService.sendWelcomeEmail(id, req.user!);

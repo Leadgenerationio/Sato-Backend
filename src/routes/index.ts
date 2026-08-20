@@ -24,10 +24,13 @@ import { sosHelpRoutes } from './sos-help.routes.js';
 import { autoInvoiceRoutes } from './auto-invoice.routes.js';
 import { healthRoutes } from './health.routes.js';
 import { agreementTemplateRoutes } from './agreement-template.routes.js';
+import { webhookRoutes } from './webhook.routes.js';
 export const router: RouterType = Router();
 
 // Public — must be before any auth middleware on individual routers.
 router.use('/health', healthRoutes);
+// Provider webhooks — unauthenticated, signature-verified in the controllers.
+router.use('/webhooks', webhookRoutes);
 
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
