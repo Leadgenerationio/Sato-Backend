@@ -6,6 +6,7 @@ import { env } from '../config/env.js';
 import { users } from '../db/schema/index.js';
 import { clients } from '../db/schema/clients.js';
 import { NotFoundError, ForbiddenError, ValidationError, UnauthorizedError } from '../utils/errors.js';
+import { normalizePassword } from '../utils/password.js';
 import { sendEmail } from '../integrations/resend/resend-client.js';
 import * as emailDeliveryService from './email-delivery.service.js';
 import { templates, renderEmailHtml, renderEmailText } from '../integrations/resend/resend-templates.js';
@@ -144,8 +145,9 @@ export async function createUser(
 
   // Portal users set their own password via the welcome email; if the admin
   // didn't supply one, generate a strong random temporary password.
-  const effectivePassword = password && password.length >= 8
-    ? password
+  const suppliedPassword = normalizePassword(password ?? '');
+  const effectivePassword = suppliedPassword.length >= 8
+    ? suppliedPassword
     : randomBytes(18).toString('base64url');
   const passwordHash = await bcryptjs.hash(effectivePassword, 12);
   // Per-portal-user tab visibility — admin (Sam) picks which tabs a
@@ -520,6 +522,10 @@ export async function adminResetPassword(
   const user = await findById(userId);
   if (!user) throw new NotFoundError('User');
 
+  // Normalise FIRST, then validate — login compares against the normalised
+  // form, so an admin pasting a password with a trailing space must not be
+  // able to store a hash that login can never match (Barry, 2026-08-21).
+  newPassword = normalizePassword(newPassword);
   if (!newPassword || newPassword.length < 8) {
     throw new ValidationError('New password must be at least 8 characters');
   }
@@ -584,6 +590,8 @@ export async function changeOwnPassword(userId: string, currentPassword: string,
   const user = await findById(userId);
   if (!user) throw new NotFoundError('User');
 
+  currentPassword = normalizePassword(currentPassword);
+  newPassword = normalizePassword(newPassword);
   if (!newPassword || newPassword.length < 8) {
     throw new ValidationError('New password must be at least 8 characters');
   }

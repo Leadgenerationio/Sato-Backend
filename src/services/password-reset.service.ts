@@ -8,6 +8,7 @@ import { sendEmail } from '../integrations/resend/resend-client.js';
 import { templates, renderEmailHtml, renderEmailText } from '../integrations/resend/resend-templates.js';
 import { UnauthorizedError, ValidationError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
+import { normalizePassword } from '../utils/password.js';
 
 // Sam (2026-06-10): self-service forgot-password via a 6-digit emailed code.
 // Three steps: request → verify → reset. Deliberately mirrors the login
@@ -153,7 +154,7 @@ export async function resetPassword(resetToken: string, newPassword: string): Pr
     throw new UnauthorizedError('Invalid reset token');
   }
 
-  const newHash = await bcryptjs.hash(newPassword, SALT_ROUNDS);
+  const newHash = await bcryptjs.hash(normalizePassword(newPassword), SALT_ROUNDS);
   await db
     .update(users)
     .set({ passwordHash: newHash, updatedAt: new Date() })

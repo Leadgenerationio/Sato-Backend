@@ -2,6 +2,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import bcryptjs from 'bcryptjs';
 import { businesses, users } from './schema/index.js';
+import { normalizePassword } from '../utils/password.js';
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -45,7 +46,7 @@ async function seed() {
   ];
 
   for (const u of seedUsers) {
-    const passwordHash = await bcryptjs.hash(u.password, 12);
+    const passwordHash = await bcryptjs.hash(normalizePassword(u.password), 12);
     await db.insert(users).values({
       email: u.email,
       passwordHash,
@@ -83,7 +84,7 @@ async function seedDemoData(bizId: string) {
   }).onConflictDoNothing().returning();
 
   if (sampleClient) {
-    const clientHash = await bcryptjs.hash(process.env.SEED_DEMO_CLIENT_PASSWORD || 'client123', 12);
+    const clientHash = await bcryptjs.hash(normalizePassword(process.env.SEED_DEMO_CLIENT_PASSWORD || 'client123'), 12);
     await db.insert(users).values({
       email: 'client@stato.app',
       passwordHash: clientHash,

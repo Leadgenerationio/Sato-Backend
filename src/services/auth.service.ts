@@ -7,6 +7,7 @@ import { users } from '../db/schema/index.js';
 import { UnauthorizedError, ValidationError, NotFoundError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import type { AuthPayload, AuthTokens, UserResponse, UserRole } from '../types/index.js';
+import { normalizePassword } from '../utils/password.js';
 
 const SALT_ROUNDS = 12;
 const ACCESS_TOKEN_EXPIRY = '15m';
@@ -69,7 +70,7 @@ export async function registerUser(
     throw new ValidationError('Email already registered');
   }
 
-  const passwordHash = await bcryptjs.hash(password, SALT_ROUNDS);
+  const passwordHash = await bcryptjs.hash(normalizePassword(password), SALT_ROUNDS);
 
   // Owner role cannot be assigned via public self-registration
   const requestedRole = (role as UserRole) ?? 'readonly';
@@ -110,7 +111,7 @@ export async function loginUser(
   password: string,
 ): Promise<{ user: UserResponse; tokens: AuthTokens }> {
   email = email.trim();
-  password = password.trim();
+  password = normalizePassword(password);
   const user = await findByEmail(email);
 
   if (!user) {
