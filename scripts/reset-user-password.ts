@@ -23,7 +23,13 @@
 import 'dotenv/config';
 import bcryptjs from 'bcryptjs';
 import postgres from 'postgres';
-import { normalizePassword } from '../src/utils/password.js';
+
+// Deliberately inlined rather than imported from src/utils/password.ts: the
+// deployed image ships only dist/, so a '../src/...' import is ERR_MODULE_NOT_FOUND
+// inside the container, and a '../dist/...' import breaks local runs before a
+// build. Keep in step with normalizePassword() there — login compares against
+// the trimmed form, so anything stored untrimmed can never match.
+const normalizePassword = (password: string): string => (password ?? '').trim();
 
 async function run(): Promise<void> {
   const [emailArg, passwordArg] = process.argv.slice(2);
