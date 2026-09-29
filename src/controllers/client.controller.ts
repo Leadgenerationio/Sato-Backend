@@ -67,7 +67,13 @@ export async function getClient(req: Request, res: Response) {
 
 export async function createClient(req: Request, res: Response) {
   const client = await clientService.createClient(req.body, req.user!);
-  domainEvents.emit('client.added', { businessId: req.user!.businessId ?? '', data: { clientId: client.id, companyName: client.companyName } });
+  // Plan phase 4: "client added" webhook. Fire-and-forget — delivery is queued.
+  if (req.user!.businessId) {
+    domainEvents.emit('client.added', {
+      businessId: req.user!.businessId,
+      data: { client: { id: client.id, companyName: client.companyName, currency: client.currency, status: client.status } },
+    });
+  }
 
   // Sam (2026-06-19): onboard the primary contact automatically — create a
   // portal login for their email and send the branded welcome. Best-effort:

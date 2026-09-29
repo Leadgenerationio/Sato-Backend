@@ -1,5 +1,6 @@
 import { invoiceQueue, syncQueue } from './queue.js';
 import { logger } from '../utils/logger.js';
+import { syncEveryHours } from '../services/platform-creative-sync.service.js';
 
 export async function registerSchedules() {
   if (!invoiceQueue || !syncQueue) {
@@ -72,6 +73,16 @@ export async function registerSchedules() {
     every: 90_000,
   }, {
     name: 'leadbyte-cache-prewarm',
+    data: {},
+  });
+
+  // Plan phase 3 — pull ads + creatives from Meta / Taboola for every linked
+  // ad account (docs/creative-library-and-api-plan.md). Registered always;
+  // the job itself no-ops until credentials are set.
+  await syncQueue.upsertJobScheduler('platform-creative-sync', {
+    every: syncEveryHours() * 3_600_000,
+  }, {
+    name: 'platform-creative-sync',
     data: {},
   });
 

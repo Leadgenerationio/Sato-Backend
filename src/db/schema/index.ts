@@ -31,5 +31,7 @@ export * from './auto-invoice-runs.js';
 export * from './agreement-templates.js';
 export * from './password-resets.js';
 export * from './client-ad-accounts.js';
+export * from './webhooks.js';
+export * from './ad-account-sync-state.js';
 export * from './api-keys.js';
 export * from './fx-rates.js';
