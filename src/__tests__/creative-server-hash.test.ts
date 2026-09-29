@@ -70,10 +70,12 @@ describe('r2Key uploads are hashed by the server', () => {
   });
 
   it('keeps the existing file when identical bytes are uploaded again under a new key', async () => {
-    const one = { ...base(), sha256: SERVER_HASH };
-    const first = await upsertPlatformCreative(one);
+    // A hash no earlier test used, so the first upload is genuinely new.
+    const H = 'd'.repeat(64);
+    hashObject.mockResolvedValue({ sha256: H, sizeBytes: 1234, contentType: 'image/png' });
+    const first = await upsertPlatformCreative({ ...base(), sha256: H });
     created.push(first.creative.id);
-    const dup = await upsertPlatformCreative({ ...base(), sha256: SERVER_HASH });
+    const dup = await upsertPlatformCreative({ ...base(), sha256: H });
     expect(dup.creative.id).toBe(first.creative.id);
     expect(dup.creative.r2Key).toBe(first.creative.r2Key);
     expect(deleteFile).toHaveBeenCalledTimes(1); // the duplicate object is cleaned up, not orphaned
