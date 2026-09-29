@@ -25,6 +25,8 @@ import * as invoiceService from '../services/invoice.service.js';
 import { runAutoInvoiceAllBusinesses } from '../services/auto-invoice.service.js';
 import { refreshWorkflowAggregates, isAutomationPaused } from '../services/workflow.service.js';
 import { WORKFLOW_HANDLERS, isRegisteredHandler } from './workflow-handlers.js';
+import { syncAllLinkedAccounts, syncLinkedAccount } from '../services/platform-creative-sync.service.js';
+import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import type { AuthPayload } from '../types/index.js';
 import { generateThumbnail } from '../services/creative-thumbnail.service.js';
 
@@ -358,6 +360,20 @@ new Worker('sync', async (job) => {
       // so the Overdue/Owed dashboard widget stays current without per-client
       // manual triggers. Runs at :15 (bank-feed at :10, Catchr at :05).
       return syncAllClientsAcrossBusinesses();
+    }
+    case 'platform-creative-sync': {
+      // Plan phase 3 — every PLATFORM_SYNC_EVERY_HOURS (default 3). Pulls ads
+      // + creatives from Meta / Taboola for every linked ad account and files
+      // them under that account's client. No-op (one info log) until
+      // credentials are set.
+      return syncAllLinkedAccounts();
+    }
+    case 'platform-creative-sync-account': {
+      // "Sync now" on the Link ad accounts screen — one account.
+      const { linkId } = job.data as { linkId: string };
+      const [link] = await db.select().from(clientAdAccounts).where(eq(clientAdAccounts.id, linkId));
+      if (!link) return { skipped: true, reason: 'link_removed' };
+      return syncLinkedAccount(link);
     }
     default:
       logger.warn({ jobId: job.id, name: job.name }, 'Unknown sync job — ignoring');
