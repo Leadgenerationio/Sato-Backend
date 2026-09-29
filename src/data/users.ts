@@ -1,7 +1,7 @@
 import bcryptjs from 'bcryptjs';
 import { eq } from 'drizzle-orm';
 import { db } from '../config/database.js';
-import { users } from '../db/schema/index.js';
+import { users, businesses, clients } from '../db/schema/index.js';
 import { logger } from '../utils/logger.js';
 import type { UserRole } from '../types/index.js';
 
@@ -96,6 +96,33 @@ export async function seedDefaultUsers(): Promise<void> {
       isPrimaryOwner: false,
     },
   ];
+
+  // A fresh DB has no business row yet, and the users FK to businesses made
+  // the first boot crash. Create the business the seed users belong to
+  // (same stable id + values as db/seed.ts) before inserting them.
+  await db.insert(businesses).values({
+    id: LEADGEN_BUSINESS_ID,
+    name: 'leadgeneration.io',
+    slug: 'leadgeneration',
+    colour: '#171717',
+    status: 'active',
+  }).onConflictDoNothing();
+
+  // client@stato.app below points at the demo client, which only db/seed.ts
+  // (with SEED_DEMO_DATA=true) used to create — so a fresh DB violated the
+  // users → clients FK too. This function never runs in production, so
+  // create the same labelled demo client (same id/values as db/seed.ts).
+  await db.insert(clients).values({
+    id: DEMO_CLIENT_ID,
+    businessId: LEADGEN_BUSINESS_ID,
+    companyName: 'Apex Media Ltd (for demo)',
+    contactName: 'John Smith (for demo)',
+    contactEmail: 'john@apexmedia.co.uk',
+    status: 'active',
+    onboardingStatus: 'active',
+    currency: 'GBP',
+    paymentTermsDays: 30,
+  }).onConflictDoNothing();
 
   for (const u of seed) {
     const passwordHash = await bcryptjs.hash(u.password, 12);

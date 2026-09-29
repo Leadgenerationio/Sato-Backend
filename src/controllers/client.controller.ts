@@ -4,13 +4,24 @@ import * as clientService from '../services/client.service.js';
 import * as userService from '../services/user.service.js';
 import { logger } from '../utils/logger.js';
 import { NotFoundError } from '../utils/errors.js';
+import { domainEvents } from '../services/events.js';
 
 interface CreateContactBody { contactType?: string; name?: string; email?: string }
 
-export async function listClients(req: Request, res: Response) {
-  const result = await clientService.listClients(req.user!, {
+function listFilters(req: Request) {
+  return {
     status: req.query.status as string | undefined,
     search: req.query.search as string | undefined,
+    currency: req.query.currency as string | undefined,
+    country: req.query.country as string | undefined,
+    sort: req.query.sort as clientService.ClientSortKey | undefined,
+    dir: req.query.dir as 'asc' | 'desc' | undefined,
+  };
+}
+
+export async function listClients(req: Request, res: Response) {
+  const result = await clientService.listClients(req.user!, {
+    ...listFilters(req),
     page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
     limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
   });
@@ -26,6 +37,18 @@ export async function listClients(req: Request, res: Response) {
   });
 }
 
+// Feedback S14: CSV of the filtered + sorted list (same filters as GET /).
+export async function exportClientsCsv(req: Request, res: Response) {
+  const { csv, count, truncated } = await clientService.exportClientsCsv(req.user!, listFilters(req));
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="clients-${stamp}.csv"`);
+  res.setHeader('X-Row-Count', String(count));
+  if (truncated) res.setHeader('X-Truncated', 'true');
+  // BOM so Excel opens £/€ and accented company names correctly.
+  res.send('\uFEFF' + csv);
+}
+
 export async function getClient(req: Request, res: Response) {
   const client = await clientService.getClient(req.params.id as string, req.user!);
   if (!client) {
@@ -37,6 +60,7 @@ export async function getClient(req: Request, res: Response) {
 
 export async function createClient(req: Request, res: Response) {
   const client = await clientService.createClient(req.body, req.user!);
+  domainEvents.emit('client.added', { businessId: req.user!.businessId ?? '', data: { clientId: client.id, companyName: client.companyName } });
 
   // Sam (2026-06-19): onboard the primary contact automatically — create a
   // portal login for their email and send the branded welcome. Best-effort:
