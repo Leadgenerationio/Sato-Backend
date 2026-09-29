@@ -1,4 +1,5 @@
 import type { ClientDetail } from './client.service.js';
+import { formatMoney } from '../utils/currency.js';
 
 const BILLING_LABELS: Record<string, string> = {
   weekly_auto: 'Weekly auto',
@@ -34,7 +35,8 @@ export function resolveVariables(
     'client.contactEmail': client.contactEmail ?? '',
     'client.contactPhone': client.contactPhone ?? '',
     'client.address': formatAddress(client),
-    'client.leadPrice': client.leadPrice != null ? `£${Number(client.leadPrice).toFixed(2)} per lead` : '',
+    // Feedback M3: in the client's own currency (was hard-coded £).
+    'client.leadPrice': client.leadPrice != null ? `${formatMoney(client.leadPrice, client.currency)} per lead` : '',
     'client.paymentTermsDays': client.paymentTermsDays != null ? `${client.paymentTermsDays} days` : '',
     'client.billingWorkflow': BILLING_LABELS[client.billingWorkflow] ?? client.billingWorkflow ?? '',
     'today': formatUkDate(),

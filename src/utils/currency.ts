@@ -27,3 +27,17 @@ export function normalizeCurrencyCode(raw: string | null | undefined, fallback =
     return safeFallback;
   }
 }
+
+/**
+ * Format an amount in ITS OWN currency ("€34,860.00", "£1,200.00",
+ * "CHF 500.00"). Feedback M3 (29 Sep 2026): server-built strings (emails,
+ * agreement terms) hard-coded "£" regardless of the client's currency.
+ * Malformed codes fall back to GBP via normalizeCurrencyCode, never throw.
+ */
+export function formatMoney(amount: number | string | null | undefined, currency: string | null | undefined): string {
+  const n = Number(amount ?? 0);
+  return new Intl.NumberFormat('en-GB', {
+    style: 'currency',
+    currency: normalizeCurrencyCode(currency),
+  }).format(Number.isFinite(n) ? n : 0);
+}

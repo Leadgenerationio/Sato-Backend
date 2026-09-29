@@ -14,7 +14,10 @@ import {
   resolveDashboardWindow,
   type DashboardWindow,
 } from '../utils/dashboard-window.js';
-import { RECOGNISED_INVOICE_STATUSES } from './report.service.js';
+import {
+  RECOGNISED_INVOICE_STATUSES, BASE_CURRENCY, invoiceCurrencySql, recognitionDateSql, splitBaseCurrency,
+  type CurrencyTotal,
+} from './report.service.js';
 
 export interface LeadsByDayPoint {
   /** Short weekday label, e.g. "Mon". */
@@ -267,6 +270,20 @@ export interface DashboardStats {
    */
   revenueChange: number | null;
   leadsChange: number | null;
+  /**
+   * Feedback M3/S12 (29 Sep 2026): every revenue figure above (totalRevenue,
+   * rollingRevenue365d, netProfit, profitMargin, revenueChange) is in this
+   * currency ONLY. Invoices in other currencies are listed in
+   * `otherCurrencyRevenue` for the selected window and never added in.
+   */
+  revenueCurrency: string;
+  otherCurrencyRevenue: CurrencyTotal[];
+  /**
+   * What Net Profit / Margin are made of, so the tile can say so. They are a
+   * DIFFERENT window + cost basis from the P&L card (last 30 days, bank +
+   * Catchr), which is why the two figures legitimately differ.
+   */
+  profitBasis: { revenueDays: number; costDays: number; costSource: 'catchr_ad_spend' };
   /** ISO timestamp the stats were computed. Useful for "as of" labelling on the FE. */
   asOf: string;
 }
@@ -309,26 +326,30 @@ export async function getDashboardStats(
     rollingRevenueRow, rollingCostRow,
   ] = await Promise.all([
     // Revenue in the selected window — recognised invoices (paid + authorised)
-    // with due_date in range. See RECOGNISED_INVOICE_STATUSES in
+    // dated by recognitionDateSql, GBP only (other currencies returned
+    // separately in otherCurrencyRevenue). See RECOGNISED_INVOICE_STATUSES in
     // report.service.ts for why authorised is included alongside paid.
     db
-      .select({ revenue: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
+      .select({ currency: invoiceCurrencySql, total: sql<string>`coalesce(sum(${invoices.total}), 0)::text` })
       .from(invoices)
       .where(and(
         inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]),
-        sql`${invoices.dueDate} >= ${win.startIso}::date AND ${invoices.dueDate} <= ${win.endIso}::date`,
-      )),
+        sql`${recognitionDateSql} >= ${win.startIso}::date AND ${recognitionDateSql} <= ${win.endIso}::date`,
+      ))
+      .groupBy(invoiceCurrencySql),
     // Ad spend in the selected window. Catchr only has ~50d of history;
     // for windows wider than that the sum is bounded by what's available.
     // Deduped per dedupedSpendSumSql — Sam jam-video #2.
     db.execute(sql`select ${dedupedSpendSumSql(win.startIso, win.endIso)} as cost`)
       .then((rows) => (rows as unknown as Array<{ cost: string }>)),
-    // Active clients: status IN ('active', 'onboarding'). Time-window
-    // independent — a client either exists or doesn't right now.
+    // Active clients: status = 'active' only. Time-window independent — a
+    // client either is active right now or isn't. Feedback M4 (29 Sep 2026):
+    // this used to count 'onboarding' too, so the KPI said "5 Active Clients"
+    // while the Clients list's Active tab showed none.
     db
       .select({ n: sql<number>`count(*)::int` })
       .from(clients)
-      .where(inArray(clients.status, ['active', 'onboarding'])),
+      .where(eq(clients.status, 'active')),
     // Active campaigns: status='active', regardless of client linkage.
     db
       .select({ n: sql<number>`count(*)::int` })
@@ -353,7 +374,8 @@ export async function getDashboardStats(
       .from(invoices)
       .where(and(
         inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]),
-        sql`${invoices.dueDate} >= ${win.prevStartIso}::date AND ${invoices.dueDate} <= ${win.prevEndIso}::date`,
+        sql`${invoiceCurrencySql} = ${BASE_CURRENCY}`,
+        sql`${recognitionDateSql} >= ${win.prevStartIso}::date AND ${recognitionDateSql} <= ${win.prevEndIso}::date`,
       )),
     // Prior equivalent window for leadsChange.
     db
@@ -370,7 +392,8 @@ export async function getDashboardStats(
       .from(invoices)
       .where(and(
         inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]),
-        sql`${invoices.dueDate} >= (current_date - interval '365 days') AND ${invoices.dueDate} <= current_date`,
+        sql`${invoiceCurrencySql} = ${BASE_CURRENCY}`,
+        sql`${recognitionDateSql} >= (current_date - interval '365 days') AND ${recognitionDateSql} <= current_date`,
       )),
     // Rolling-90d cost — same reasoning. 90d gives the post-acquisition
     // invoice cycle time to convert spend into the revenue captured above.
@@ -387,7 +410,8 @@ export async function getDashboardStats(
     `).then((rows) => (rows as unknown as Array<{ cost: string }>)),
   ]);
 
-  const revenue = Number(revenueRow[0]?.revenue ?? '0');
+  const revenueSplit = splitBaseCurrency(revenueRow);
+  const revenue = revenueSplit.base;
   const cost = Number(costRow[0]?.cost ?? '0');
   // Profit + Margin use rolling-365d-revenue / rolling-90d-cost regardless
   // of the user's window selection — see the field doc comments above.
@@ -425,6 +449,9 @@ export async function getDashboardStats(
     leadsWindowLabel: win.label,
     revenueChange,
     leadsChange,
+    revenueCurrency: BASE_CURRENCY,
+    otherCurrencyRevenue: revenueSplit.others,
+    profitBasis: { revenueDays: 365, costDays: 90, costSource: 'catchr_ad_spend' },
     asOf: now.toISOString(),
   };
 }
