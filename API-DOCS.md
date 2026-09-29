@@ -685,6 +685,64 @@ Get the client's service agreement.
 
 ---
 
+## Ad accounts
+
+Which client (and optionally which campaign) owns each ad account. Accounts are matched on `platform` + `accountId` only, never on the account name. `platform` accepts any common spelling (`Facebook`, `meta`, `facebook-ads`) and is stored in canonical form (`facebook-ads`, `google-ads`, `tik-tok`, `taboola`, `bing-ads`).
+
+### GET /ad-accounts
+
+**Roles:** owner, ops_manager, finance_admin. **Query:** `days` (1–365, default 30).
+
+Every known ad account: accounts with Catchr spend in the window, accounts referenced by a campaign's Ad Account Links, and accounts already linked. Spend is deduplicated across Catchr authorization ids. Unlinked accounts come first, largest spend first.
+
+```json
+{
+  "status": "success",
+  "data": {
+    "windowDays": 30,
+    "accounts": [
+      {
+        "platform": "facebook-ads", "platformLabel": "Facebook",
+        "accountId": "428353095282383", "accountName": "CH Hearing",
+        "currency": "GBP", "spend": 14527.53, "lastSpendDate": "2026-09-28",
+        "link": null,
+        "campaigns": [{ "campaignId": "…", "campaignName": "Hearing Aids (CH)" }]
+      }
+    ],
+    "summary": { "total": 40, "linked": 3, "unlinked": 37, "totalSpend": 612000.1, "unlinkedSpend": 586065.73 }
+  }
+}
+```
+
+### PUT /ad-accounts/links
+
+**Roles:** owner, ops_manager. Create, change or remove up to 500 links in one transaction. `clientId: null` removes a link. An unknown client or campaign id rejects the whole batch (400) and nothing is written.
+
+```json
+{ "links": [
+  { "platform": "facebook", "accountId": "428353095282383", "clientId": "…", "campaignId": "…" },
+  { "platform": "taboola", "accountId": "…willwriting-sc", "clientId": null }
+] }
+```
+
+**Response (200):** `{ "created": 1, "updated": 0, "removed": 1, "unchanged": 0, "results": [{ "platform", "accountId", "action", "clientName", "campaignName" }] }`
+
+### GET /clients/lookup
+
+**Roles:** owner, ops_manager, finance_admin. **Query:** `platform`, `accountId` (both required).
+
+The client that owns an ad account. 404 when the account isn't linked.
+
+```json
+{ "status": "success", "data": {
+  "platform": "facebook-ads", "accountId": "428353095282383",
+  "client": { "id": "…", "companyName": "…", "currency": "CHF" },
+  "campaign": { "id": "…", "name": "Hearing Aids (CH)" }
+} }
+```
+
+---
+
 ## Workflows
 
 All workflow endpoints require `owner` or `ops_manager` role.
