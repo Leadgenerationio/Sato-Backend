@@ -139,6 +139,25 @@ const MATRIX: EndpointExpectation[] = [
       readonly: 200,
     },
   },
+  // Routers mounted AFTER the '/'-mounted creativeRoutes. Its router-level
+  // requireRole('owner','ops_manager') used to 403 every one of these for
+  // Finance Admin (and Dashboard for Readonly) — Sam feedback round 1, S7.
+  {
+    endpoint: '/api/v1/dashboard/stats',
+    expectations: { owner: 200, finance_admin: 200, ops_manager: 200, client: 403, readonly: 200 },
+  },
+  {
+    endpoint: '/api/v1/finance/bank-feed/transactions',
+    expectations: { owner: 200, finance_admin: 200, ops_manager: 403, client: 403, readonly: 403 },
+  },
+  {
+    endpoint: '/api/v1/finance/auto-invoice/runs',
+    expectations: { owner: 200, finance_admin: 200, ops_manager: 403, client: 403, readonly: 403 },
+  },
+  {
+    endpoint: '/api/v1/agreement-templates',
+    expectations: { owner: 200, finance_admin: 200, ops_manager: 403, client: 403, readonly: 403 },
+  },
   {
     endpoint: '/api/v1/users',
     expectations: {
