@@ -1,0 +1,4 @@
+{ "results": [
+  { "id": "31000001", "advertiser_id": "willwriting-sc", "name": "PL Aparaty słuchowe — Native", "status": "RUNNING", "is_active": true },
+  { "id": "31000002", "advertiser_id": "willwriting-sc", "name": "PL — old test", "status": "TERMINATED", "is_active": false }
+] }

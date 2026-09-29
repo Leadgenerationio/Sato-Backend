@@ -1,0 +1,61 @@
+{
+  "data": [
+    {
+      "id": "120210000000000001",
+      "name": "CH Hearing — Static — Free test",
+      "effective_status": "ACTIVE",
+      "updated_time": "2026-09-28T10:15:00+0000",
+      "adset": { "id": "120210000000000100", "name": "CH 55+ Broad" },
+      "campaign": { "id": "120210000000000900", "name": "Hearing Aids CH — Leads" },
+      "creative": {
+        "id": "120210000000005001",
+        "name": "Static v3",
+        "title": "Kostenloser Hörtest",
+        "body": "Jetzt Termin sichern.",
+        "image_url": "https://scontent.xx.fbcdn.net/v/t45.1600-4/static-v3.jpg?stp=dst-jpg&_nc_sid=890911&oe=66FF0000",
+        "image_hash": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        "thumbnail_url": "https://external.xx.fbcdn.net/emg1/v/t13/thumb-static-v3.jpg?oe=66FF0000",
+        "effective_object_story_id": "104000000000001_900000000000001",
+        "object_story_spec": {
+          "page_id": "104000000000001",
+          "link_data": {
+            "link": "https://hoertest.example.ch/gratis?utm_source=facebook&utm_campaign=ch55",
+            "message": "Jetzt Termin sichern.",
+            "name": "Kostenloser Hörtest",
+            "picture": "https://scontent.xx.fbcdn.net/v/t45.1600-4/static-v3.jpg?stp=dst-jpg&oe=66FF0000",
+            "image_hash": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            "call_to_action": { "type": "LEARN_MORE", "value": { "link": "https://hoertest.example.ch/gratis?utm_source=facebook&utm_campaign=ch55" } }
+          }
+        }
+      }
+    },
+    {
+      "id": "120210000000000002",
+      "name": "CH Hearing — Video — Testimonial",
+      "effective_status": "PAUSED",
+      "updated_time": "2026-09-27T08:00:00+0000",
+      "adset": { "id": "120210000000000100", "name": "CH 55+ Broad" },
+      "campaign": { "id": "120210000000000900", "name": "Hearing Aids CH — Leads" },
+      "creative": {
+        "id": "120210000000005002",
+        "name": "Testimonial 30s",
+        "video_id": "880000000000001",
+        "thumbnail_url": "https://scontent.xx.fbcdn.net/v/t15.5256-10/testimonial-thumb.jpg?oe=66FF0000",
+        "object_story_spec": {
+          "page_id": "104000000000001",
+          "video_data": {
+            "video_id": "880000000000001",
+            "image_url": "https://scontent.xx.fbcdn.net/v/t15.5256-10/testimonial-thumb.jpg?oe=66FF0000",
+            "title": "Endlich wieder alles hören",
+            "message": "Maria (67) erzählt.",
+            "call_to_action": { "type": "SIGN_UP", "value": { "link": "https://hoertest.example.ch/termin" } }
+          }
+        }
+      }
+    }
+  ],
+  "paging": {
+    "cursors": { "before": "QVFIUmFh", "after": "QVFIUmJi" },
+    "next": "https://graph.facebook.com/v21.0/act_428353095282383/ads?access_token=EAAB-SECRET-TOKEN&fields=id&limit=100&after=QVFIUmJi"
+  }
+}
