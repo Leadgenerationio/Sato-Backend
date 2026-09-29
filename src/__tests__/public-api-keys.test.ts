@@ -96,6 +96,8 @@ describe('X-API-Key auth and scopes', () => {
     await new Promise((r) => setTimeout(r, 200));
     const usage = await request(app).get(`/api/v1/api-keys/${id}/usage`).set('Authorization', `Bearer ${owner}`);
     expect(usage.body.data.usage[0]).toMatchObject({ method: 'GET', path: '/api/v1/creatives', status: 200 });
+    const list = await request(app).get('/api/v1/api-keys').set('Authorization', `Bearer ${owner}`);
+    expect(list.body.data.apiKeys.find((k: { id: string }) => k.id === id).usage30d).toBe(1);
   });
 });
 

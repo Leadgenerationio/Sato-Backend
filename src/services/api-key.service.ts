@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { apiKeys, apiKeyUsage, type ApiKeyRow } from '../db/schema/api-keys.js';
 import { AppError } from '../utils/errors.js';
@@ -21,9 +21,11 @@ export interface ApiKeyDto {
   expiresAt: string | null;
   revokedAt: string | null;
   createdAt: string | null;
+  /** Calls logged in the last 30 days (Settings → API keys). */
+  usage30d: number;
 }
 
-const dto = (r: ApiKeyRow): ApiKeyDto => ({
+const dto = (r: ApiKeyRow, usage30d = 0): ApiKeyDto => ({
   id: r.id,
   name: r.name,
   prefix: r.prefix,
@@ -32,6 +34,7 @@ const dto = (r: ApiKeyRow): ApiKeyDto => ({
   expiresAt: r.expiresAt?.toISOString() ?? null,
   revokedAt: r.revokedAt?.toISOString() ?? null,
   createdAt: r.createdAt?.toISOString() ?? null,
+  usage30d,
 });
 
 export async function createApiKey(
@@ -52,8 +55,13 @@ export async function createApiKey(
 }
 
 export async function listApiKeys(businessId: string): Promise<ApiKeyDto[]> {
-  const rows = await db.select().from(apiKeys).where(eq(apiKeys.businessId, businessId)).orderBy(desc(apiKeys.createdAt));
-  return rows.map(dto);
+  const rows = await db
+    .select({
+      k: apiKeys,
+      n: sql<number>`(select count(*)::int from api_key_usage u where u.api_key_id = "api_keys"."id" and u.at > now() - interval '30 days')`,
+    })
+    .from(apiKeys).where(eq(apiKeys.businessId, businessId)).orderBy(desc(apiKeys.createdAt));
+  return rows.map((r) => dto(r.k, r.n));
 }
 
 export async function revokeApiKey(businessId: string, id: string): Promise<void> {
