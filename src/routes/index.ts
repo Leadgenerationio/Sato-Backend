@@ -27,6 +27,8 @@ import { autoInvoiceRoutes } from './auto-invoice.routes.js';
 import { healthRoutes } from './health.routes.js';
 import { agreementTemplateRoutes } from './agreement-template.routes.js';
 import { webhookRoutes } from './webhook.routes.js';
+import { apiKeyRoutes } from './api-key.routes.js';
+import { buildOpenApi, docsHtml } from '../docs/openapi.js';
 import { requireSection } from '../middleware/section.middleware.js';
 import { SECTIONS } from '../config/sections.js';
 export const router: RouterType = Router();
@@ -35,6 +37,17 @@ export const router: RouterType = Router();
 router.use('/health', healthRoutes);
 // Provider webhooks — unauthenticated, signature-verified in the controllers.
 router.use('/webhooks', webhookRoutes);
+
+// Public API docs (plan phase 2) — no auth.
+router.get('/openapi.json', (req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=300');
+  res.json(buildOpenApi(`${req.protocol}://${req.get('host')}/api/v1`));
+});
+router.get('/docs', (_req, res) => {
+  // helmet's default CSP blocks the CDN script the reference page needs.
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'self' https://cdn.jsdelivr.net https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net data:; img-src 'self' data: https:; connect-src 'self'");
+  res.type('html').send(docsHtml('/api/v1/openapi.json'));
+});
 
 router.use('/auth', authRoutes);
 
@@ -65,6 +78,7 @@ router.use('/', agreementRoutes);
 router.use('/leadbyte', leadbyteRoutes);
 router.use('/ad-spend', adSpendRoutes);
 router.use('/ad-accounts', adAccountRoutes);
+router.use('/api-keys', apiKeyRoutes);
 router.use('/uploads', uploadRoutes);
 // SOS is open to clients too — mount BEFORE creativeRoutes (which has a
 // router-level requireRole('owner','ops_manager') that would otherwise
