@@ -65,6 +65,7 @@ export const apiKeyRateLimit = rateLimit({
   message: { status: 'error', message: 'Rate limit for this API key reached (120 requests a minute). Try again shortly.' },
 });
 
+const inFlightIdempotency = new Set<string>();
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -90,11 +91,24 @@ export async function idempotency(req: Request, res: Response, next: NextFunctio
     res.status(hit.status).json(hit.response);
     return;
   }
+  // A second request with the same key while the first is still running would
+  // run the handler twice (two creatives). Tell the client to retry instead.
+  const flightKey = `${owner}|${key}`;
+  if (inFlightIdempotency.has(flightKey)) {
+    res.status(409).json({ status: 'error', code: 'idempotency_key_in_progress', message: 'A request with this Idempotency-Key is still being processed. Retry shortly.' });
+    return;
+  }
+  inFlightIdempotency.add(flightKey);
+  const release = () => inFlightIdempotency.delete(flightKey);
+  res.once('finish', release);
+  res.once('close', release);
   const json = res.json.bind(res);
   // Store BEFORE sending, so a retry fired the moment the client sees the
-  // response is already a replay. Server errors are not stored (retryable).
+  // response is already a replay. Only successes are stored: a validation
+  // error must not be replayed once the caller fixes the body, and server
+  // errors are retryable.
   res.json = ((body: unknown) => {
-    if (res.statusCode >= 500) return json(body);
+    if (res.statusCode >= 400) return json(body);
     db.insert(idempotencyKeys).values({ owner, key, requestHash, status: res.statusCode, response: body as object })
       .onConflictDoUpdate({ target: [idempotencyKeys.owner, idempotencyKeys.key], set: { requestHash, status: res.statusCode, response: body as object, createdAt: new Date() } })
       .catch(() => {})
