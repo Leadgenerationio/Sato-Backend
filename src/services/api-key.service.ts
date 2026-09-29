@@ -82,8 +82,10 @@ export async function verifyApiKey(key: string): Promise<ApiKeyRow | null> {
   if (row.expiresAt && row.expiresAt.getTime() <= Date.now()) return null;
   // A key acts as the person who made it: deactivating that user switches the key off too.
   if (row.createdBy) {
-    const [creator] = await db.select({ isActive: users.isActive }).from(users).where(eq(users.id, row.createdBy));
+    const [creator] = await db.select({ isActive: users.isActive, accessExpiresAt: users.accessExpiresAt }).from(users).where(eq(users.id, row.createdBy));
     if (!creator?.isActive) return null;
+    // Time-limited access (S8): the key ends with its creator's access.
+    if (creator.accessExpiresAt && creator.accessExpiresAt.getTime() <= Date.now()) return null;
   }
   // Throttled: at most one write a minute per key.
   if (!row.lastUsedAt || Date.now() - row.lastUsedAt.getTime() > 60_000) {

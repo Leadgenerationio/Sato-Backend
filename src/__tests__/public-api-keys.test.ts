@@ -180,6 +180,20 @@ describe('review fixes', () => {
     }
   });
 
+  it('a key stops working when its creator\'s time-limited access has ended', async () => {
+    const { key, id } = await makeKey(['creatives:read']);
+    const [opsUser] = await db.select().from(users).where(eq(users.email, 'ops@stato.app'));
+    await db.update(apiKeys).set({ createdBy: opsUser!.id }).where(eq(apiKeys.id, id));
+    try {
+      await db.update(users).set({ accessExpiresAt: new Date(Date.now() + 3_600_000) }).where(eq(users.id, opsUser!.id));
+      expect((await request(app).get('/api/v1/creatives').set('X-API-Key', key)).status).toBe(200);
+      await db.update(users).set({ accessExpiresAt: new Date(Date.now() - 1000) }).where(eq(users.id, opsUser!.id));
+      expect((await request(app).get('/api/v1/creatives').set('X-API-Key', key)).status).toBe(401);
+    } finally {
+      await db.update(users).set({ accessExpiresAt: null }).where(eq(users.id, opsUser!.id));
+    }
+  });
+
   it('a rejected (4xx) request is not stored against its Idempotency-Key', async () => {
     const { key } = await makeKey(['creatives:write']);
     const bad = await request(app).post('/api/v1/creatives').set('X-API-Key', key).set('Idempotency-Key', `${tag}-fix4xx`).send({ clientId, mediaType: 'image' });
