@@ -7,6 +7,7 @@ import { requireRole } from './rbac.middleware.js';
 import { verifyApiKey, logApiKeyUse, type ApiScope } from '../services/api-key.service.js';
 import { db } from '../config/database.js';
 import { redis } from '../config/redis.js';
+import { logger } from '../utils/logger.js';
 import { RedisRateLimitStore } from './redis-rate-limit-store.js';
 import { idempotencyKeys } from '../db/schema/api-keys.js';
 import { UnauthorizedError, AppError } from '../utils/errors.js';
@@ -56,6 +57,10 @@ export function allow(roles: UserRole[], scope: ApiScope): RequestHandler {
 
 export const requireScope = (scope: ApiScope): RequestHandler => allow([], scope);
 
+if (!redis && process.env.NODE_ENV === 'production') {
+  logger.warn('REDIS_URL not set — API-key rate limit is counted per process, so the effective limit multiplies by the number of instances');
+}
+
 /** 120 requests / minute per API key. JWT traffic keeps the global limiter only. */
 export const apiKeyRateLimit = rateLimit({
   windowMs: 60_000,
@@ -64,6 +69,7 @@ export const apiKeyRateLimit = rateLimit({
   legacyHeaders: false,
   // Shared across instances when Redis is configured; per-process otherwise.
   ...(redis ? { store: new RedisRateLimitStore(redis) } : {}),
+  passOnStoreError: true,
   skip: (req) => !req.apiKey,
   keyGenerator: (req) => `api-key:${req.apiKey?.id ?? 'none'}`,
   message: { status: 'error', message: 'Rate limit for this API key reached (120 requests a minute). Try again shortly.' },

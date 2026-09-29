@@ -174,12 +174,19 @@ export async function objectExists(folder: R2Folder, key: string): Promise<boole
   }
 }
 
+export class ObjectTooLargeError extends Error {
+  constructor(maxBytes: number) { super(`Object exceeds ${maxBytes} bytes`); this.name = 'ObjectTooLargeError'; }
+}
+
+export interface StoredObjectInfo { sha256: string; sizeBytes: number; contentType: string | null }
+
 /**
- * SHA-256 (lowercase hex) of a stored object, computed from the bytes in R2 so
- * a caller-supplied hash never has to be trusted. Returns null in mock mode
- * (no creds) or when the object is missing. Throws if it exceeds maxBytes.
+ * Real SHA-256 (lowercase hex), byte count and content type of a stored
+ * object, read from R2 so caller-supplied values never have to be trusted.
+ * Returns null in mock mode (no creds) or when the object is missing. Throws
+ * ObjectTooLargeError (before reading any body when ContentLength says so).
  */
-export async function hashObject(folder: R2Folder, key: string, maxBytes: number): Promise<string | null> {
+export async function hashObject(folder: R2Folder, key: string, maxBytes: number): Promise<StoredObjectInfo | null> {
   if (!isR2Configured()) return null;
   const { createHash } = await import('node:crypto');
   const { GetObjectCommand } = await import('@aws-sdk/client-s3');
@@ -192,14 +199,21 @@ export async function hashObject(folder: R2Folder, key: string, maxBytes: number
     if (e?.name === 'NoSuchKey' || e?.name === 'NotFound' || e?.$metadata?.httpStatusCode === 404) return null;
     throw err;
   }
-  const hash = createHash('sha256');
-  let total = 0;
-  for await (const chunk of res.Body as AsyncIterable<Uint8Array>) {
-    total += chunk.length;
-    if (total > maxBytes) throw new Error('Object exceeds size limit');
-    hash.update(chunk);
+  const body = res.Body as (AsyncIterable<Uint8Array> & { destroy?: () => void }) | undefined;
+  try {
+    if (!body) return null;
+    if (typeof res.ContentLength === 'number' && res.ContentLength > maxBytes) throw new ObjectTooLargeError(maxBytes);
+    const hash = createHash('sha256');
+    let total = 0;
+    for await (const chunk of body) {
+      total += chunk.length;
+      if (total > maxBytes) throw new ObjectTooLargeError(maxBytes);
+      hash.update(chunk);
+    }
+    return { sha256: hash.digest('hex'), sizeBytes: total, contentType: res.ContentType ?? null };
+  } finally {
+    body?.destroy?.();
   }
-  return hash.digest('hex');
 }
 
 export async function getSignedDownloadUrl(opts: R2SignedUrlOptions): Promise<string> {
