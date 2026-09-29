@@ -705,13 +705,14 @@ export async function createInvoice(
     .insert(invoices)
     .values({
       clientId: data.clientId,
+      // Raised here, so it is issued now (Xero imports take Xero's Date instead).
+      issueDate: new Date(),
       invoiceNumber,
       status: 'draft',
       currency: data.currency,
       subtotal: String(subtotal),
       vatAmount: String(vatAmount),
       total: String(total),
-      issueDate: new Date(),
       dueDate: new Date(Date.now() + 30 * 86_400_000),
       lineItems: data.lineItems,
     })
