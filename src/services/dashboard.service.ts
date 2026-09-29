@@ -323,12 +323,14 @@ export async function getDashboardStats(
     // Deduped per dedupedSpendSumSql — Sam jam-video #2.
     db.execute(sql`select ${dedupedSpendSumSql(win.startIso, win.endIso)} as cost`)
       .then((rows) => (rows as unknown as Array<{ cost: string }>)),
-    // Active clients: status IN ('active', 'onboarding'). Time-window
-    // independent — a client either exists or doesn't right now.
+    // Active clients: status = 'active' only. Time-window independent — a
+    // client either is active right now or isn't. Feedback M4 (29 Sep 2026):
+    // this used to count 'onboarding' too, so the KPI said "5 Active Clients"
+    // while the Clients list's Active tab showed none.
     db
       .select({ n: sql<number>`count(*)::int` })
       .from(clients)
-      .where(inArray(clients.status, ['active', 'onboarding'])),
+      .where(eq(clients.status, 'active')),
     // Active campaigns: status='active', regardless of client linkage.
     db
       .select({ n: sql<number>`count(*)::int` })
