@@ -68,3 +68,32 @@ export function canonicalPlatformSql(column: string): string {
     else null
   end`;
 }
+
+const PLATFORM_LABELS: Record<CanonicalPlatform, string> = {
+  'facebook-ads': 'Facebook',
+  'google-ads': 'Google',
+  'bing-ads': 'Bing',
+  'tik-tok': 'TikTok',
+  taboola: 'Taboola',
+};
+
+/**
+ * Stable grouping key for a free-text source/platform name. Known ad
+ * platforms collapse to their canonical id ("facebook", "Facebook Ads" and
+ * "facebook-ads" → 'facebook-ads'); anything else (an affiliate supplier
+ * name in LeadByte, say) groups by its lower-cased, whitespace-collapsed
+ * spelling so "Acme Leads " and "acme leads" still merge. Sam S11
+ * (2026-09-29): the Supplier CPL chart listed "facebook" and
+ * "Facebook Ads" as two separate sources.
+ */
+export function sourceKey(input: string | null | undefined): string {
+  const canonical = canonicalizePlatform(input);
+  if (canonical) return canonical;
+  return (input ?? '').toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+/** Display label for a {@link sourceKey}: "Facebook" for 'facebook-ads',
+ *  otherwise the fallback (the first raw spelling seen), trimmed. */
+export function sourceLabel(key: string, fallback: string): string {
+  return PLATFORM_LABELS[key as CanonicalPlatform] ?? (fallback.trim() || key);
+}

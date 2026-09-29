@@ -16,6 +16,7 @@ import { sopRoutes } from './sop.routes.js';
 import { agreementRoutes } from './agreement.routes.js';
 import { leadbyteRoutes } from './leadbyte.routes.js';
 import { adSpendRoutes } from './ad-spend.routes.js';
+import { adAccountRoutes, clientLookupRoutes } from './ad-account.routes.js';
 import { uploadRoutes } from './upload.routes.js';
 import { creativeRoutes } from './creative.routes.js';
 import { bankFeedRoutes } from './bank-feed.routes.js';
@@ -25,6 +26,8 @@ import { autoInvoiceRoutes } from './auto-invoice.routes.js';
 import { healthRoutes } from './health.routes.js';
 import { agreementTemplateRoutes } from './agreement-template.routes.js';
 import { webhookRoutes } from './webhook.routes.js';
+import { requireSection } from '../middleware/section.middleware.js';
+import { SECTIONS } from '../config/sections.js';
 export const router: RouterType = Router();
 
 // Public — must be before any auth middleware on individual routers.
@@ -33,11 +36,22 @@ router.use('/health', healthRoutes);
 router.use('/webhooks', webhookRoutes);
 
 router.use('/auth', authRoutes);
+
+// Role Access Matrix (S7): an Owner can switch a section off for a role in
+// Settings → User Management, and that is enforced here, in front of every
+// router below. It only restricts — each router's requireRole() stays the
+// real gate. See src/config/sections.ts for the prefix → section map.
+for (const section of SECTIONS) {
+  for (const prefix of section.apiPrefixes) router.use(prefix, requireSection(section.key));
+}
+
 router.use('/users', userRoutes);
 router.use('/permissions', permissionRoutes);
 router.use('/integrations', integrationRoutes);
 router.use('/campaigns', campaignRoutes);
 router.use('/invoices', invoiceRoutes);
+// Before clientRoutes: its GET /:id would otherwise swallow /clients/lookup.
+router.use('/clients', clientLookupRoutes);
 router.use('/clients', clientRoutes);
 router.use('/portal', portalRoutes);
 router.use('/workflows', workflowRoutes);
@@ -49,6 +63,7 @@ router.use('/sops', sopRoutes);
 router.use('/', agreementRoutes);
 router.use('/leadbyte', leadbyteRoutes);
 router.use('/ad-spend', adSpendRoutes);
+router.use('/ad-accounts', adAccountRoutes);
 router.use('/uploads', uploadRoutes);
 // SOS is open to clients too — mount BEFORE creativeRoutes (which has a
 // router-level requireRole('owner','ops_manager') that would otherwise

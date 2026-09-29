@@ -13,4 +13,8 @@
 -- Idempotent — UPDATEs on already-migrated rows are no-ops.
 
 UPDATE clients SET status = 'onboarding' WHERE status = 'prospect';
-UPDATE clients SET status = 'churned'    WHERE status = 'paused';
+-- 2026-09-29 (Sam feedback round 1, M4): 'paused' is a supported status
+-- again. scripts/auto-migrate.ts re-runs EVERY migration file on every boot,
+-- so the original `UPDATE ... SET status = 'churned' WHERE status = 'paused'`
+-- here silently turned every Paused client into Churned on each deploy.
+-- Removed; the one-off conversion ran back in May and is not needed again.
