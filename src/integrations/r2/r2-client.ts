@@ -70,6 +70,28 @@ export function parseR2LocationFromFileUrl(
   return { folder: segments[folderIdx] as R2Folder, key };
 }
 
+/**
+ * N8 (Sam feedback round 1): creatives used to persist the upload-time
+ * presigned download URL, which expires after an hour and carries a signature
+ * in the query string. Strip the signing query so what we store is a stable
+ * object reference — the path (…/<folder>/<key>) is unchanged, so
+ * parseR2LocationFromFileUrl still recovers the folder, and every reader
+ * mints a fresh signed URL on read. Non-presigned URLs (e.g. a public
+ * landing-page link with its own query) are returned untouched.
+ */
+export function stripPresignedQuery(fileUrl: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(fileUrl);
+  } catch {
+    return fileUrl;
+  }
+  const isPresigned = [...parsed.searchParams.keys()].some((k) => /^X-Amz-/i.test(k));
+  if (!isPresigned) return fileUrl;
+  parsed.search = '';
+  return parsed.toString();
+}
+
 function buildPublicUrl(fullKey: string): string {
   const publicBase = process.env.R2_PUBLIC_URL || env.R2_PUBLIC_URL;
   if (publicBase) return `${publicBase.replace(/\/$/, '')}/${fullKey}`;
