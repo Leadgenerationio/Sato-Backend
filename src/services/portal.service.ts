@@ -23,7 +23,7 @@ import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js'
 import { cached, LEADBYTE_SHARED_CACHE_TTL_SECONDS } from '../utils/cache.js';
 import { computeEffectiveAgreementStatus } from './agreement.service.js';
 import { logger } from '../utils/logger.js';
-import { normalizeCurrencyCode } from '../utils/currency.js';
+import { normalizeCurrencyCode, formatMoney } from '../utils/currency.js';
 import { canonicalPlatformSql, canonicalizePlatform } from '../utils/catchr-platform.js';
 import type { AuthPayload } from '../types/index.js';
 
@@ -1541,7 +1541,7 @@ export async function getAgreement(requester: AuthPayload): Promise<PortalAgreem
     signedAt: signedAt ? signedAt.toISOString() : null,
     documentUrl: row.documentUrl,
     clientName: client.companyName,
-    terms: `Lead Generation Service Agreement between leadgeneration.io and ${client.companyName}. Lead price: £${client.leadPrice ?? '0.00'} per valid lead. Payment terms: ${client.paymentTermsDays ?? 30} days.`,
+    terms: `Lead Generation Service Agreement between leadgeneration.io and ${client.companyName}. Lead price: ${formatMoney(client.leadPrice ?? 0, client.leadPriceCurrency ?? client.currency)} per valid lead. Payment terms: ${client.paymentTermsDays ?? 30} days.`,
   };
 }
 
