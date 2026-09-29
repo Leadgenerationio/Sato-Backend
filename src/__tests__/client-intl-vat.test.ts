@@ -240,6 +240,13 @@ describe('Invoice API — New Invoice follows the client (M7)', () => {
     expect(res.body.data.invoice.dueDate.slice(0, 10)).toBe('2026-12-01');
   });
 
+  it('still accepts the full ISO timestamp the previously deployed FE sends', async () => {
+    const res = await request(app).post('/api/v1/invoices').set(auth())
+      .send({ clientId: gbpClientId, currency: 'GBP', addVat: false, lineItems, dueDate: '2026-12-01T00:00:00.000Z' });
+    expect(res.status).toBe(201);
+    expect(res.body.data.invoice.dueDate.slice(0, 10)).toBe('2026-12-01');
+  });
+
   it('refuses VAT for a client whose treatment is not UK VAT', async () => {
     const res = await request(app).post('/api/v1/invoices').set(auth())
       .send({ clientId: eurOnboardingId, currency: 'EUR', addVat: true, lineItems });

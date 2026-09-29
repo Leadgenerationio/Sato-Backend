@@ -107,8 +107,10 @@ export const createInvoiceSchema = z.object({
       )
       .min(1),
     addVat: z.boolean(),
-    // M7 — due date defaults to today + the client's payment terms.
-    dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'dueDate must be YYYY-MM-DD').optional(),
+    // M7 — due date defaults to today + the client's payment terms. Accepts
+    // YYYY-MM-DD (current FE) or a full ISO timestamp (the FE deployed before
+    // 2026-09-29 already sent toISOString(), which this endpoint ignored).
+    dueDate: z.string().refine((v) => !Number.isNaN(Date.parse(v)), 'dueDate must be a date').optional(),
     // M7 — required to invoice in a currency other than the client's.
     confirmCurrencyMismatch: z.boolean().optional(),
   }),

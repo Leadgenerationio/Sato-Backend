@@ -690,7 +690,7 @@ export async function createInvoice(
     currency: string;
     lineItems: LineItem[];
     addVat: boolean;
-    /** YYYY-MM-DD. Defaults to today + the client's payment terms. */
+    /** YYYY-MM-DD or ISO timestamp. Defaults to today + the client's payment terms. */
     dueDate?: string;
     /** Required to invoice in a currency other than the client's. */
     confirmCurrencyMismatch?: boolean;
@@ -734,7 +734,11 @@ export async function createInvoice(
     );
   }
   const vatRate = Number(client.vatRate ?? 20);
-  const dueDate = data.dueDate ? new Date(`${data.dueDate}T00:00:00Z`) : dueDateFromTerms(client.paymentTermsDays);
+  const dueDate = !data.dueDate
+    ? dueDateFromTerms(client.paymentTermsDays)
+    : /^\d{4}-\d{2}-\d{2}$/.test(data.dueDate)
+      ? new Date(`${data.dueDate}T00:00:00Z`)
+      : new Date(data.dueDate);
 
   const subtotal = Math.round(data.lineItems.reduce((sum, l) => sum + l.amount, 0) * 100) / 100;
   const vatAmount = data.addVat ? Math.round(subtotal * (vatRate / 100) * 100) / 100 : 0;
