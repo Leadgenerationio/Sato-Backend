@@ -2,7 +2,7 @@ import { pgTable, uuid, varchar, boolean, timestamp, primaryKey, index } from 'd
 import { businesses } from './businesses.js';
 import { users, userRoleEnum } from './users.js';
 
-// Role Access Matrix (S7, migration 0043). One row per explicit choice; no
+// Role Access Matrix (S7, migration 0051). One row per explicit choice; no
 // row = allowed. Section keys live in src/config/sections.ts.
 export const rolePermissions = pgTable('role_permissions', {
   businessId: uuid('business_id').references(() => businesses.id, { onDelete: 'cascade' }).notNull(),
