@@ -483,7 +483,15 @@ export async function upsertPlatformCreative(
     }
     if (!existing || !existing.r2Key) {
       const key = `${Date.now()}-${safeName(input.name ?? input.platformCreativeId ?? 'creative')}.${extFor(media.contentType)}`;
-      const up = await uploadFile({ folder: 'creatives', key, body: media.buffer, contentType: media.contentType });
+      // Storage down (R2 outage, bad credentials) used to surface as a bare 500
+      // "Internal server error". Say what failed and that nothing was saved.
+      let up: Awaited<ReturnType<typeof uploadFile>>;
+      try {
+        up = await uploadFile({ folder: 'creatives', key, body: media.buffer, contentType: media.contentType });
+      } catch (err) {
+        logger.error({ err, key }, 'Creative upload to storage failed');
+        throw new AppError(502, "Couldn't store the file right now, so nothing was saved. Please try again in a few minutes.");
+      }
       r2Key = key;
       fileUrl = up.publicUrl;
     }
