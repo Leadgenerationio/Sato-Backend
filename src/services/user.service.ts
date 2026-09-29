@@ -640,3 +640,37 @@ export async function changeOwnPassword(userId: string, currentPassword: string,
     .set({ passwordHash: newHash, updatedAt: new Date() })
     .where(eq(users.id, userId));
 }
+
+// ─── Per-user UI preferences (feedback N2, 29 Sep 2026) ───
+// Dashboard layout, campaign grouping and task filters used to live only in
+// localStorage, so they didn't follow the user to another device. Stored as
+// one jsonb bag per user; keys are allow-listed at the route (zod), and a PUT
+// merges — sending `{ campaignGrouping: … }` never wipes `dashboardLayout`.
+// A key sent as null is removed.
+
+export const PREFERENCE_KEYS = ['dashboardLayout', 'campaignGrouping', 'taskFilters'] as const;
+export type PreferenceKey = (typeof PREFERENCE_KEYS)[number];
+export type UserPreferences = Partial<Record<PreferenceKey, unknown>>;
+
+export function mergePreferences(current: UserPreferences | null | undefined, patch: UserPreferences): UserPreferences {
+  const next: UserPreferences = { ...(current ?? {}) };
+  for (const key of PREFERENCE_KEYS) {
+    if (!(key in patch)) continue;
+    if (patch[key] === null) delete next[key];
+    else next[key] = patch[key];
+  }
+  return next;
+}
+
+export async function getOwnPreferences(userId: string): Promise<UserPreferences> {
+  const [row] = await db.select({ preferences: users.preferences }).from(users).where(eq(users.id, userId));
+  if (!row) throw new NotFoundError('User');
+  return (row.preferences ?? {}) as UserPreferences;
+}
+
+export async function updateOwnPreferences(userId: string, patch: UserPreferences): Promise<UserPreferences> {
+  const current = await getOwnPreferences(userId);
+  const next = mergePreferences(current, patch);
+  await db.update(users).set({ preferences: next, updatedAt: new Date() }).where(eq(users.id, userId));
+  return next;
+}

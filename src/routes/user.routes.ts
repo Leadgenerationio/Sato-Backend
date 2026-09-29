@@ -70,6 +70,22 @@ const resetPasswordSchema = z.object({
 const accessExpirySchema = z.object({
   body: z.object({ accessExpiresAt: z.string().datetime({ offset: true }).nullable() }),
 });
+// Feedback N2 (29 Sep 2026): per-user UI preferences. Registered BEFORE the
+// owner-only guard below — every signed-in user owns their own preferences.
+// Each value is capped (JSON length) so a runaway client can't bloat the row.
+const prefValue = z.unknown().refine(
+  (v) => v === null || JSON.stringify(v ?? null).length <= 16_000,
+  { message: 'Preference value too large (max 16 KB)' },
+);
+const updatePreferencesSchema = z.object({
+  body: z.object({
+    dashboardLayout: prefValue.optional(),
+    campaignGrouping: prefValue.optional(),
+    taskFilters: prefValue.optional(),
+  }).strict(),
+});
+userRoutes.get('/me/preferences', authMiddleware, userController.getMyPreferences);
+userRoutes.put('/me/preferences', authMiddleware, validate(updatePreferencesSchema), userController.updateMyPreferences);
 
 userRoutes.use(authMiddleware);
 userRoutes.use(requireRole('owner'));

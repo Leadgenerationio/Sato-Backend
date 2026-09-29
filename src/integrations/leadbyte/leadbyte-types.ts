@@ -135,6 +135,9 @@ export interface LeadByteSupplier {
   campaignId: string;
   totalSpend: number;
   totalLeads: number;
+  /** Buyer-side revenue LeadByte attributes to this supplier on this
+   *  campaign (same window as totalSpend/totalLeads). */
+  revenue: number;
 }
 
 /** Normalised per-supplier spend used by our reporting UI. */

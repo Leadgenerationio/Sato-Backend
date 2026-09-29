@@ -27,6 +27,9 @@ export const users = pgTable('users', {
   allowedTabs: text('allowed_tabs').array(),
   // S8 (migration 0049): time-limited access. NULL = no end date.
   accessExpiresAt: timestamp('access_expires_at', { withTimezone: true }),
+  // Migration 0044 (feedback N2): per-user UI preferences (dashboard layout,
+  // campaign grouping, task filters) so they follow the user across devices.
+  preferences: jsonb('preferences').$type<Record<string, unknown>>(),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 });

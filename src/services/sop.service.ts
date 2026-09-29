@@ -161,7 +161,9 @@ export interface SopGenerationDraft {
 
 export async function generateSopFromLoom(input: SopGenerationInput): Promise<SopGenerationDraft> {
   if (!isAnthropicConfigured()) {
-    throw new Error('Anthropic API not configured. Set ANTHROPIC_API_KEY to enable AI SOP generation.');
+    // Shown to the user verbatim (sop.controller) — plain words, Sam S16.
+    // "not configured" drives the controller's 503 mapping; keep it.
+    throw new Error('AI drafting is not configured yet. You can still write the SOP by hand, or ask your administrator to turn AI drafting on.');
   }
   const userMessage = `Loom URL: ${input.loomUrl}\n\nTranscript:\n${input.transcript}`;
   const { text } = await callAnthropic({

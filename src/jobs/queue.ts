@@ -18,3 +18,8 @@ export const syncQueue = connection
 export const workflowQueue = connection
   ? new Queue('workflow', { connection })
   : null;
+
+// Creative library (0045): server-made thumbnails for images/videos.
+export const mediaQueue = connection
+  ? new Queue('media', { connection })
+  : null;
