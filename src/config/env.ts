@@ -68,6 +68,12 @@ export const env = {
   // .local is a placeholder so dev doesn't accidentally email anyone.
   RESEND_FROM_EMAIL: v('RESEND_FROM_EMAIL', 'notifications@stato.local'),
   RESEND_FROM_NAME: v('RESEND_FROM_NAME', 'Stato Notifications'),
+
+  // Outbound webhooks (plan phase 4): key that encrypts each endpoint's
+  // signing secret at rest (src/utils/secret-box.ts). Required in production
+  // before webhooks can be created. Generate with `openssl rand -base64 32`.
+  // Changing it makes existing endpoint secrets unreadable — rotate them after.
+  WEBHOOK_SECRET_KEY: v('WEBHOOK_SECRET_KEY'),
   // Sam (2026-08-20): a Reply-To pointing at a real monitored mailbox is one
   // of the signals Microsoft 365 weighs when deciding whether a message is a
   // genuine business email or a spoof. Barry's invite (media-active.org.uk, an

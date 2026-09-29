@@ -1,0 +1,28 @@
+{
+  "name": "stato-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server for the Stato public API — lets an AI assistant file Meta/Taboola creatives under the right client.",
+  "type": "module",
+  "main": "dist/server.js",
+  "bin": { "stato-mcp": "dist/stdio.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/http.js",
+    "start:stdio": "node dist/stdio.js",
+    "dev": "tsx src/http.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.4"
+  },
+  "engines": { "node": ">=20" }
+}

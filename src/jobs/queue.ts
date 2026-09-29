@@ -19,6 +19,11 @@ export const workflowQueue = connection
   ? new Queue('workflow', { connection })
   : null;
 
+// Plan phase 4: outbound webhook deliveries (src/services/webhook.service.ts).
+export const webhookQueue = connection
+  ? new Queue('webhook', { connection })
+  : null;
+
 /**
  * Queue a one-account Meta / Taboola creative sync ("Sync now"). Deduped per
  * account via jobId, so repeated clicks don't stack runs. Returns false when
