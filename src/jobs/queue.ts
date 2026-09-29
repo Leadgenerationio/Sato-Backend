@@ -33,3 +33,8 @@ export async function enqueuePlatformSync(linkId: string): Promise<boolean> {
   });
   return true;
 }
+
+// Creative library (0045): server-made thumbnails for images/videos.
+export const mediaQueue = connection
+  ? new Queue('media', { connection })
+  : null;
