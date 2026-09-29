@@ -8,11 +8,11 @@ import * as cleanup from '../services/data-cleanup.service.js';
 // Settings → Clean up (S8 + N6). Owner only.
 export const adminCleanupRoutes: RouterType = Router();
 
-const idList = z.array(z.string().uuid()).max(500).optional();
+const idList = z.array(z.guid()).max(500).optional();
 const applySchema = z.object({
   body: z.object({
     deactivateUserIds: idList,
-    demoteOwnerIds: z.array(z.object({ id: z.string().uuid(), role: z.enum(cleanup.DEMOTE_ROLES) })).max(50).optional(),
+    demoteOwnerIds: z.array(z.object({ id: z.guid(), role: z.enum(cleanup.DEMOTE_ROLES) })).max(50).optional(),
     archiveSosIds: idList,
     archiveSopIds: idList,
     archiveStaffIds: idList,

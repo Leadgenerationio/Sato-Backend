@@ -64,6 +64,19 @@ function businessScope(requester: AuthPayload, column: string) {
     : sql`TRUE`;
 }
 
+// SOS requests and client contacts carry no business column of their own: they
+// belong to the business of the user who raised them / the client they sit under.
+function sosScope(requester: AuthPayload) {
+  return requester.businessId
+    ? sql`user_id IN (SELECT id FROM users WHERE business_id = ${requester.businessId})`
+    : sql`TRUE`;
+}
+function contactScope(requester: AuthPayload) {
+  return requester.businessId
+    ? sql`client_id IN (SELECT id FROM clients WHERE business_id = ${requester.businessId})`
+    : sql`TRUE`;
+}
+
 export async function getCleanupReport(requester: AuthPayload): Promise<CleanupReport> {
   const toUser = (r: UserDbRow, reason: string, preselect: boolean): CleanupUser => ({
     id: r.id, email: r.email, name: r.name, role: r.role, isActive: r.is_active,
@@ -86,6 +99,7 @@ export async function getCleanupReport(requester: AuthPayload): Promise<CleanupR
     SELECT id, message, page_path FROM sos_help_requests
     WHERE archived_at IS NULL
       AND (lower(trim(coalesce(message, ''))) = ANY(${textArray(TEST_TEXT)}) OR length(trim(coalesce(message, ''))) <= 3)
+      AND ${sosScope(requester)}
     ORDER BY created_at`)) as unknown as Array<{ id: string; message: string | null; page_path: string | null }>;
 
   const sops = (await db.execute<{ id: string; title: string; status: string }>(sql`
@@ -103,14 +117,14 @@ export async function getCleanupReport(requester: AuthPayload): Promise<CleanupR
     ORDER BY created_at`)) as unknown as Array<{ id: string; name: string; email: string }>;
 
   const contacts = (await db.execute<{ id: string; name: string; email: string | null }>(sql`
-    SELECT id, name, email FROM client_contacts WHERE name <> trim(name) OR email <> trim(email)`)) as unknown as Array<{ id: string; name: string; email: string | null }>;
+    SELECT id, name, email FROM client_contacts WHERE (name <> trim(name) OR email <> trim(email)) AND ${contactScope(requester)}`)) as unknown as Array<{ id: string; name: string; email: string | null }>;
   const clientRows = (await db.execute<{ id: string; company_name: string; contact_name: string | null }>(sql`
     SELECT id, company_name, contact_name FROM clients
     WHERE (contact_name <> trim(contact_name) OR contact_email <> trim(contact_email) OR company_name <> trim(company_name))
       AND ${businessScope(requester, 'business_id')}`)) as unknown as Array<{ id: string; company_name: string; contact_name: string | null }>;
 
   const [tpl] = (await db.execute<{ n: number }>(sql`
-    SELECT count(*)::int AS n FROM agreement_templates WHERE archived_at IS NULL`)) as unknown as Array<{ n: number }>;
+    SELECT count(*)::int AS n FROM agreement_templates WHERE archived_at IS NULL AND ${businessScope(requester, 'business_id')}`)) as unknown as Array<{ n: number }>;
 
   return {
     // Owners are never pre-selected: whether someone should stay Owner is a judgement call.
@@ -212,7 +226,7 @@ export async function applyCleanup(requester: AuthPayload, input: CleanupApplyIn
       await tx.execute(sql`UPDATE users SET role = ${d.role}::user_role, updated_at = now() WHERE id = ${d.id} AND role = 'owner'`);
     }
     if (sosIds.length) {
-      const r = await tx.execute(sql`UPDATE sos_help_requests SET archived_at = now() WHERE id = ANY(${uuidList(sosIds)}) AND archived_at IS NULL`);
+      const r = await tx.execute(sql`UPDATE sos_help_requests SET archived_at = now() WHERE id = ANY(${uuidList(sosIds)}) AND archived_at IS NULL AND ${sosScope(requester)}`);
       result.archivedSos = (r as unknown as { count: number }).count ?? sosIds.length;
     }
     if (sopIds.length) {
@@ -226,7 +240,7 @@ export async function applyCleanup(requester: AuthPayload, input: CleanupApplyIn
     if (input.trimContacts) {
       const a = await tx.execute(sql`
         UPDATE client_contacts SET name = trim(name), email = trim(email), updated_at = now()
-        WHERE name <> trim(name) OR email <> trim(email)`);
+        WHERE (name <> trim(name) OR email <> trim(email)) AND ${contactScope(requester)}`);
       const b = await tx.execute(sql`
         UPDATE clients SET contact_name = trim(contact_name), contact_email = trim(contact_email),
                            company_name = trim(company_name), updated_at = now()

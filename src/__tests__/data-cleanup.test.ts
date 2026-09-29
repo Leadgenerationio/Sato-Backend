@@ -5,7 +5,8 @@ import { eq, inArray, sql } from 'drizzle-orm';
 import app from '../index.js';
 import { db } from '../config/database.js';
 import { users, sosHelpRequests, sops, staff, clientContacts, clients, adminCleanupLog } from '../db/schema/index.js';
-import { applyCleanup } from '../services/data-cleanup.service.js';
+import { applyCleanup, getCleanupReport } from '../services/data-cleanup.service.js';
+import { businesses } from '../db/schema/businesses.js';
 
 // Settings → Clean up (Sam feedback round 1, S8 + N6). Seeds copies of the
 // rows Sam found, then drives the Owner-only endpoints and every guard.
@@ -48,8 +49,8 @@ describe('Settings → Clean up (S8 + N6)', () => {
     ids.extraOwner = await mkUser(`agency.${TAG}@octogle-example.org`, 'Agency Owner', 'owner');
     ids.primary = await mkUser(`primary.${TAG}@leadgen-example.org`, 'Primary', 'owner', true);
 
-    const [s1] = await db.insert(sosHelpRequests).values({ message: 'testing', pagePath: '/x' }).returning();
-    const [s2] = await db.insert(sosHelpRequests).values({ message: 'msg' }).returning();
+    const [s1] = await db.insert(sosHelpRequests).values({ userId: ownerId, message: 'testing', pagePath: '/x' }).returning();
+    const [s2] = await db.insert(sosHelpRequests).values({ userId: ownerId, message: 'msg' }).returning();
     ids.sosTesting = s1.id; ids.sosMsg = s2.id;
     const [sop] = await db.insert(sops).values({ title: 'onbording', content: 'x', author: 'Yash', businessId }).returning();
     ids.sopOnbording = sop.id;
@@ -186,5 +187,34 @@ describe('Settings → Clean up (S8 + N6)', () => {
     const again = await request(app).get('/api/v1/admin/cleanup').set('Authorization', `Bearer ${ownerToken}`);
     expect(again.body.data.testLogins.map((u: { id: string }) => u.id)).not.toContain(ids.test);
     expect(again.body.data.testSops.map((s: { id: string }) => s.id)).not.toContain(ids.sopOnbording);
+  });
+});
+
+describe('Clean up never reaches another business', () => {
+  it('leaves another business\'s SOS entries, client contacts and agreement templates out of the report', async () => {
+    const slug = `cx${Date.now()}`;
+    const [other] = await db.insert(businesses).values({ name: `Yash Test Business ${slug}`, slug } as never).returning();
+    const [foreignUser] = await db.insert(users).values({
+      email: `foreign.${slug}@example.org`, name: 'Foreign Owner', role: 'owner', businessId: other!.id, isActive: true,
+      passwordHash: await bcryptjs.hash(PW, 4),
+    }).returning();
+    const [foreignSos] = await db.insert(sosHelpRequests).values({ userId: foreignUser!.id, message: 'test' }).returning();
+    const [foreignClient] = await db.insert(clients).values({ businessId: other!.id, companyName: `Yash Foreign ${slug}` }).returning();
+    const [foreignContact] = await db.insert(clientContacts).values({ clientId: foreignClient!.id, contactType: 'primary', name: 'Padded ', email: `p.${slug}@example.org` }).returning();
+    try {
+      const report = await getCleanupReport({ userId: ownerId, email: 'owner@stato.app', role: 'owner', businessId });
+      expect(report.testSos.map((x) => x.id)).not.toContain(foreignSos!.id);
+      expect(report.untrimmedContacts.map((c) => c.id)).not.toContain(foreignContact!.id);
+      const res = await applyCleanup({ userId: ownerId, email: 'owner@stato.app', role: 'owner', businessId }, { trimContacts: true });
+      expect(res.trimmedContacts).toBeGreaterThanOrEqual(0);
+      const [after] = await db.select().from(clientContacts).where(eq(clientContacts.id, foreignContact!.id));
+      expect(after!.name).toBe('Padded ');
+    } finally {
+      await db.delete(clientContacts).where(eq(clientContacts.id, foreignContact!.id));
+      await db.delete(clients).where(eq(clients.id, foreignClient!.id));
+      await db.delete(sosHelpRequests).where(eq(sosHelpRequests.id, foreignSos!.id));
+      await db.delete(users).where(eq(users.id, foreignUser!.id));
+      await db.delete(businesses).where(eq(businesses.id, other!.id));
+    }
   });
 });
