@@ -490,6 +490,15 @@ export async function upsertPlatformCreative(
   if (r2Key) {
     if (contentType && !mediaTypeOf(contentType)) throw new AppError(422, 'Creatives must be images or videos');
     if (sizeBytes && sizeBytes > MAX_MEDIA_BYTES) throw new AppError(413, 'File too large: max 50 MB');
+    // Presigned keys are not bound to a business, so a key already held by
+    // another business's creative must never be registered again here — that
+    // would hand out a signed download URL for someone else's file.
+    const holders = await db.select().from(creatives).where(eq(creatives.r2Key, r2Key));
+    for (const holder of holders) {
+      if (!(await creativeBelongsToBusiness(holder, businessId))) {
+        throw new AppError(409, 'This file is already registered to another business');
+      }
+    }
     fileUrl = r2Ref(r2Key);
   } else if (input.sourceUrl && !existing?.r2Key) {
     const media = await fetchRemoteMedia(input.sourceUrl, deps);
