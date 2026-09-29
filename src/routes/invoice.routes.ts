@@ -13,7 +13,7 @@ const listInvoicesQuerySchema = z.object({
     status: z.string().optional(),
     client: z.string().optional(),
     search: z.string().optional(),
-    sortBy: z.enum(['createdAt', 'dueDate', 'total', 'status', 'invoiceNumber']).optional(),
+    sortBy: z.enum(['createdAt', 'issueDate', 'dueDate', 'total', 'status', 'invoiceNumber']).optional(),
     sortDir: z.enum(['asc', 'desc']).optional(),
   }),
 });

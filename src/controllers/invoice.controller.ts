@@ -4,7 +4,7 @@ import * as invoiceService from '../services/invoice.service.js';
 import { uuidShape } from '../utils/zod-helpers.js';
 import { classifyXeroError } from '../utils/xero-errors.js';
 
-const VALID_SORT_BY = new Set(['createdAt', 'dueDate', 'total', 'status', 'invoiceNumber']);
+const VALID_SORT_BY = new Set(['createdAt', 'issueDate', 'dueDate', 'total', 'status', 'invoiceNumber']);
 
 export async function listInvoices(req: Request, res: Response) {
   const rawSortBy = req.query.sortBy as string | undefined;

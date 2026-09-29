@@ -11,6 +11,9 @@ export const invoices = pgTable('invoices', {
   subtotal: decimal('subtotal', { precision: 12, scale: 2 }),
   vatAmount: decimal('vat_amount', { precision: 12, scale: 2 }),
   total: decimal('total', { precision: 12, scale: 2 }),
+  // Date the invoice was issued (Xero's Date for imports, creation time for invoices raised
+  // here). Distinct from createdAt, which is when Stato first stored the row.
+  issueDate: timestamp('issue_date'),
   dueDate: timestamp('due_date'),
   paidDate: timestamp('paid_date'),
   daysOverdue: integer('days_overdue').default(0),
