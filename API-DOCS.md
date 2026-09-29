@@ -747,6 +747,70 @@ The client that owns an ad account. 404 when the account isn't linked.
 
 ---
 
+## Outbound webhooks
+
+Stato POSTs a signed JSON event to your URL when something happens. The events are `creative.added`, `creative.changed` and `client.added`. These routes manage your endpoints. They are **Owner only** and sit under `/webhook-endpoints`, because `/webhooks` is where providers such as Xero and Resend call *us*.
+
+### Delivery format
+
+```http
+POST https://your-server.example/stato-hook
+Content-Type: application/json
+User-Agent: Stato-Webhooks/1.0
+X-Stato-Event: creative.added
+X-Stato-Delivery: 3b1f…   (same value on every retry of this delivery — use it to ignore duplicates)
+X-Stato-Signature: t=1790683200,v1=5f2c…
+```
+
+```json
+{ "id": "3b1f…", "event": "creative.added", "createdAt": "2026-09-29T12:00:00.000Z", "data": { "creative": { "id": "…" } } }
+```
+
+**Checking the signature.** `v1` is `hex(HMAC_SHA256(secret, "<t>.<raw body>"))`. Check it against the **raw** body, before you parse the JSON, and reject a `t` more than 5 minutes old. During a secret rotation there may be several `v1=` entries; accept the request if any of them matches. `verifyStatoSignature()` in `src/services/webhook-signature.ts` is a reference implementation you can copy; it only uses `node:crypto`.
+
+**Retries.**
+- Any answer other than a 2xx, a network error, or no answer within 10 s counts as a failure. Redirects are not followed.
+- A failed delivery is retried with exponential backoff: after 1, 2, 4, 8, 16, 32 and 64 minutes, for 8 attempts in total (about 2 h). The delivery row shows `status`, `attempts`, `nextAttemptAt` and `lastError`.
+- After **5 deliveries in a row** fail all their attempts, the endpoint is switched off (`active: false`, with `disabledReason` filled in). Switching it back on resets the count.
+
+**Allowed addresses.**
+- In production, only `https://` addresses to public hosts are accepted.
+- Loopback, private (10/8, 172.16/12, 192.168/16), link-local and cloud-metadata (169.254/16), CGNAT, unique-local IPv6 and IPv4-mapped forms are refused. They are checked when the endpoint is saved, and checked again at connect time, which stops DNS rebinding.
+
+Production needs **`WEBHOOK_SECRET_KEY`**. It encrypts each endpoint's signing secret at rest. Signing needs the raw secret, so a hash can't be stored. If you change the key, rotate every endpoint's secret afterwards.
+
+### GET /webhook-endpoints
+
+Returns your endpoints and the list of available events. The secret is never returned here; `secretHint` holds its first 12 characters.
+
+### POST /webhook-endpoints
+
+```json
+{ "url": "https://your-server.example/stato-hook", "events": ["creative.added", "client.added"], "description": "Media buying tool" }
+```
+
+**201** `{ "endpoint": { … }, "secret": "whsec_…" }`. The secret is shown **only in this response**. **400** for an unknown event or a refused address; the message says why in plain words.
+
+### PATCH /webhook-endpoints/:id
+
+Any of `url`, `events`, `description`, `active` or `rotateSecret: true`. Rotating returns a new `secret` once. Setting `active: true` on a switched-off endpoint clears its failure count.
+
+### DELETE /webhook-endpoints/:id
+
+Deletes the endpoint and its delivery history.
+
+### GET /webhook-endpoints/:id/deliveries?limit=50
+
+Returns the latest deliveries (up to 200), newest first.
+
+### POST /webhook-endpoints/:id/test
+
+Sends one signed `webhook.test` delivery straight away, with no retries, and returns `{ ok, status, error, delivery }`. Use it to check your signature verification.
+
+### POST /webhook-endpoints/:id/deliveries/:deliveryId/redeliver
+
+Queues a delivery again. **202**.
+
 ## Workflows
 
 All workflow endpoints require `owner` or `ops_manager` role.

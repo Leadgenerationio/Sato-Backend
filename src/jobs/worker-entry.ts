@@ -26,6 +26,7 @@ import { runAutoInvoiceAllBusinesses } from '../services/auto-invoice.service.js
 import { refreshWorkflowAggregates, isAutomationPaused } from '../services/workflow.service.js';
 import { WORKFLOW_HANDLERS, isRegisteredHandler } from './workflow-handlers.js';
 import type { AuthPayload } from '../types/index.js';
+import { deliverOnce as deliverWebhook, MAX_ATTEMPTS as MAX_WEBHOOK_ATTEMPTS } from '../services/webhook.service.js';
 
 const connection = redis ?? undefined;
 
@@ -357,6 +358,18 @@ new Worker('sync', async (job) => {
       return { skipped: true };
   }
 }, { connection });
+
+// Webhook worker (plan phase 4) — one job per delivery. Throwing makes BullMQ
+// retry with the exponential backoff set in webhook.service enqueueDelivery();
+// deliverOnce() records every attempt on the webhook_deliveries row.
+new Worker('webhook', async (job) => {
+  const { deliveryId } = job.data as { deliveryId: string };
+  const attemptNumber = job.attemptsMade + 1;
+  const maxAttempts = job.opts.attempts ?? MAX_WEBHOOK_ATTEMPTS;
+  const result = await deliverWebhook(deliveryId, { attemptNumber, finalAttempt: attemptNumber >= maxAttempts });
+  if (!result.ok && !result.final) throw new Error(result.error ?? 'Webhook delivery failed');
+  return result;
+}, { connection, concurrency: 5 });
 } // end registerWorkers
 
 // Auto-start when this file is the entry point (e.g. `pnpm worker`).

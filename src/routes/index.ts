@@ -26,6 +26,7 @@ import { autoInvoiceRoutes } from './auto-invoice.routes.js';
 import { healthRoutes } from './health.routes.js';
 import { agreementTemplateRoutes } from './agreement-template.routes.js';
 import { webhookRoutes } from './webhook.routes.js';
+import { webhookEndpointRoutes } from './webhook-endpoint.routes.js';
 export const router: RouterType = Router();
 
 // Public — must be before any auth middleware on individual routers.
@@ -53,6 +54,8 @@ router.use('/', agreementRoutes);
 router.use('/leadbyte', leadbyteRoutes);
 router.use('/ad-spend', adSpendRoutes);
 router.use('/ad-accounts', adAccountRoutes);
+// Outbound webhooks (plan phase 4). Before the '/'-mounted creativeRoutes.
+router.use('/webhook-endpoints', webhookEndpointRoutes);
 router.use('/uploads', uploadRoutes);
 // SOS is open to clients too — mount BEFORE creativeRoutes (which has a
 // router-level requireRole('owner','ops_manager') that would otherwise

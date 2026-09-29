@@ -18,3 +18,8 @@ export const syncQueue = connection
 export const workflowQueue = connection
   ? new Queue('workflow', { connection })
   : null;
+
+// Plan phase 4: outbound webhook deliveries (src/services/webhook.service.ts).
+export const webhookQueue = connection
+  ? new Queue('webhook', { connection })
+  : null;
