@@ -30,6 +30,7 @@ export * from './email-deliveries.js';
 export * from './auto-invoice-runs.js';
 export * from './agreement-templates.js';
 export * from './password-resets.js';
+export * from './business-settings.js';
 export * from './admin-cleanup-log.js';
 export * from './client-ad-accounts.js';
 export * from './webhooks.js';

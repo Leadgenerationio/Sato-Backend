@@ -27,6 +27,7 @@ import { autoInvoiceRoutes } from './auto-invoice.routes.js';
 import { healthRoutes } from './health.routes.js';
 import { agreementTemplateRoutes } from './agreement-template.routes.js';
 import { webhookRoutes } from './webhook.routes.js';
+import { settingsRoutes } from './settings.routes.js';
 import { adminCleanupRoutes } from './admin-cleanup.routes.js';
 import { webhookEndpointRoutes } from './webhook-endpoint.routes.js';
 import { apiKeyRoutes } from './api-key.routes.js';
@@ -65,6 +66,7 @@ router.use('/users', userRoutes);
 router.use('/admin/cleanup', adminCleanupRoutes);
 router.use('/permissions', permissionRoutes);
 router.use('/integrations', integrationRoutes);
+router.use('/settings', settingsRoutes);
 router.use('/campaigns', campaignRoutes);
 router.use('/invoices', invoiceRoutes);
 // Before clientRoutes: its GET /:id would otherwise swallow /clients/lookup.
