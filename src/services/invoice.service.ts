@@ -33,8 +33,6 @@ export interface InvoiceSummary {
   subtotal: string;
   vatAmount: string;
   total: string;
-  // Null for a Xero import that has not been re-synced since issue_date was added.
-  issueDate: string | null;
   dueDate: string;
   paidDate: string | null;
   daysOverdue: number;
@@ -153,7 +151,6 @@ function invoiceToSummary(row: InvoiceRow, client: ClientRow): InvoiceSummary {
     subtotal: String(row.subtotal ?? '0'),
     vatAmount: String(row.vatAmount ?? '0'),
     total: String(row.total ?? '0'),
-    issueDate: row.issueDate ? row.issueDate.toISOString() : null,
     dueDate: (row.dueDate ?? new Date()).toISOString(),
     paidDate: row.paidDate ? row.paidDate.toISOString() : null,
     daysOverdue: liveDaysOverdue,
@@ -181,7 +178,7 @@ async function loadClientMap(businessId: string): Promise<Map<string, ClientRow>
   return map;
 }
 
-export type InvoiceSortBy = 'createdAt' | 'issueDate' | 'dueDate' | 'total' | 'status' | 'invoiceNumber';
+export type InvoiceSortBy = 'createdAt' | 'dueDate' | 'total' | 'status' | 'invoiceNumber';
 export type SortDir = 'asc' | 'desc';
 
 export interface ListInvoicesParams {
@@ -197,7 +194,6 @@ export interface ListInvoicesParams {
 
 const SORT_COLUMNS = {
   createdAt: invoices.createdAt,
-  issueDate: invoices.issueDate,
   dueDate: invoices.dueDate,
   total: invoices.total,
   status: invoices.status,
@@ -286,10 +282,7 @@ export async function listInvoices(
   // used to ORDER BY arbitrary expressions. Default: createdAt DESC (matches
   // historical behaviour).
   const sortColumn = params.sortBy && SORT_COLUMNS[params.sortBy] ? SORT_COLUMNS[params.sortBy] : invoices.createdAt;
-  // Rows with no issue date yet (un-resynced Xero imports) always sort last, either direction.
-  const sortOrder = params.sortBy === 'issueDate'
-    ? (params.sortDir === 'asc' ? sql`${sortColumn} ASC NULLS LAST` : sql`${sortColumn} DESC NULLS LAST`)
-    : params.sortDir === 'asc' ? sortColumn : desc(sortColumn);
+  const sortOrder = params.sortDir === 'asc' ? sortColumn : desc(sortColumn);
 
   // Page rows, total count, and the client-row map (for invoiceToSummary)
   // run in parallel. The client map is scoped per-business and stays small;
@@ -523,7 +516,6 @@ export async function syncInvoicesFromXero(
         subtotal: i.subtotal,
         vatAmount: i.totalTax,
         total: i.total,
-        issueDate: i.date ? new Date(i.date) : null,
         dueDate: i.dueDate ? new Date(i.dueDate) : null,
         // Mark as paid right away if Xero says so — we don't have a
         // separate "paid date" from Xero on the wire, use today as best-effort.
@@ -552,7 +544,6 @@ export async function syncInvoicesFromXero(
         subtotal: i.subtotal,
         vatAmount: i.totalTax,
         total: i.total,
-        issueDate: i.date ? new Date(i.date) : null,
         dueDate: i.dueDate ? new Date(i.dueDate) : null,
         // Stamp a paidDate only on the FIRST transition to paid and keep it
         // stable thereafter (Xero gives us no paid-date on the wire, so today
@@ -705,8 +696,6 @@ export async function createInvoice(
     .insert(invoices)
     .values({
       clientId: data.clientId,
-      // Raised here, so it is issued now (Xero imports take Xero's Date instead).
-      issueDate: new Date(),
       invoiceNumber,
       status: 'draft',
       currency: data.currency,
