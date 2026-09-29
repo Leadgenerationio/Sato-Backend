@@ -68,6 +68,12 @@ export const env = {
   // .local is a placeholder so dev doesn't accidentally email anyone.
   RESEND_FROM_EMAIL: v('RESEND_FROM_EMAIL', 'notifications@stato.local'),
   RESEND_FROM_NAME: v('RESEND_FROM_NAME', 'Stato Notifications'),
+
+  // Outbound webhooks (plan phase 4): key that encrypts each endpoint's
+  // signing secret at rest (src/utils/secret-box.ts). Required in production
+  // before webhooks can be created. Generate with `openssl rand -base64 32`.
+  // Changing it makes existing endpoint secrets unreadable — rotate them after.
+  WEBHOOK_SECRET_KEY: v('WEBHOOK_SECRET_KEY'),
   // Sam (2026-08-20): a Reply-To pointing at a real monitored mailbox is one
   // of the signals Microsoft 365 weighs when deciding whether a message is a
   // genuine business email or a spoof. Barry's invite (media-active.org.uk, an
@@ -91,6 +97,21 @@ export const env = {
   CATCHR_MCP_URL: v('CATCHR_MCP_URL', 'https://api.catchr.io/mcp'),
   CATCHR_ACCESS_TOKEN: v('CATCHR_ACCESS_TOKEN'),
   CATCHR_SYNC_BACKFILL_DAYS: parseInt(v('CATCHR_SYNC_BACKFILL_DAYS', '30'), 10),
+
+  // Plan phase 3 — scheduled pull of ads + creatives (docs/creative-library-
+  // and-api-plan.md). All optional: with neither Meta nor Taboola set the
+  // sync job logs once and does nothing. The clients read process.env at
+  // call time; these entries document the names and defaults.
+  // Meta: a Business Manager system user token with `ads_read` on every ad
+  // account that is linked to a client.
+  META_SYSTEM_USER_TOKEN: v('META_SYSTEM_USER_TOKEN'),
+  META_GRAPH_VERSION: v('META_GRAPH_VERSION', 'v21.0'),
+  // Taboola: a Backstage API client (client_credentials) with access to each
+  // advertiser account.
+  TABOOLA_CLIENT_ID: v('TABOOLA_CLIENT_ID'),
+  TABOOLA_CLIENT_SECRET: v('TABOOLA_CLIENT_SECRET'),
+  PLATFORM_SYNC_EVERY_HOURS: parseInt(v('PLATFORM_SYNC_EVERY_HOURS', '3'), 10),
+  PLATFORM_SYNC_LOOKBACK_DAYS: parseInt(v('PLATFORM_SYNC_LOOKBACK_DAYS', '90'), 10),
 
   // Slice 5 Day 6 — SOS help button target. Phone number that the SOS
   // WhatsApp deep-link opens. Plain digits with country code, no `+` or

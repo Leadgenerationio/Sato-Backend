@@ -13,6 +13,8 @@ export const staff = pgTable('staff', {
   holidaysRemaining: integer('holidays_remaining').notNull().default(25),
   holidaysTaken: integer('holidays_taken').notNull().default(0),
   documents: jsonb('documents').notNull().default([]),
+  // N6 (migration 0049): soft-archived from Settings → Clean up.
+  archivedAt: timestamp('archived_at', { withTimezone: true }),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 }, (table) => [

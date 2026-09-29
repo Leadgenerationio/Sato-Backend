@@ -1,4 +1,5 @@
 import { and, desc, eq, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
+import { convertTotalsToGbp, type ConvertedTotal } from './fx.service.js';
 import { db } from '../config/database.js';
 import { invoices } from '../db/schema/invoices.js';
 import { clients } from '../db/schema/clients.js';
@@ -613,6 +614,12 @@ export interface OutstandingInvoicesResult {
   totalOutstanding: string; // decimal-on-the-wire
   /** One entry per invoice currency, largest total first. Never cross-summed. */
   totalsByCurrency: CurrencyTotal[];
+  /**
+   * Feedback M3: everything converted to GBP at the latest ECB rate, with the
+   * rates used. null when only GBP is outstanding or a rate is unknown — the
+   * UI then shows the per-currency totals only.
+   */
+  convertedTotalGbp: ConvertedTotal | null;
 }
 
 /**
@@ -630,7 +637,7 @@ export async function getOutstandingInvoices(
   bucket: OutstandingBucket = 'all',
 ): Promise<OutstandingInvoicesResult> {
   const businessId = requester.businessId;
-  if (!businessId) return { invoices: [], count: 0, totalOutstanding: '0', totalsByCurrency: [] };
+  if (!businessId) return { invoices: [], count: 0, totalOutstanding: '0', totalsByCurrency: [], convertedTotalGbp: null };
 
   // 'submitted' is part of OUTSTANDING_STATUSES (and the portal pending count),
   // so it must be treated like 'sent'/'authorised' here too — otherwise a
@@ -702,13 +709,15 @@ export async function getOutstandingInvoices(
     })
     .filter((x): x is InvoiceSummary => x !== null);
 
+  const totalsByCurrency = currencyRows
+    .map((r) => ({ currency: r.currency, total: r.total, count: r.n }))
+    .sort((a, b) => Number(b.total) - Number(a.total));
   return {
     invoices: items,
     count: summaryResult[0]?.n ?? 0,
     totalOutstanding: summaryResult[0]?.total ?? '0',
-    totalsByCurrency: currencyRows
-      .map((r) => ({ currency: r.currency, total: r.total, count: r.n }))
-      .sort((a, b) => Number(b.total) - Number(a.total)),
+    totalsByCurrency,
+    convertedTotalGbp: await convertTotalsToGbp(totalsByCurrency),
   };
 }
 

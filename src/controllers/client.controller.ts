@@ -14,6 +14,7 @@ function listFilters(req: Request) {
     search: req.query.search as string | undefined,
     currency: req.query.currency as string | undefined,
     country: req.query.country as string | undefined,
+    addedBy: req.query.addedBy as string | undefined,
     sort: req.query.sort as clientService.ClientSortKey | undefined,
     dir: req.query.dir as 'asc' | 'desc' | undefined,
   };
@@ -35,6 +36,12 @@ export async function listClients(req: Request, res: Response) {
       pageSize: result.pageSize,
     },
   });
+}
+
+// S14: options for the "Added by" filter.
+export async function listAddedByOptions(req: Request, res: Response) {
+  const options = await clientService.listAddedByOptions(req.user!);
+  res.json({ status: 'success', data: { options } });
 }
 
 // Feedback S14: CSV of the filtered + sorted list (same filters as GET /).
@@ -60,7 +67,13 @@ export async function getClient(req: Request, res: Response) {
 
 export async function createClient(req: Request, res: Response) {
   const client = await clientService.createClient(req.body, req.user!);
-  domainEvents.emit('client.added', { businessId: req.user!.businessId ?? '', data: { clientId: client.id, companyName: client.companyName } });
+  // Plan phase 4: "client added" webhook. Fire-and-forget — delivery is queued.
+  if (req.user!.businessId) {
+    domainEvents.emit('client.added', {
+      businessId: req.user!.businessId,
+      data: { client: { id: client.id, companyName: client.companyName, currency: client.currency, status: client.status } },
+    });
+  }
 
   // Sam (2026-06-19): onboard the primary contact automatically — create a
   // portal login for their email and send the branded welcome. Best-effort:

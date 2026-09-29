@@ -66,6 +66,10 @@ const resetPasswordSchema = z.object({
   body: z.object({ newPassword: z.string().min(8).max(200) }),
 });
 
+// S8 (Sam feedback 29 Sep 2026): time-limited access. ISO date-time or null.
+const accessExpirySchema = z.object({
+  body: z.object({ accessExpiresAt: z.string().datetime({ offset: true }).nullable() }),
+});
 // Feedback N2 (29 Sep 2026): per-user UI preferences. Registered BEFORE the
 // owner-only guard below — every signed-in user owns their own preferences.
 // Each value is capped (JSON length) so a runaway client can't bloat the row.
@@ -93,6 +97,8 @@ userRoutes.patch('/:id/role', validate(updateRoleSchema), userController.updateR
 userRoutes.patch('/:id/toggle-active', userController.toggleActive);
 userRoutes.patch('/:id/allowed-tabs', validate(updateAllowedTabsSchema), userController.updateAllowedTabs);
 userRoutes.patch('/:id/password', validate(resetPasswordSchema), userController.resetPassword);
+// S8: time-limited access (e.g. the agency). null = no end date.
+userRoutes.patch('/:id/access-expiry', validate(accessExpirySchema), userController.updateAccessExpiry);
 // Sam (2026-06-17): permanently remove a portal user (Portal Users card).
 userRoutes.delete('/:id', userController.deleteUser);
 // Sam (2026-06-18): (re)send the branded portal welcome/invite email.
