@@ -32,6 +32,13 @@ const bulkLinkSchema = z.object({
 adAccountRoutes.get('/', requireRole('owner', 'ops_manager', 'finance_admin'), validate(listSchema), ctrl.list);
 adAccountRoutes.put('/links', requireRole('owner', 'ops_manager'), validate(bulkLinkSchema), ctrl.bulkLink);
 
+// Phase 3 (docs/creative-library-and-api-plan.md): scheduled pull of ads and
+// creatives from Meta / Taboola. Status for the Link ad accounts screen, and
+// a per-account "Sync now". :id is the client_ad_accounts row id.
+const syncNowSchema = z.object({ params: z.object({ id: uuidShape() }) });
+adAccountRoutes.get('/sync-status', requireRole('owner', 'ops_manager', 'finance_admin'), ctrl.syncStatus);
+adAccountRoutes.post('/:id/sync-now', requireRole('owner', 'ops_manager'), validate(syncNowSchema), ctrl.syncNow);
+
 // Mounted at /clients BEFORE clientRoutes (whose GET /:id would otherwise
 // treat "lookup" as a client id). Kept out of client.routes.ts on purpose.
 export const clientLookupRoutes: RouterType = Router();

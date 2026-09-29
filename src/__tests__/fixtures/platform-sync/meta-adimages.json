@@ -1,0 +1,8 @@
+{
+  "data": [
+    { "hash": "a1b2c3d4e5f60718293a4b5c6d7e8f90", "url": "https://scontent.xx.fbcdn.net/v/t45.1600-4/static-v3-full.jpg?oe=66FF0000", "width": 1080, "height": 1080 },
+    { "hash": "1111aaaa2222bbbb3333cccc4444dddd", "url": "https://scontent.xx.fbcdn.net/v/dco-1.jpg?oe=66FF0000", "width": 1080, "height": 1350 },
+    { "hash": "5555eeee6666ffff7777000088889999", "url": "https://scontent.xx.fbcdn.net/v/dco-2.jpg?oe=66FF0000", "width": 1200, "height": 628 },
+    { "hash": "aaaa0000bbbb1111cccc2222dddd3333", "url": "https://scontent.xx.fbcdn.net/v/card-a.jpg?oe=66FF0000", "width": 1080, "height": 1080 }
+  ]
+}

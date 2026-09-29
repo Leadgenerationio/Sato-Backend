@@ -745,6 +745,48 @@ The client that owns an ad account. 404 when the account isn't linked.
 } }
 ```
 
+### Scheduled Meta / Taboola creative sync (plan phase 3)
+
+Every `PLATFORM_SYNC_EVERY_HOURS` hours (default 3) a sync job pulls the ads of every linked **Meta** (`facebook-ads`) and **Taboola** ad account and files each creative under the client that owns the account, plus its campaign if one is set. The client always comes from the link above and is never guessed from a name. Each creative goes through the creative library's `upsertPlatformCreative()`, which copies the media into storage. Platform CDN links expire, so they are never kept as the file URL.
+
+- **Meta:** `GET /act_{id}/ads` with the creative fields and `updated_since`, following `paging.next`. Video sources come from `/{video_id}`, and image hashes (carousels, dynamic creative) from `/act_{id}/adimages`. Carousels and asset feeds give one creative per card/asset. The client backs off on throttling codes 4/17/32/613 and when `X-Business-Use-Case-Usage` is ≥ 90%.
+- **Taboola:** OAuth client_credentials, then `GET /{account_id}/campaigns` and `/{account_id}/campaigns/{id}/items/` for campaigns that are not terminated. Items still being crawled or stopped are skipped.
+- **No duplicates:** creatives are upserted on platform + creative id, so a second run updates rather than copies. The next Meta run asks only for ads updated since the last successful run, with 10 minutes of overlap. If any creative failed to save, the window is kept and retried.
+- **Off until connected:** with neither platform's credentials set, the job logs once and does nothing. The job runs on a fixed 3-hour slot (BullMQ scheduler), so the first run lands within one interval of deploy, not at boot. Use **Sync now** for an immediate pull.
+
+**Credentials needed from the account owner:**
+
+| Platform | What | Env |
+| --- | --- | --- |
+| Meta | Business Manager **system user token** with `ads_read`, and the system user assigned to every ad account that is linked to a client | `META_SYSTEM_USER_TOKEN` (optional `META_GRAPH_VERSION`, default `v21.0`) |
+| Taboola | **Backstage API client** (client_credentials) with access to each advertiser account | `TABOOLA_CLIENT_ID`, `TABOOLA_CLIENT_SECRET` |
+
+### GET /ad-accounts/sync-status
+
+**Roles:** owner, ops_manager, finance_admin.
+
+Whether each platform is connected, and for every linked Meta/Taboola account: the last run, the last error, and what the last run found.
+
+```json
+{ "status": "success", "data": {
+  "everyHours": 3,
+  "platforms": { "meta": { "connected": true }, "taboola": { "connected": false } },
+  "libraryInstalled": true,
+  "accounts": [{
+    "linkId": "…", "platform": "facebook-ads", "accountId": "428353095282383", "accountName": "CH Hearing",
+    "clientId": "…", "clientName": "…",
+    "lastRunAt": "2026-09-29T12:00:00.000Z", "lastSuccessAt": "2026-09-29T12:00:00.000Z", "lastError": null,
+    "adsSeen": 14, "created": 3, "updated": 11, "failed": 0
+  }]
+} }
+```
+
+### POST /ad-accounts/:id/sync-now
+
+**Roles:** owner, ops_manager. `:id` is the link id (`linkId` above).
+
+Pulls that one account now. **202** `{ "queued": true }` when queued (repeat clicks don't stack). **200** with the run's result when there is no queue. **404** for an unknown link. **409** when that platform isn't connected yet. **422** for platforms other than Meta/Taboola.
+
 ---
 
 ## Workflows
