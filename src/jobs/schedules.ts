@@ -95,5 +95,14 @@ export async function registerSchedules() {
     data: {},
   });
 
+  // Feedback M3: ECB publishes reference rates ~16:00 CET on working days.
+  // 16:30 UTC catches them; weekends just re-store Friday's (no-op insert).
+  await syncQueue.upsertJobScheduler('fx-rates-daily', {
+    pattern: '30 16 * * *',
+  }, {
+    name: 'fx-rates-daily',
+    data: {},
+  });
+
   logger.info('Scheduled jobs registered');
 }

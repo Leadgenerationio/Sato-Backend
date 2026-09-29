@@ -47,6 +47,8 @@ export interface ClientSummary {
   // zero docs and an unsigned agreement, disagreeing with the detail view.
   agreementSigned: boolean;
   documentsCount: number;
+  /** S14: who added the client. null = created before this was recorded ("Unknown"). */
+  createdBy: { id: string; name: string } | null;
 }
 
 export type ContactType = 'primary' | 'billing' | 'compliance' | 'other';
@@ -149,6 +151,7 @@ function toSummary(
   activeCampaigns: number,
   revenueByCurrency: Record<string, number> | undefined,
   documentsCount: number,
+  creatorNames?: Map<string, string>,
 ): ClientSummary {
   const currency = row.currency ?? 'GBP';
   return {
@@ -168,7 +171,36 @@ function toSummary(
     createdAt: (row.createdAt ?? new Date()).toISOString(),
     agreementSigned: row.agreementSigned ?? false,
     documentsCount,
+    createdBy: row.createdBy
+      ? { id: row.createdBy, name: creatorNames?.get(row.createdBy) ?? 'Removed user' }
+      : null,
   };
+}
+
+/** S14: names of the business's users, for the "Added by" column/filter. */
+async function loadCreatorNames(businessId: string): Promise<Map<string, string>> {
+  const rows = await db.select({ id: users.id, name: users.name, email: users.email })
+    .from(users).where(eq(users.businessId, businessId));
+  return new Map(rows.map((u) => [u.id, u.name || u.email]));
+}
+
+/** S14: options for the "Added by" filter — users who added ≥1 client, plus Unknown. */
+export async function listAddedByOptions(requester: AuthPayload): Promise<Array<{ id: string; name: string; count: number }>> {
+  const businessId = requester.businessId;
+  if (!businessId) return [];
+  const rows = await db
+    .select({ id: clients.createdBy, n: sql<number>`count(*)::int` })
+    .from(clients)
+    .where(eq(clients.businessId, businessId))
+    .groupBy(clients.createdBy);
+  const names = await loadCreatorNames(businessId);
+  const out = rows
+    .filter((r) => r.id)
+    .map((r) => ({ id: r.id as string, name: names.get(r.id as string) ?? 'Removed user', count: r.n }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const unknown = rows.find((r) => !r.id);
+  if (unknown) out.push({ id: 'unknown', name: 'Unknown (added before tracking)', count: unknown.n });
+  return out;
 }
 
 function toDetail(row: ClientRow, activeCampaigns: number, revenueByCurrency: Record<string, number>, contacts: ClientContact[] = []): ClientDetail {
@@ -308,6 +340,8 @@ export interface ListClientsParams {
   currency?: string;
   /** Case-insensitive "contains" match on address_country (free text today). */
   country?: string;
+  /** S14: user id who added the client, or 'unknown' for pre-tracking rows. */
+  addedBy?: string;
   sort?: ClientSortKey;
   dir?: 'asc' | 'desc';
   page?: number;
@@ -394,6 +428,11 @@ export async function listClients(
     const needle = params.country.trim().toLowerCase().replace(/[\\%_]/g, (ch) => `\\${ch}`);
     filters.push(sql`lower(coalesce(${clients.addressCountry}, '')) like ${`%${needle}%`}`);
   }
+  if (params.addedBy) {
+    filters.push(params.addedBy === 'unknown'
+      ? sql`${clients.createdBy} is null`
+      : sql`${clients.createdBy} = ${params.addedBy}`);
+  }
   const whereClause = and(...filters);
   const sortKey: ClientSortKey = params.sort && CLIENT_SORT_KEYS.includes(params.sort) ? params.sort : 'created';
   const dir = params.dir === 'asc' ? sql`asc` : sql`desc`;
@@ -406,7 +445,7 @@ export async function listClients(
   // to this page — at typical sizes the full per-client maps stay in
   // single-digit kB and feed cheap Map.get() lookups for the slice we
   // return.
-  const [rows, countResult, countMap, revenueMap, docsMap] = await Promise.all([
+  const [rows, countResult, countMap, revenueMap, docsMap, creatorNames] = await Promise.all([
     db
       .select()
       .from(clients)
@@ -421,10 +460,11 @@ export async function listClients(
     loadActiveCampaignCounts(businessId),
     loadRevenueByClient(businessId),
     loadDocumentsCountByClient(businessId),
+    loadCreatorNames(businessId),
   ]);
 
   return {
-    items: rows.map((r) => toSummary(r, countMap.get(r.id) ?? 0, revenueMap.get(r.id), docsMap.get(r.id) ?? 0)),
+    items: rows.map((r) => toSummary(r, countMap.get(r.id) ?? 0, revenueMap.get(r.id), docsMap.get(r.id) ?? 0, creatorNames)),
     total: countResult[0]?.n ?? 0,
     page,
     pageSize,
@@ -448,6 +488,7 @@ const CSV_COLUMNS: Array<[string, (c: ClientSummary) => string | number]> = [
   ['Active campaigns', (c) => c.activeCampaigns],
   ['Credit score', (c) => c.creditScore ?? ''],
   ['Agreement signed', (c) => (c.agreementSigned ? 'yes' : 'no')],
+  ['Added by', (c) => c.createdBy?.name ?? 'Unknown'],
   ['Created', (c) => c.createdAt.slice(0, 10)],
 ];
 
@@ -515,6 +556,7 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
     .insert(clients)
     .values({
       businessId,
+      createdBy: requester.userId,
       companyName: data.companyName || '',
       companyNumber: data.companyNumber,
       contactName: effectiveContactName,

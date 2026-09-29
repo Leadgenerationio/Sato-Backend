@@ -90,6 +90,7 @@ export async function getOutstanding(req: Request, res: Response) {
       count: result.count,
       totalOutstanding: result.totalOutstanding,
       totalsByCurrency: result.totalsByCurrency,
+      convertedTotalGbp: result.convertedTotalGbp,
     },
   });
 }

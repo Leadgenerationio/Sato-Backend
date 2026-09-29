@@ -1,5 +1,6 @@
-import { pgTable, uuid, varchar, text, integer, boolean, decimal, timestamp, index, pgEnum } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, varchar, text, integer, boolean, decimal, timestamp, index, pgEnum, type AnyPgColumn } from 'drizzle-orm/pg-core';
 import { businesses } from './businesses.js';
+import { users } from './users.js';
 
 export const clientStatusEnum = pgEnum('client_status', [
   'prospect', 'onboarding', 'active', 'paused', 'churned',
@@ -57,6 +58,8 @@ export const clients = pgTable('clients', {
   // #39 Attio bulk import — Attio record_id of the company this client
   // was imported from. Used to dedupe re-imports.
   attioCompanyId: varchar('attio_company_id', { length: 100 }),
+  // S14 (29 Sep 2026): who added the client. NULL for pre-0050 rows ("Unknown").
+  createdBy: uuid('created_by').references((): AnyPgColumn => users.id, { onDelete: 'set null' }),
   notes: text('notes'),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
