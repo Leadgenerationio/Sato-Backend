@@ -20,6 +20,9 @@ import { syncQueue } from '../jobs/queue.js';
 import { createNotification } from './notification.service.js';
 import { logClientActivity } from './client-activity.service.js';
 import { logger } from '../utils/logger.js';
+import {
+  deriveVatTreatment, vatFlagsFor, isUkCountry, trimOrKeep, type VatTreatment,
+} from '../utils/client-locale.js';
 import type { AuthPayload } from '../types/index.js';
 
 export interface ClientSummary {
@@ -31,7 +34,15 @@ export interface ClientSummary {
   currency: string;
   creditScore: number | null;
   activeCampaigns: number;
+  /**
+   * Paid revenue in the client's OWN currency (`currency`). Invoices raised in
+   * any other currency are NOT folded in — they're in `revenueByCurrency`.
+   * Feedback M3 (29 Sep 2026): the list used to sum every invoice regardless
+   * of currency and the FE printed it with a hard-coded £.
+   */
   totalRevenue: number;
+  /** Paid revenue per invoice currency, e.g. { EUR: 399791, GBP: 1200 }. */
+  revenueByCurrency: Record<string, number>;
   createdAt: string;
   // Reality-check fields for the "Active Client" badge on the list page —
   // matches the same gate the detail-page badge + stage indicator use.
@@ -78,6 +89,8 @@ export interface ClientDetail extends ClientSummary {
   addVatToInvoices: boolean;
   vatNumber: string;
   vatRate: number;
+  // M5/S4 — single source of truth for how this client is invoiced.
+  vatTreatment: VatTreatment;
   leadPrice: number;
   billingWorkflow: string;
   onboardingStatus: string;
@@ -124,12 +137,25 @@ async function loadContactsForClient(clientId: string): Promise<ClientContact[]>
   return rows.map(toContact);
 }
 
+/**
+ * Split a per-currency revenue map into the figure shown for the client (its
+ * own currency only — never a cross-currency sum) plus the full breakdown.
+ */
+export function clientRevenueFigures(
+  byCurrency: Record<string, number> | undefined,
+  clientCurrency: string,
+): { totalRevenue: number; revenueByCurrency: Record<string, number> } {
+  const revenueByCurrency = { ...(byCurrency ?? {}) };
+  return { totalRevenue: revenueByCurrency[clientCurrency] ?? 0, revenueByCurrency };
+}
+
 function toSummary(
   row: ClientRow,
   activeCampaigns: number,
-  totalRevenue: number,
+  revenueByCurrency: Record<string, number> | undefined,
   documentsCount: number,
 ): ClientSummary {
+  const currency = row.currency ?? 'GBP';
   return {
     id: row.id,
     companyName: row.companyName,
@@ -140,19 +166,19 @@ function toSummary(
     // (the new "first state") instead of 'prospect' so the FE label map never
     // sees the deprecated value.
     status: row.status ?? 'onboarding',
-    currency: row.currency ?? 'GBP',
+    currency,
     creditScore: row.creditScore,
     activeCampaigns,
-    totalRevenue,
+    ...clientRevenueFigures(revenueByCurrency, currency),
     createdAt: (row.createdAt ?? new Date()).toISOString(),
     agreementSigned: row.agreementSigned ?? false,
     documentsCount,
   };
 }
 
-function toDetail(row: ClientRow, activeCampaigns: number, totalRevenue: number, contacts: ClientContact[] = []): ClientDetail {
+function toDetail(row: ClientRow, activeCampaigns: number, revenueByCurrency: Record<string, number>, contacts: ClientContact[] = []): ClientDetail {
   return {
-    ...toSummary(row, activeCampaigns, totalRevenue, 0),
+    ...toSummary(row, activeCampaigns, revenueByCurrency, 0),
     contacts,
     clientType: row.clientType ?? 'ppl',
     companyNumber: row.companyNumber ?? '',
@@ -168,6 +194,7 @@ function toDetail(row: ClientRow, activeCampaigns: number, totalRevenue: number,
     addVatToInvoices: row.addVatToInvoices ?? false,
     vatNumber: row.vatNumber ?? '',
     vatRate: Number(row.vatRate ?? 20),
+    vatTreatment: deriveVatTreatment(row.vatTreatment, row.addVatToInvoices, row.vatRegistered),
     leadPrice: Number(row.leadPrice ?? 0),
     billingWorkflow: row.billingWorkflow ?? 'weekly_auto',
     onboardingStatus: row.onboardingStatus ?? 'pending',
@@ -237,28 +264,40 @@ async function loadDocumentsCountByClient(businessId: string): Promise<Map<strin
   return map;
 }
 
-async function loadRevenueByClient(businessId: string): Promise<Map<string, number>> {
+// Paid revenue grouped by (client, invoice currency). Amounts in different
+// currencies are never added together — see clientRevenueFigures().
+async function loadRevenueByClient(businessId: string): Promise<Map<string, Record<string, number>>> {
+  const currencyExpr = sql<string>`coalesce(${invoices.currency}, 'GBP')`;
   const rows = await db
     .select({
       clientId: invoices.clientId,
+      currency: currencyExpr,
       total: sql<string>`coalesce(sum(${invoices.total}), 0)`,
     })
     .from(invoices)
     .innerJoin(clients, eq(clients.id, invoices.clientId))
     .where(and(eq(clients.businessId, businessId), eq(invoices.status, 'paid')))
-    .groupBy(invoices.clientId);
+    .groupBy(invoices.clientId, currencyExpr);
 
-  const map = new Map<string, number>();
-  for (const r of rows) map.set(r.clientId, Number(r.total ?? 0));
+  const map = new Map<string, Record<string, number>>();
+  for (const r of rows) {
+    const byCur = map.get(r.clientId) ?? {};
+    byCur[r.currency] = Number(r.total ?? 0);
+    map.set(r.clientId, byCur);
+  }
   return map;
 }
 
-async function getRevenueForClient(clientId: string): Promise<number> {
-  const [row] = await db
-    .select({ total: sql<string>`coalesce(sum(${invoices.total}), 0)` })
+async function getRevenueForClient(clientId: string): Promise<Record<string, number>> {
+  const currencyExpr = sql<string>`coalesce(${invoices.currency}, 'GBP')`;
+  const rows = await db
+    .select({ currency: currencyExpr, total: sql<string>`coalesce(sum(${invoices.total}), 0)` })
     .from(invoices)
-    .where(and(eq(invoices.clientId, clientId), eq(invoices.status, 'paid')));
-  return Number(row?.total ?? 0);
+    .where(and(eq(invoices.clientId, clientId), eq(invoices.status, 'paid')))
+    .groupBy(currencyExpr);
+  const out: Record<string, number> = {};
+  for (const r of rows) out[r.currency] = Number(r.total ?? 0);
+  return out;
 }
 
 // ─── Service ───
@@ -335,7 +374,7 @@ export async function listClients(
   ]);
 
   return {
-    items: rows.map((r) => toSummary(r, countMap.get(r.id) ?? 0, revenueMap.get(r.id) ?? 0, docsMap.get(r.id) ?? 0)),
+    items: rows.map((r) => toSummary(r, countMap.get(r.id) ?? 0, revenueMap.get(r.id), docsMap.get(r.id) ?? 0)),
     total: countResult[0]?.n ?? 0,
     page,
     pageSize,
@@ -364,6 +403,54 @@ export async function getClient(id: string, requester: AuthPayload): Promise<Cli
   return toDetail(row, count, revenue, contacts);
 }
 
+function trimContact(c: ClientContactInput): ClientContactInput {
+  return {
+    ...c,
+    name: (c.name ?? '').trim(),
+    email: trimOrKeep(c.email),
+    phone: trimOrKeep(c.phone),
+    role: trimOrKeep(c.role),
+  };
+}
+
+/**
+ * Resolve the VAT columns for a write. `vatTreatment` wins when sent and the
+ * legacy booleans are derived from it; a caller that only sends the legacy
+ * booleans (older FE, Attio import) still works and gets a matching
+ * treatment. `existing` is the stored row on update (null on create).
+ */
+function resolveVatWrite(
+  data: { vatTreatment?: VatTreatment; vatRegistered?: boolean; addVatToInvoices?: boolean },
+  existing: ClientRow | null,
+): { vatTreatment: VatTreatment; vatRegistered: boolean; addVatToInvoices: boolean } {
+  if (data.vatTreatment) return { vatTreatment: data.vatTreatment, ...vatFlagsFor(data.vatTreatment) };
+  const legacySent = data.addVatToInvoices !== undefined || data.vatRegistered !== undefined;
+  if (!legacySent && existing) {
+    const vatTreatment = deriveVatTreatment(existing.vatTreatment, existing.addVatToInvoices, existing.vatRegistered);
+    return { vatTreatment, ...vatFlagsFor(vatTreatment) };
+  }
+  // The pre-2026-09-29 FE always sent both booleans with the same value, and
+  // some callers (tests, Attio import) send only vatRegistered — so a lone
+  // vatRegistered also means "add VAT", exactly as it did before.
+  const vatRegistered = data.vatRegistered ?? existing?.vatRegistered ?? false;
+  const addVat = data.addVatToInvoices ?? (data.vatRegistered !== undefined ? data.vatRegistered : existing?.addVatToInvoices ?? false);
+  const vatTreatment = deriveVatTreatment(null, addVat, vatRegistered);
+  return { vatTreatment, ...vatFlagsFor(vatTreatment) };
+}
+
+/** Normalise a stored/incoming value so "20" vs "20.00" or null vs "" don't read as a change. */
+function comparable(v: unknown): string {
+  if (v === null || v === undefined || v === '') return '';
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v)) return String(Number(v));
+  return String(v);
+}
+
+function contactsSignature(list: Array<{ contactType?: string | null; name: string; email?: string | null; phone?: string | null; role?: string | null }>): string {
+  return JSON.stringify(list.map((c) => [c.contactType ?? 'other', c.name ?? '', c.email ?? '', c.phone ?? '', c.role ?? '']));
+}
+
 export interface CreateClientInput extends Omit<Partial<ClientDetail>, 'contacts'> {
   // Allow callers to pass contact rows without ids (creation shape).
   contacts?: ClientContactInput[];
@@ -376,17 +463,21 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
   // Mirror the primary contact into the legacy contact_name/email/phone
   // columns when the caller only sent a `contacts` array. Keeps old code that
   // reads client.contact_name working until those columns can be dropped.
-  const primaryFromArray = data.contacts?.find((c) => c.contactType === 'primary');
-  const effectiveContactName = data.contactName ?? primaryFromArray?.name;
-  const effectiveContactEmail = data.contactEmail ?? primaryFromArray?.email;
-  const effectiveContactPhone = data.contactPhone ?? primaryFromArray?.phone;
+  // N7 (Sam feedback 2026-09-29): contact names were saved with trailing
+  // spaces ("Daniel "). Trim every free-text identity field on the way in.
+  const inputContacts = data.contacts?.map(trimContact);
+  const primaryFromArray = inputContacts?.find((c) => c.contactType === 'primary');
+  const effectiveContactName = trimOrKeep(data.contactName) ?? primaryFromArray?.name;
+  const effectiveContactEmail = trimOrKeep(data.contactEmail) ?? primaryFromArray?.email;
+  const effectiveContactPhone = trimOrKeep(data.contactPhone) ?? primaryFromArray?.phone;
+  const vat = resolveVatWrite(data, null);
 
   const [row] = await db
     .insert(clients)
     .values({
       businessId,
-      companyName: data.companyName || '',
-      companyNumber: data.companyNumber,
+      companyName: data.companyName?.trim() || '',
+      companyNumber: trimOrKeep(data.companyNumber),
       contactName: effectiveContactName,
       contactEmail: effectiveContactEmail,
       contactPhone: effectiveContactPhone,
@@ -398,9 +489,10 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
       addressPostcode: data.addressPostcode,
       currency: data.currency || 'GBP',
       paymentTermsDays: data.paymentTermsDays ?? 30,
-      vatRegistered: data.vatRegistered ?? false,
-      addVatToInvoices: data.addVatToInvoices ?? false,
-      vatNumber: data.vatNumber,
+      vatTreatment: vat.vatTreatment,
+      vatRegistered: vat.vatRegistered,
+      addVatToInvoices: vat.addVatToInvoices,
+      vatNumber: trimOrKeep(data.vatNumber),
       vatRate: data.vatRate != null ? String(data.vatRate) : '20.00',
       leadPrice: data.leadPrice != null ? String(data.leadPrice) : null,
       billingWorkflow: (data.billingWorkflow as ClientRow['billingWorkflow']) ?? 'weekly_auto',
@@ -421,10 +513,10 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
   // use that verbatim. Otherwise, generate a single primary contact from the
   // legacy contactName/Email/Phone fields so the new contacts API is
   // populated even when older frontends call this endpoint.
-  const contactsToInsert = data.contacts && data.contacts.length > 0
-    ? data.contacts
-    : data.contactName
-      ? [{ contactType: 'primary' as const, name: data.contactName, email: data.contactEmail ?? '', phone: data.contactPhone ?? '', role: '' }]
+  const contactsToInsert = inputContacts && inputContacts.length > 0
+    ? inputContacts
+    : effectiveContactName
+      ? [{ contactType: 'primary' as const, name: effectiveContactName, email: effectiveContactEmail ?? '', phone: effectiveContactPhone ?? '', role: '' }]
       : [];
   if (contactsToInsert.length > 0) {
     await db.insert(clientContacts).values(
@@ -443,7 +535,12 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
   // creation so staff don't forget to run it manually. We don't await — the
   // create response should not be blocked on the Endole/Creditsafe call,
   // which can take 2-5s. The detail page will show the score on next refresh.
-  if (row.companyNumber) {
+  //
+  // M5 (Sam feedback 2026-09-29): Endole/Creditsafe only look up UK
+  // companies — a Swiss UID or Polish KRS always failed and raised a
+  // "Credit check failed" notification. Only auto-run for UK (or unset,
+  // the historical default) clients; the manual button still works.
+  if (row.companyNumber && isUkCountry(row.addressCountry)) {
     runCreditCheck(row.id, requester)
       .then((result) => {
         if (result) {
@@ -486,7 +583,7 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
     companyName: row.companyName,
     companyNumber: row.companyNumber,
   });
-  return toDetail(row, 0, 0, contacts);
+  return toDetail(row, 0, {}, contacts);
 }
 
 /**
@@ -562,12 +659,22 @@ export async function updateClient(id: string, data: UpdateClientInput, requeste
   const businessId = requester.businessId;
   if (!businessId) return null;
 
+  // S3 (Sam feedback 2026-09-29): load the stored row first so the activity
+  // log records only fields whose value actually changed (old → new), not
+  // every key the form happened to send.
+  const [existing] = await db
+    .select()
+    .from(clients)
+    .where(and(eq(clients.id, id), eq(clients.businessId, businessId)))
+    .limit(1);
+  if (!existing) return null;
+
   const patch: Partial<ClientRow> = { updatedAt: new Date() };
-  if (data.companyName !== undefined) patch.companyName = data.companyName;
-  if (data.companyNumber !== undefined) patch.companyNumber = data.companyNumber;
-  if (data.contactName !== undefined) patch.contactName = data.contactName;
-  if (data.contactEmail !== undefined) patch.contactEmail = data.contactEmail;
-  if (data.contactPhone !== undefined) patch.contactPhone = data.contactPhone;
+  if (data.companyName !== undefined) patch.companyName = data.companyName.trim();
+  if (data.companyNumber !== undefined) patch.companyNumber = trimOrKeep(data.companyNumber);
+  if (data.contactName !== undefined) patch.contactName = trimOrKeep(data.contactName);
+  if (data.contactEmail !== undefined) patch.contactEmail = trimOrKeep(data.contactEmail);
+  if (data.contactPhone !== undefined) patch.contactPhone = trimOrKeep(data.contactPhone);
   if (data.address !== undefined) patch.address = data.address;
   if (data.addressLine !== undefined) patch.addressLine = data.addressLine;
   if (data.addressTown !== undefined) patch.addressTown = data.addressTown;
@@ -576,9 +683,13 @@ export async function updateClient(id: string, data: UpdateClientInput, requeste
   if (data.addressPostcode !== undefined) patch.addressPostcode = data.addressPostcode;
   if (data.currency !== undefined) patch.currency = data.currency;
   if (data.paymentTermsDays !== undefined) patch.paymentTermsDays = data.paymentTermsDays;
-  if (data.vatRegistered !== undefined) patch.vatRegistered = data.vatRegistered;
-  if (data.addVatToInvoices !== undefined) patch.addVatToInvoices = data.addVatToInvoices;
-  if (data.vatNumber !== undefined) patch.vatNumber = data.vatNumber;
+  if (data.vatTreatment !== undefined || data.vatRegistered !== undefined || data.addVatToInvoices !== undefined) {
+    const vat = resolveVatWrite(data, existing);
+    patch.vatTreatment = vat.vatTreatment;
+    patch.vatRegistered = vat.vatRegistered;
+    patch.addVatToInvoices = vat.addVatToInvoices;
+  }
+  if (data.vatNumber !== undefined) patch.vatNumber = trimOrKeep(data.vatNumber);
   if (data.vatRate !== undefined) patch.vatRate = data.vatRate != null ? String(data.vatRate) : null;
   if (data.leadPrice !== undefined) patch.leadPrice = String(data.leadPrice);
   if (data.clientType !== undefined) patch.clientType = data.clientType as ClientRow['clientType'];
@@ -607,14 +718,21 @@ export async function updateClient(id: string, data: UpdateClientInput, requeste
     .returning();
   if (!row) return null;
 
-  // If caller sent a `contacts` array, replace the entire set. We delete then
-  // insert in a single round trip rather than diffing — simpler, and contact
-  // counts per client are small enough (typically <10) that the cost is fine.
-  if (data.contacts !== undefined) {
+  // If caller sent a `contacts` array that differs from what's stored,
+  // replace the entire set. We delete then insert rather than diffing rows —
+  // contact counts per client are small (typically <10). An identical array
+  // is a no-op so it doesn't show up as "contacts replaced" in the feed.
+  const incomingContacts = data.contacts?.map(trimContact);
+  let contactsChanged = false;
+  if (incomingContacts !== undefined) {
+    const stored = await loadContactsForClient(id);
+    contactsChanged = contactsSignature(stored) !== contactsSignature(incomingContacts);
+  }
+  if (incomingContacts !== undefined && contactsChanged) {
     await db.delete(clientContacts).where(eq(clientContacts.clientId, id));
-    if (data.contacts.length > 0) {
+    if (incomingContacts.length > 0) {
       await db.insert(clientContacts).values(
-        data.contacts.map((c) => ({
+        incomingContacts.map((c) => ({
           clientId: id,
           contactType: (c.contactType ?? 'other') as ClientContactRow['contactType'],
           name: c.name,
@@ -635,17 +753,24 @@ export async function updateClient(id: string, data: UpdateClientInput, requeste
     getRevenueForClient(id),
     loadContactsForClient(id),
   ]);
-  // L #38 — log the update with the diff payload. One event per call —
-  // the payload is the keys-that-changed map so the feed is readable
-  // without exploding into per-field rows.
-  // We compute `changed` from `patch` (which only carries the keys the
-  // caller actually sent). Skip `updatedAt` — it's noise.
-  const { updatedAt: _ignored, ...changedKeys } = patch as Record<string, unknown>;
+  // L #38 — log the update. One event per call. S3 (Sam feedback
+  // 2026-09-29): `changed` used to be every key the caller sent, so a Save
+  // that touched one field logged all 20. Now it's only the keys whose value
+  // differs from the stored row, and `diff` carries old → new for each
+  // ("vatRegistered: false → true"). `changed` keeps its string[] shape so
+  // the existing activity timeline renders unchanged.
+  const { updatedAt: _ignored, ...sentKeys } = patch as Record<string, unknown>;
   void _ignored;
-  if (Object.keys(changedKeys).length > 0 || data.contacts !== undefined) {
+  const diff: Record<string, { from: unknown; to: unknown }> = {};
+  for (const [key, to] of Object.entries(sentKeys)) {
+    const from = (existing as Record<string, unknown>)[key];
+    if (comparable(from) !== comparable(to)) diff[key] = { from: from ?? null, to: to ?? null };
+  }
+  if (Object.keys(diff).length > 0 || contactsChanged) {
     await logClientActivity(id, requester.userId ?? null, 'client_updated', {
-      changed: Object.keys(changedKeys),
-      contactsReplaced: data.contacts !== undefined,
+      changed: Object.keys(diff),
+      diff,
+      contactsReplaced: contactsChanged,
     });
   }
   return toDetail(row, count ?? 0, revenue, contacts);

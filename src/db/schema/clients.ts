@@ -41,6 +41,10 @@ export const clients = pgTable('clients', {
   addVatToInvoices: boolean('add_vat_to_invoices').default(false),
   vatNumber: varchar('vat_number', { length: 50 }),
   vatRate: decimal('vat_rate', { precision: 5, scale: 2 }).default('20.00'),
+  // Migration 0040 (Sam feedback 2026-09-29, M5/S4). One of VAT_TREATMENTS in
+  // utils/client-locale.ts. Nullable: rows written before 0040 are backfilled
+  // on boot; readers go through deriveVatTreatment().
+  vatTreatment: varchar('vat_treatment', { length: 30 }),
   creditScore: integer('credit_score'),
   creditLastChecked: timestamp('credit_last_checked'),
   status: clientStatusEnum('status').default('prospect'),
