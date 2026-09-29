@@ -161,6 +161,10 @@ describe('S14 / N2 / S12 — HTTP', () => {
   it('filters by currency and by country (case-insensitive)', async () => {
     expect(names(await list('currency=eur'))).toEqual(['Charlie']);
     expect(names(await list('country=POLAND'))).toEqual(['Charlie']);
+    expect(names(await list('country=pol'))).toEqual(['Charlie']);
+    expect(names(await list('country=kingdom&sort=company&dir=asc'))).toEqual(['Alpha', 'Bravo']);
+    // A LIKE wildcard typed by the user is literal, not "match everything".
+    expect(names(await list('country=%25'))).toEqual([]);
   });
 
   it('rejects an unknown sort key instead of passing it to SQL', async () => {

@@ -306,7 +306,7 @@ export interface ListClientsParams {
   search?: string;
   /** ISO 4217 code, matched exactly (e.g. 'EUR'). */
   currency?: string;
-  /** Matched case-insensitively against address_country (free text today). */
+  /** Case-insensitive "contains" match on address_country (free text today). */
   country?: string;
   sort?: ClientSortKey;
   dir?: 'asc' | 'desc';
@@ -389,7 +389,10 @@ export async function listClients(
     filters.push(sql`upper(coalesce(${clients.currency}, 'GBP')) = ${params.currency.toUpperCase()}`);
   }
   if (params.country) {
-    filters.push(sql`lower(trim(coalesce(${clients.addressCountry}, ''))) = ${params.country.trim().toLowerCase()}`);
+    // Contains, case-insensitive: country is free text today, so "pol"
+    // should find "Poland". LIKE wildcards in the input are escaped.
+    const needle = params.country.trim().toLowerCase().replace(/[\\%_]/g, (ch) => `\\${ch}`);
+    filters.push(sql`lower(coalesce(${clients.addressCountry}, '')) like ${`%${needle}%`}`);
   }
   const whereClause = and(...filters);
   const sortKey: ClientSortKey = params.sort && CLIENT_SORT_KEYS.includes(params.sort) ? params.sort : 'created';
