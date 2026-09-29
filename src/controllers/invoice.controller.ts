@@ -107,11 +107,15 @@ export const createInvoiceSchema = z.object({
       )
       .min(1),
     addVat: z.boolean(),
+    // M7 — due date defaults to today + the client's payment terms.
+    dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'dueDate must be YYYY-MM-DD').optional(),
+    // M7 — required to invoice in a currency other than the client's.
+    confirmCurrencyMismatch: z.boolean().optional(),
   }),
 });
 
 export async function createInvoice(req: Request, res: Response) {
-  const { clientId, currency, lineItems, addVat } = req.body;
+  const { clientId, currency, lineItems, addVat, dueDate, confirmCurrencyMismatch } = req.body;
   // Compute amount per line on the server to avoid trusting client-side math.
   const itemsWithAmount = (lineItems as Array<{ description: string; quantity: number; unitPrice: number }>).map(
     (li) => ({
@@ -120,7 +124,7 @@ export async function createInvoice(req: Request, res: Response) {
     }),
   );
   const invoice = await invoiceService.createInvoice(
-    { clientId, currency, lineItems: itemsWithAmount, addVat },
+    { clientId, currency, lineItems: itemsWithAmount, addVat, dueDate, confirmCurrencyMismatch },
     req.user!,
   );
   res.status(201).json({ status: 'success', data: { invoice } });
