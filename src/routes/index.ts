@@ -16,6 +16,7 @@ import { sopRoutes } from './sop.routes.js';
 import { agreementRoutes } from './agreement.routes.js';
 import { leadbyteRoutes } from './leadbyte.routes.js';
 import { adSpendRoutes } from './ad-spend.routes.js';
+import { adAccountRoutes, clientLookupRoutes } from './ad-account.routes.js';
 import { uploadRoutes } from './upload.routes.js';
 import { creativeRoutes } from './creative.routes.js';
 import { bankFeedRoutes } from './bank-feed.routes.js';
@@ -38,6 +39,8 @@ router.use('/permissions', permissionRoutes);
 router.use('/integrations', integrationRoutes);
 router.use('/campaigns', campaignRoutes);
 router.use('/invoices', invoiceRoutes);
+// Before clientRoutes: its GET /:id would otherwise swallow /clients/lookup.
+router.use('/clients', clientLookupRoutes);
 router.use('/clients', clientRoutes);
 router.use('/portal', portalRoutes);
 router.use('/workflows', workflowRoutes);
@@ -49,6 +52,7 @@ router.use('/sops', sopRoutes);
 router.use('/', agreementRoutes);
 router.use('/leadbyte', leadbyteRoutes);
 router.use('/ad-spend', adSpendRoutes);
+router.use('/ad-accounts', adAccountRoutes);
 router.use('/uploads', uploadRoutes);
 // SOS is open to clients too — mount BEFORE creativeRoutes (which has a
 // router-level requireRole('owner','ops_manager') that would otherwise
