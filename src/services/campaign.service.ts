@@ -358,7 +358,11 @@ export interface CampaignDetail extends CampaignSummary {
     validLeads: number;
     invalidLeads: number;
     revenue: number;
+    /** Pro-rated LeadByte cost + that day's Catchr ad spend (Sam S11 — the
+     *  Revenue vs Cost chart showed ~£0 cost for direct-traffic campaigns). */
     cost: number;
+    /** That day's Catchr ad spend for the campaign's linked accounts. */
+    adSpend: number;
   }[];
   /** Per-window aggregate totals computed from /reports/campaign (which has
    * accurate revenue + cost), so the FE can render the per-tab figures
@@ -846,13 +850,16 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
           totalRevenue,
           totalPayout,
         });
+        const day = String(d.date).slice(0, 10);
+        const adSpend = sumSpend(dailySpend, { start: day, end: day });
         return {
           date: d.date,
           leadCount: d.leadCount,
           validLeads: d.validLeads,
           invalidLeads: d.invalidLeads,
           revenue,
-          cost,
+          cost: Math.round((cost + adSpend) * 100) / 100,
+          adSpend,
         };
       });
     })(),
