@@ -693,7 +693,7 @@ Which client (and optionally which campaign) owns each ad account. Accounts are 
 
 **Roles:** owner, ops_manager, finance_admin. **Query:** `days` (1–365, default 30).
 
-Every known ad account, plus the client and campaign options for the linking screen (campaigns by Sato UUID). Known accounts: accounts with Catchr spend in the window, accounts referenced by a campaign's Ad Account Links, and accounts already linked. Spend is deduplicated across Catchr authorization ids. Unlinked accounts come first, largest spend first.
+Every known ad account, plus the client and campaign options for the linking screen (campaigns by Sato UUID). Known accounts: accounts with Catchr spend in the window, accounts referenced by a campaign's Ad Account Links, and accounts already linked. Spend is deduplicated across Catchr authorization ids. Unlinked accounts come first, largest spend first. `totalSpend`/`unlinkedSpend` add across currencies; display `unlinkedSpendByCurrency` instead.
 
 ```json
 {
@@ -713,7 +713,7 @@ Every known ad account, plus the client and campaign options for the linking scr
       "clients": [{ "id": "…", "companyName": "…", "status": "active", "currency": "EUR" }],
       "campaigns": [{ "id": "…", "name": "Hearing Aids (CH)", "status": "active" }]
     },
-    "summary": { "total": 40, "linked": 3, "unlinked": 37, "totalSpend": 612000.1, "unlinkedSpend": 586065.73 }
+    "summary": { "total": 40, "linked": 3, "unlinked": 37, "totalSpend": 612000.1, "unlinkedSpend": 586065.73, "unlinkedSpendByCurrency": { "GBP": 540000.0, "EUR": 46065.73 } }
   }
 }
 ```

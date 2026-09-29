@@ -61,8 +61,12 @@ export interface AdAccountList {
     total: number;
     linked: number;
     unlinked: number;
+    /** Sums across currencies — prefer the ByCurrency fields for display. */
     totalSpend: number;
     unlinkedSpend: number;
+    /** Unlinked spend per account currency ('GBP' when Catchr sent none),
+     *  so £ and € are never added together (Sam M3). */
+    unlinkedSpendByCurrency: Record<string, number>;
   };
 }
 
@@ -220,6 +224,13 @@ export async function listAdAccounts(requester: AuthPayload, windowDays = 30): P
       unlinked: unlinked.length,
       totalSpend: round2(accounts.reduce((s, a) => s + a.spend, 0)),
       unlinkedSpend: round2(unlinked.reduce((s, a) => s + a.spend, 0)),
+      unlinkedSpendByCurrency: unlinked.reduce<Record<string, number>>((acc, a) => {
+        if (a.spend > 0) {
+          const cur = a.currency ?? 'GBP';
+          acc[cur] = round2((acc[cur] ?? 0) + a.spend);
+        }
+        return acc;
+      }, {}),
     },
   };
 }
