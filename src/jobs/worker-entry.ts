@@ -26,6 +26,7 @@ import { runAutoInvoiceAllBusinesses } from '../services/auto-invoice.service.js
 import { refreshWorkflowAggregates, isAutomationPaused } from '../services/workflow.service.js';
 import { WORKFLOW_HANDLERS, isRegisteredHandler } from './workflow-handlers.js';
 import type { AuthPayload } from '../types/index.js';
+import { generateThumbnail } from '../services/creative-thumbnail.service.js';
 
 const connection = redis ?? undefined;
 
@@ -94,6 +95,12 @@ new Worker('email', async (job) => {
 }, { connection });
 
 // Invoice worker — dispatches on job.name
+// Creative library thumbnails (migration 0045).
+new Worker('media', async (job) => {
+  if (job.name !== 'thumbnail') return { skipped: true };
+  return generateThumbnail(String((job.data as { creativeId: string }).creativeId));
+}, { connection, concurrency: 2 });
+
 new Worker('invoice', async (job) => {
   logger.info({ jobId: job.id, name: job.name }, 'Processing invoice job');
 

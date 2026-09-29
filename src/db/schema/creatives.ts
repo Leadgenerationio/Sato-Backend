@@ -1,4 +1,6 @@
-import { pgTable, uuid, varchar, integer, timestamp, boolean, index, pgEnum } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, varchar, integer, timestamp, boolean, index, pgEnum, text, decimal, char } from 'drizzle-orm/pg-core';
+import { clients } from './clients.js';
+import { landingPages } from './landing-pages.js';
 import { campaigns } from './campaigns.js';
 import { users } from './users.js';
 
@@ -24,7 +26,9 @@ export type CreativeStatus =
 
 export const creatives = pgTable('creatives', {
   id: uuid('id').primaryKey().defaultRandom(),
-  campaignId: uuid('campaign_id').references(() => campaigns.id).notNull(),
+  // Nullable since migration 0045 (creative library): a creative synced from
+  // Meta/Taboola may belong to a client with no campaign yet.
+  campaignId: uuid('campaign_id').references(() => campaigns.id),
   name: varchar('name', { length: 255 }).notNull(),
   fileUrl: varchar('file_url', { length: 500 }).notNull(),
   type: varchar('type', { length: 50 }),
@@ -43,9 +47,31 @@ export const creatives = pgTable('creatives', {
   // Migration 0031 (T2): submit-for-approval gate.
   status: creativeStatusEnum('status').notNull().default('draft'),
   submittedAt: timestamp('submitted_at', { withTimezone: true }),
+  // Migration 0045 (creative library — docs/creative-library-and-api-plan.md).
+  // client_id NULL = shared on its campaign: shows under every buyer.
+  clientId: uuid('client_id').references(() => clients.id, { onDelete: 'set null' }),
+  // 'meta' | 'taboola' | 'google' | 'tiktok' | 'manual'
+  platform: varchar('platform', { length: 20 }),
+  platformAccountId: varchar('platform_account_id', { length: 100 }),
+  platformAdId: varchar('platform_ad_id', { length: 100 }),
+  platformCreativeId: varchar('platform_creative_id', { length: 100 }),
+  platformCampaignId: varchar('platform_campaign_id', { length: 100 }),
+  platformCampaignName: varchar('platform_campaign_name', { length: 255 }),
+  landingPageId: uuid('landing_page_id').references(() => landingPages.id, { onDelete: 'set null' }),
+  headline: text('headline'),
+  bodyText: text('body_text'),
+  width: integer('width'),
+  height: integer('height'),
+  durationS: decimal('duration_s', { precision: 8, scale: 2 }),
+  sha256: char('sha256', { length: 64 }),
+  thumbnailKey: varchar('thumbnail_key', { length: 500 }),
+  firstSeen: timestamp('first_seen', { withTimezone: true }),
+  lastSeen: timestamp('last_seen', { withTimezone: true }),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 }, (table) => [
+  index('creatives_client_idx').on(table.clientId),
+  index('creatives_sha256_idx').on(table.sha256),
   index('creatives_campaign_idx').on(table.campaignId),
   index('creatives_is_deleted_idx').on(table.isDeleted),
   index('creatives_section_idx').on(table.section),
