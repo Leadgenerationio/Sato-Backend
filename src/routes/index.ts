@@ -27,6 +27,7 @@ import { autoInvoiceRoutes } from './auto-invoice.routes.js';
 import { healthRoutes } from './health.routes.js';
 import { agreementTemplateRoutes } from './agreement-template.routes.js';
 import { webhookRoutes } from './webhook.routes.js';
+import { adminCleanupRoutes } from './admin-cleanup.routes.js';
 import { webhookEndpointRoutes } from './webhook-endpoint.routes.js';
 import { apiKeyRoutes } from './api-key.routes.js';
 import { buildOpenApi, docsHtml } from '../docs/openapi.js';
@@ -61,6 +62,7 @@ for (const section of SECTIONS) {
 }
 
 router.use('/users', userRoutes);
+router.use('/admin/cleanup', adminCleanupRoutes);
 router.use('/permissions', permissionRoutes);
 router.use('/integrations', integrationRoutes);
 router.use('/campaigns', campaignRoutes);

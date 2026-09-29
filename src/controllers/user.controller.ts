@@ -84,6 +84,12 @@ export async function deleteUser(req: Request, res: Response) {
 
 // Sam (2026-06-10): admin resets a password for any client/staff user
 // from User Management. Does not require the user's current password.
+// S8: time-limited access. Body { accessExpiresAt: ISO string | null }.
+export async function updateAccessExpiry(req: Request, res: Response) {
+  const user = await userService.setAccessExpiry(req.params.id as string, req.body.accessExpiresAt, req.user!);
+  res.json({ status: 'success', data: { user } });
+}
+
 export async function resetPassword(req: Request, res: Response) {
   const id = req.params.id as string;
   const { newPassword } = req.body;

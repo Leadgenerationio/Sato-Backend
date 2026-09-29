@@ -27,6 +27,8 @@ export const sops = pgTable('sops', {
   screenshots: jsonb('screenshots').$type<SopScreenshot[]>().notNull().default(sql`'[]'::jsonb`),
   /** Multi-tag categorisation (e.g. "Software", "Creative", "Solar"). */
   tags: text('tags').array().notNull().default(sql`ARRAY[]::text[]`),
+  // N6 (migration 0049): soft-archived from Settings → Clean up.
+  archivedAt: timestamp('archived_at', { withTimezone: true }),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 }, (table) => [

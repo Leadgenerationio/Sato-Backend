@@ -18,6 +18,8 @@ export const sosHelpRequests = pgTable('sos_help_requests', {
   // Resolved by Sam (or another owner) once they've followed up.
   resolvedAt: timestamp('resolved_at'),
   resolvedBy: uuid('resolved_by').references(() => users.id, { onDelete: 'set null' }),
+  // N6 (migration 0049): soft-archived from Settings → Clean up.
+  archivedAt: timestamp('archived_at', { withTimezone: true }),
   createdAt: timestamp('created_at').defaultNow(),
 }, (table) => [
   index('sos_help_user_idx').on(table.userId),
