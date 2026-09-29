@@ -79,6 +79,8 @@ describe('GET /api/v1/ad-accounts', () => {
   it('lists every known account once — spend deduped, traffic-source-only accounts included — unlinked first', async () => {
     const res = await request(app).get('/api/v1/ad-accounts').set('Authorization', `Bearer ${ownerToken}`);
     expect(res.status).toBe(200);
+    // Re-read right after a save must reach the server, not the browser cache.
+    expect(res.headers['cache-control']).toBe('no-store');
     const rows = mine(res.body.data.accounts);
     expect(rows).toHaveLength(3);
     const byId = Object.fromEntries(rows.map((r: { accountId: string }) => [r.accountId, r]));
