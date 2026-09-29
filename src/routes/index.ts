@@ -25,6 +25,7 @@ import { autoInvoiceRoutes } from './auto-invoice.routes.js';
 import { healthRoutes } from './health.routes.js';
 import { agreementTemplateRoutes } from './agreement-template.routes.js';
 import { webhookRoutes } from './webhook.routes.js';
+import { settingsRoutes } from './settings.routes.js';
 export const router: RouterType = Router();
 
 // Public — must be before any auth middleware on individual routers.
@@ -36,6 +37,7 @@ router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
 router.use('/permissions', permissionRoutes);
 router.use('/integrations', integrationRoutes);
+router.use('/settings', settingsRoutes);
 router.use('/campaigns', campaignRoutes);
 router.use('/invoices', invoiceRoutes);
 router.use('/clients', clientRoutes);

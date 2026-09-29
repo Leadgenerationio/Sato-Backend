@@ -14,6 +14,7 @@ import { logger } from '../utils/logger.js';
 import { AppError } from '../utils/errors.js';
 import { deriveVatTreatment, treatmentChargesVat, type VatTreatment } from '../utils/client-locale.js';
 import type { AuthPayload } from '../types/index.js';
+import { getXeroTaxTypes, xeroTaxTypeFor } from './business-settings.service.js';
 
 export interface LineItem {
   description: string;
@@ -773,20 +774,6 @@ export async function createInvoice(
 }
 
 /**
- * Xero tax code per line. Driven by what the invoice actually charges, not
- * by client.vatRegistered: previously a no-VAT invoice for a VAT-registered
- * client was pushed as OUTPUT2 and Xero added 20% the Stato invoice didn't
- * have. ZERORATEDOUTPUT and NONE are Xero UK system tax types. Reverse
- * charge goes as NONE for now — confirm the org's reverse-charge code with
- * the accountant before switching it.
- */
-function xeroTaxType(invoice: Pick<InvoiceDetail, 'vatAmount' | 'vatTreatment'>): string {
-  if (Number(invoice.vatAmount ?? 0) > 0) return 'OUTPUT2';
-  if (invoice.vatTreatment === 'uk_zero_rated') return 'ZERORATEDOUTPUT';
-  return 'NONE';
-}
-
-/**
  * Push a Stato invoice to Xero as a draft. Requires:
  *   - invoice to exist in DB + belong to requester's business
  *   - invoice to have line items
@@ -805,6 +792,9 @@ export async function pushInvoiceToXero(invoiceId: string, requester: AuthPayloa
   }
 
   const { accessToken, tenantId } = await getValidToken();
+  // S4: tax code per VAT treatment comes from the Owner's Xero settings.
+  const taxTypes = await getXeroTaxTypes(requester.businessId);
+  const taxType = xeroTaxTypeFor(invoice, taxTypes);
 
   const due = new Date(invoice.dueDate);
   const body = {
@@ -819,7 +809,7 @@ export async function pushInvoiceToXero(invoiceId: string, requester: AuthPayloa
           Description: li.description,
           Quantity: li.quantity,
           UnitAmount: li.unitPrice,
-          TaxType: xeroTaxType(invoice),
+          TaxType: taxType,
         })),
         Reference: invoice.invoiceNumber,
         Status: 'DRAFT',
