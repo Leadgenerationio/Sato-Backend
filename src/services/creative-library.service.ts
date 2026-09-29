@@ -11,7 +11,7 @@ import { logger } from '../utils/logger.js';
 import { canonicalizePlatform } from '../utils/catchr-platform.js';
 import { normaliseLandingUrl } from '../utils/landing-url.js';
 import { fetchRemoteMedia, mediaTypeOf, MAX_MEDIA_BYTES, type RemoteMediaDeps } from '../utils/remote-media.js';
-import { uploadFile, getSignedDownloadUrl, hashObject, isR2Configured, ObjectTooLargeError } from '../integrations/r2/r2-client.js';
+import { uploadFile, getSignedDownloadUrl, hashObject, isR2Configured, ObjectTooLargeError, deleteFile } from '../integrations/r2/r2-client.js';
 import { resolveR2Location } from './creative.service.js';
 import { domainEvents } from './events.js';
 import { mediaQueue } from '../jobs/queue.js';
@@ -525,14 +525,20 @@ export async function upsertPlatformCreative(
             .where(and(eq(creatives.sha256, stored.sha256), eq(creatives.clientId, clientId), eq(creatives.isDeleted, false)));
           // Identical bytes are already on file: keep that file, don't swap in
           // the duplicate upload (which would orphan the old object).
-          if (existing?.r2Key) r2Key = existing.r2Key;
+          if (existing?.r2Key && existing.r2Key !== r2Key) {
+            // The duplicate object was just uploaded and nothing references it: remove it.
+            if (holders.length === 0) {
+              deleteFile('creatives', r2Key).catch((err: unknown) => logger.warn({ err, r2Key }, 'Could not delete duplicate creative upload'));
+            }
+            r2Key = existing.r2Key;
+          }
         }
       } else if (isR2Configured()) {
         throw new AppError(422, 'That file was not found in storage. Upload it with POST /uploads/presign first.');
       } else if (!existing && sha256 && clientId) {
         // Mock storage (dev/test) can't be read back: fall back to the hint.
         [existing] = await db.select().from(creatives)
-          .where(and(eq(creatives.sha256, sha256), eq(creatives.clientId, clientId), eq(creatives.isDeleted, false)));
+          .where(and(eq(creatives.sha256, sha256.toLowerCase()), eq(creatives.clientId, clientId), eq(creatives.isDeleted, false)));
       }
     }
     fileUrl = r2Ref(r2Key);

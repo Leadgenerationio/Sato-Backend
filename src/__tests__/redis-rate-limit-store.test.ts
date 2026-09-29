@@ -9,13 +9,13 @@ function fakeRedis() {
   const live = (k: string) => { const e = data.get(k); if (e && e.exp !== -1 && e.exp <= Date.now()) { data.delete(k); return undefined; } return e; };
   const ttl = (k: string) => { const e = live(k); return !e ? -2 : e.exp === -1 ? -1 : e.exp - Date.now(); };
   const client = {
-    eval: async (_script: string, _n: number, k: string, windowMs: string) => {
+    eval: async (script: string, _n: number, k: string, windowMs: string) => {
+      if (script.includes('DECR')) { const e = live(k); if (e) e.v -= 1; return e ? e.v : 0; }
       const e = live(k) ?? { v: 0, exp: -1 };
       e.v += 1; data.set(k, e);
       if (e.v === 1 || e.exp === -1) e.exp = Date.now() + Number(windowMs);
       return [e.v, ttl(k)];
     },
-    decr: async (k: string) => { const e = live(k); if (e) e.v -= 1; },
     del: async (k: string) => { data.delete(k); },
     get: async (k: string) => { const e = live(k); return e ? String(e.v) : null; },
     pttl: async (k: string) => ttl(k),
@@ -50,6 +50,13 @@ describe('RedisRateLimitStore', () => {
     a.init({ windowMs: 60_000 } as never); b.init({ windowMs: 60_000 } as never);
     await a.increment('k'); await b.increment('k');
     expect((await a.increment('k')).totalHits).toBe(3);
+  });
+
+  it('does not create a counter when decrementing an expired key', async () => {
+    const client = fakeRedis();
+    const store = new RedisRateLimitStore(client);
+    await store.decrement('gone');
+    expect(client._data.has('rl:gone')).toBe(false);
   });
 
   it('decrement and resetKey', async () => {

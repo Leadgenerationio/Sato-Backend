@@ -9,10 +9,12 @@ import { creatives } from '../db/schema/creatives.js';
 const SERVER_HASH = 'a'.repeat(64);
 const hashObject = vi.fn();
 const isR2Configured = vi.fn(() => true);
+const deleteFile = vi.fn(async () => {});
 vi.mock('../integrations/r2/r2-client.js', async (orig) => ({
   ...(await orig<typeof import('../integrations/r2/r2-client.js')>()),
   hashObject: (...a: unknown[]) => hashObject(...a),
   isR2Configured: () => isR2Configured(),
+  deleteFile: (...a: unknown[]) => deleteFile(...a),
 }));
 
 import { ObjectTooLargeError } from '../integrations/r2/r2-client.js';
@@ -39,6 +41,7 @@ describe('r2Key uploads are hashed by the server', () => {
 
   beforeEach(() => {
     hashObject.mockReset();
+    deleteFile.mockClear();
     hashObject.mockResolvedValue({ sha256: SERVER_HASH, sizeBytes: 1234, contentType: 'image/png' });
     isR2Configured.mockReturnValue(true);
   });
@@ -73,6 +76,7 @@ describe('r2Key uploads are hashed by the server', () => {
     const dup = await upsertPlatformCreative({ ...base(), sha256: SERVER_HASH });
     expect(dup.creative.id).toBe(first.creative.id);
     expect(dup.creative.r2Key).toBe(first.creative.r2Key);
+    expect(deleteFile).toHaveBeenCalledTimes(1); // the duplicate object is cleaned up, not orphaned
   });
 
   it('maps an oversize object to 413 and any other storage failure to 502', async () => {

@@ -13,6 +13,12 @@ end
 return {c, t}
 `;
 
+// Decrement only a live counter: a bare DECR on an expired key would create -1 with no TTL.
+const DECR_SCRIPT = `
+if redis.call('EXISTS', KEYS[1]) == 1 then return redis.call('DECR', KEYS[1]) end
+return 0
+`;
+
 /** Redis has this long to answer; past it the request is let through (see passOnStoreError). */
 const REDIS_TIMEOUT_MS = 1000;
 
@@ -51,7 +57,7 @@ export class RedisRateLimitStore implements Store {
   }
 
   async decrement(key: string): Promise<void> {
-    await withTimeout(this.client.decr(this.prefix + key));
+    await withTimeout(this.client.eval(DECR_SCRIPT, 1, this.prefix + key));
   }
 
   async resetKey(key: string): Promise<void> {
