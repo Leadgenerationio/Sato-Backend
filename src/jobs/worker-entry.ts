@@ -1,4 +1,5 @@
 import { Worker } from 'bullmq';
+import { refreshFxRates } from '../services/fx.service.js';
 import { eq } from 'drizzle-orm';
 import { redis } from '../config/redis.js';
 import { logger } from '../utils/logger.js';
@@ -361,6 +362,10 @@ new Worker('sync', async (job) => {
       // so the Overdue/Owed dashboard widget stays current without per-client
       // manual triggers. Runs at :15 (bank-feed at :10, Catchr at :05).
       return syncAllClientsAcrossBusinesses();
+    }
+    case 'fx-rates-daily': {
+      // Feedback M3 — daily ECB reference rates for "converted to £" totals.
+      return refreshFxRates();
     }
     case 'platform-creative-sync': {
       // Plan phase 3 — every PLATFORM_SYNC_EVERY_HOURS (default 3). Pulls ads

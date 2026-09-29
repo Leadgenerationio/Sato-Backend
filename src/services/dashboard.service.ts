@@ -1,4 +1,5 @@
 import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
+import { convertTotalsToGbp, type ConvertedTotal } from './fx.service.js';
 import { db } from '../config/database.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { campaigns } from '../db/schema/campaigns.js';
@@ -279,6 +280,12 @@ export interface DashboardStats {
   revenueCurrency: string;
   otherCurrencyRevenue: CurrencyTotal[];
   /**
+   * Feedback M3: window revenue with the other currencies converted to GBP at
+   * the latest ECB rate (rates + date included). null when there's nothing
+   * to convert or a rate is unknown. `totalRevenue` itself stays GBP-only.
+   */
+  convertedRevenueGbp: ConvertedTotal | null;
+  /**
    * What Net Profit / Margin are made of, so the tile can say so. They are a
    * DIFFERENT window + cost basis from the P&L card (last 30 days, bank +
    * Catchr), which is why the two figures legitimately differ.
@@ -451,6 +458,10 @@ export async function getDashboardStats(
     leadsChange,
     revenueCurrency: BASE_CURRENCY,
     otherCurrencyRevenue: revenueSplit.others,
+    convertedRevenueGbp: await convertTotalsToGbp([
+      { currency: BASE_CURRENCY, total: revenue },
+      ...revenueSplit.others,
+    ]),
     profitBasis: { revenueDays: 365, costDays: 90, costSource: 'catchr_ad_spend' },
     asOf: now.toISOString(),
   };
