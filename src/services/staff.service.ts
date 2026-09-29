@@ -1,4 +1,4 @@
-import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql, type SQL } from 'drizzle-orm';
 import type { PgColumn } from 'drizzle-orm/pg-core';
 import { db } from '../config/database.js';
 import { staff, jobPostings, applicants, holidayRequests } from '../db/schema/staff.js';
@@ -158,7 +158,8 @@ export async function removeStaffDocument(staffId: string, key: string): Promise
 }
 
 export async function listStaff(requester?: AuthPayload): Promise<StaffMember[]> {
-  const where = withBusinessFilter(requester, staff.businessId);
+  // N6: archived from Settings → Clean up — hidden, never deleted.
+  const where = and(withBusinessFilter(requester, staff.businessId), isNull(staff.archivedAt));
   const rows = await db.select().from(staff).where(where).orderBy(staff.name);
   return rows.map(staffToDto);
 }

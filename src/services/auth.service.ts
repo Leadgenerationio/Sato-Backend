@@ -8,6 +8,7 @@ import { UnauthorizedError, ValidationError, NotFoundError } from '../utils/erro
 import { logger } from '../utils/logger.js';
 import type { AuthPayload, AuthTokens, UserResponse, UserRole } from '../types/index.js';
 import { normalizePassword } from '../utils/password.js';
+import { assertAccessNotExpired } from '../utils/access-expiry.js';
 
 const SALT_ROUNDS = 12;
 const ACCESS_TOKEN_EXPIRY = '15m';
@@ -26,7 +27,33 @@ type UserRow = {
   isActive: boolean;
   isPrimaryOwner: boolean;
   allowedTabs: string[] | null;
+  accessExpiresAt: Date | null;
 };
+
+function payloadFor(user: UserRow): AuthPayload {
+  return {
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+    businessId: user.businessId ?? undefined,
+    clientId: user.clientId ?? undefined,
+    ...(user.accessExpiresAt ? { accessExpiresAt: new Date(user.accessExpiresAt).toISOString() } : {}),
+  };
+}
+
+/**
+ * Refresh re-reads the user: a deactivated, expired or deleted login can no
+ * longer mint new access tokens (before, refresh re-signed the old payload for
+ * up to 7 days). Role / client changes also take effect on the next refresh.
+ */
+export async function refreshTokens(refreshToken: string): Promise<AuthTokens> {
+  const payload = verifyRefreshToken(refreshToken);
+  const user = await findById(payload.userId);
+  if (!user) throw new UnauthorizedError('Invalid refresh token');
+  if (!user.isActive) throw new UnauthorizedError('Account is disabled');
+  assertAccessNotExpired(user.accessExpiresAt);
+  return generateTokens(payloadFor(user));
+}
 
 export function generateTokens(payload: AuthPayload): AuthTokens {
   const accessToken = jwt.sign(payload, env.JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });
@@ -126,14 +153,9 @@ export async function loginUser(
   if (!user.isActive) {
     throw new UnauthorizedError('Account is disabled');
   }
+  assertAccessNotExpired(user.accessExpiresAt);
 
-  const tokenPayload: AuthPayload = {
-    userId: user.id,
-    email: user.email,
-    role: user.role,
-    businessId: user.businessId ?? undefined,
-    clientId: user.clientId ?? undefined,
-  };
+  const tokenPayload = payloadFor(user);
 
   const tokens = generateTokens(tokenPayload);
 

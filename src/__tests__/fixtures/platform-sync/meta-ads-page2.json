@@ -1,0 +1,51 @@
+{
+  "data": [
+    {
+      "id": "120210000000000003",
+      "name": "CH Hearing — Dynamic creative",
+      "effective_status": "ACTIVE",
+      "updated_time": "2026-09-28T12:00:00+0000",
+      "adset": { "id": "120210000000000101", "name": "CH DCO" },
+      "campaign": { "id": "120210000000000900", "name": "Hearing Aids CH — Leads" },
+      "creative": {
+        "id": "120210000000005003",
+        "name": "DCO set",
+        "asset_feed_spec": {
+          "images": [
+            { "hash": "1111aaaa2222bbbb3333cccc4444dddd" },
+            { "hash": "5555eeee6666ffff7777000088889999" }
+          ],
+          "videos": [ { "video_id": "880000000000002", "thumbnail_url": "https://scontent.xx.fbcdn.net/v/dco-video-thumb.jpg?oe=66FF0000" } ],
+          "titles": [ { "text": "Hörgeräte im Test" }, { "text": "Gratis testen" } ],
+          "bodies": [ { "text": "Unabhängige Beratung in Zürich." } ],
+          "link_urls": [ { "website_url": "https://hoertest.example.ch/vergleich", "display_url": "hoertest.example.ch" } ]
+        }
+      }
+    },
+    {
+      "id": "120210000000000004",
+      "name": "CH Hearing — Carousel",
+      "effective_status": "ACTIVE",
+      "updated_time": "2026-09-26T09:30:00+0000",
+      "adset": { "id": "120210000000000100", "name": "CH 55+ Broad" },
+      "campaign": { "id": "120210000000000901", "name": "Hearing Aids CH — Retargeting" },
+      "creative": {
+        "id": "120210000000005004",
+        "name": "Carousel 3 cards",
+        "object_story_spec": {
+          "page_id": "104000000000001",
+          "link_data": {
+            "link": "https://hoertest.example.ch/",
+            "message": "Drei Modelle im Vergleich",
+            "child_attachments": [
+              { "link": "https://hoertest.example.ch/modell-a", "name": "Modell A", "description": "Unsichtbar im Ohr", "image_hash": "aaaa0000bbbb1111cccc2222dddd3333" },
+              { "link": "https://hoertest.example.ch/modell-b", "name": "Modell B", "picture": "https://scontent.xx.fbcdn.net/v/card-b.jpg?oe=66FF0000" },
+              { "link": "https://hoertest.example.ch/modell-c", "name": "Modell C", "video_id": "880000000000003", "picture": "https://scontent.xx.fbcdn.net/v/card-c-poster.jpg?oe=66FF0000" }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "paging": { "cursors": { "before": "QVFIUmNj", "after": "QVFIUmRk" } }
+}

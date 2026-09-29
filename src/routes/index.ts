@@ -27,6 +27,8 @@ import { autoInvoiceRoutes } from './auto-invoice.routes.js';
 import { healthRoutes } from './health.routes.js';
 import { agreementTemplateRoutes } from './agreement-template.routes.js';
 import { webhookRoutes } from './webhook.routes.js';
+import { adminCleanupRoutes } from './admin-cleanup.routes.js';
+import { webhookEndpointRoutes } from './webhook-endpoint.routes.js';
 import { apiKeyRoutes } from './api-key.routes.js';
 import { buildOpenApi, docsHtml } from '../docs/openapi.js';
 import { requireSection } from '../middleware/section.middleware.js';
@@ -60,6 +62,7 @@ for (const section of SECTIONS) {
 }
 
 router.use('/users', userRoutes);
+router.use('/admin/cleanup', adminCleanupRoutes);
 router.use('/permissions', permissionRoutes);
 router.use('/integrations', integrationRoutes);
 router.use('/campaigns', campaignRoutes);
@@ -78,6 +81,8 @@ router.use('/', agreementRoutes);
 router.use('/leadbyte', leadbyteRoutes);
 router.use('/ad-spend', adSpendRoutes);
 router.use('/ad-accounts', adAccountRoutes);
+// Outbound webhooks (plan phase 4). Before the '/'-mounted creativeRoutes.
+router.use('/webhook-endpoints', webhookEndpointRoutes);
 router.use('/api-keys', apiKeyRoutes);
 router.use('/uploads', uploadRoutes);
 // SOS is open to clients too — mount BEFORE creativeRoutes (which has a

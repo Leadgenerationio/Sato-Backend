@@ -28,6 +28,7 @@ type UserRow = {
   isActive: boolean;
   isPrimaryOwner: boolean;
   allowedTabs: string[] | null;
+  accessExpiresAt: Date | null;
   createdAt: Date | null;
   updatedAt: Date | null;
 };
@@ -74,6 +75,8 @@ export async function listUsers(requester: AuthPayload) {
     // so the admin Portal Users card can pre-fill the Permissions dialog.
     // client_admin masked to null since admins always see everything.
     allowedTabs: u.role === 'client_admin' ? null : normalizeAllowedTabs(u.allowedTabs),
+    // S8: time-limited access; null = no end date.
+    accessExpiresAt: u.accessExpiresAt ? u.accessExpiresAt.toISOString() : null,
     createdAt: u.createdAt,
   }));
 }
@@ -556,6 +559,33 @@ export async function adminResetPassword(
     role: u.role,
     isActive: u.isActive,
     isPrimaryOwner: u.isPrimaryOwner,
+  };
+}
+
+/**
+ * S8 (Sam feedback 29 Sep 2026): give a login an end date (e.g. the agency),
+ * or clear it with null. Owner-only route. You can't put an end date on your
+ * own login or on the primary Owner — that is how an account gets locked out.
+ */
+export async function setAccessExpiry(userId: string, accessExpiresAt: string | null, requester: AuthPayload) {
+  const user = await findById(userId);
+  if (!user) throw new NotFoundError('User');
+  if (requester.role !== 'owner' && requester.businessId && user.businessId !== requester.businessId) {
+    throw new ForbiddenError('Cannot change users outside your business');
+  }
+  if (accessExpiresAt !== null) {
+    if (user.id === requester.userId) throw new ValidationError("You can't set an end date on your own login");
+    if (user.isPrimaryOwner) throw new ForbiddenError('The primary owner account is protected');
+  }
+  const [updated] = await db
+    .update(users)
+    .set({ accessExpiresAt: accessExpiresAt ? new Date(accessExpiresAt) : null, updatedAt: new Date() })
+    .where(eq(users.id, userId))
+    .returning();
+  return {
+    id: updated.id,
+    email: updated.email,
+    accessExpiresAt: updated.accessExpiresAt ? updated.accessExpiresAt.toISOString() : null,
   };
 }
 

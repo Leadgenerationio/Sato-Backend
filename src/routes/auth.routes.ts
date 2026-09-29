@@ -3,12 +3,14 @@ import * as authController from '../controllers/auth.controller.js';
 import { validate } from '../middleware/validate.middleware.js';
 import { authMiddleware } from '../middleware/auth.middleware.js';
 import { authLimiter } from '../middleware/rate-limit.middleware.js';
+import { requirePublicRegistration } from '../middleware/registration.middleware.js';
 import { logger } from '../utils/logger.js';
 import { loginSchema, registerSchema, updateProfileSchema, changePasswordSchema, refreshTokenSchema, forgotPasswordSchema, verifyResetCodeSchema, resetPasswordSchema } from '../types/index.js';
 
 export const authRoutes: RouterType = Router();
 
-authRoutes.post('/register', authLimiter, validate(registerSchema), authController.register);
+// Closed in production unless ALLOW_PUBLIC_REGISTRATION=true (S8): see registration.middleware.ts.
+authRoutes.post('/register', authLimiter, requirePublicRegistration, validate(registerSchema), authController.register);
 authRoutes.post('/login', authLimiter, validate(loginSchema), authController.login);
 authRoutes.post('/refresh', authLimiter, validate(refreshTokenSchema), authController.refresh);
 // Best-effort logout — no token denylist (would need a schema change).

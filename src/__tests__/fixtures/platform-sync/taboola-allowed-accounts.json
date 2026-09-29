@@ -1,0 +1,4 @@
+{ "results": [
+  { "id": 1000001, "name": "Lead Generation Network", "account_id": "leadgenerationio-network", "partner_types": ["ADVERTISER"], "type": "NETWORK" },
+  { "id": 1000002, "name": "Hearing Aids Poland", "account_id": "willwriting-sc", "partner_types": ["ADVERTISER"], "type": "PARTNER" }
+] }
