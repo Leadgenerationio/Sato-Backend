@@ -3,10 +3,11 @@ import { campaigns } from '../db/schema/campaigns.js';
 import { invoices } from '../db/schema/invoices.js';
 import { clients } from '../db/schema/clients.js';
 import { leadDeliveries } from '../db/schema/lead-deliveries.js';
-import { eq, and, gte, sql } from 'drizzle-orm';
+import { eq, and, gte, lte, sql } from 'drizzle-orm';
 import * as invoiceService from '../services/invoice.service.js';
 import { sendEmail } from '../integrations/resend/resend-client.js';
 import { logger } from '../utils/logger.js';
+import { formatMoney, normalizeCurrencyCode } from '../utils/currency.js';
 import { emailQueue } from './queue.js';
 import type { AuthPayload } from '../types/index.js';
 import type { ResendSendRequest } from '../integrations/resend/resend-types.js';
@@ -146,7 +147,7 @@ export const WORKFLOW_HANDLERS: Record<string, () => Promise<HandlerResult>> = {
     const monthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().split('T')[0];
     const monthEnd = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().split('T')[0];
 
-    const rows: { client: string; leads: number; revenue: number; email: string | null }[] = [];
+    const rows: { client: string; leads: number; revenue: number; currency: string; email: string | null }[] = [];
     for (const c of eligible) {
       const [agg] = await db
         .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
@@ -155,6 +156,9 @@ export const WORKFLOW_HANDLERS: Record<string, () => Promise<HandlerResult>> = {
           and(
             eq(leadDeliveries.clientId, c.id),
             gte(leadDeliveries.deliveryDate, monthStart),
+            // Upper bound was missing — the "previous month" report also
+            // counted every lead delivered so far THIS month.
+            lte(leadDeliveries.deliveryDate, monthEnd),
           ),
         );
       const leadCount = agg?.leads ?? 0;
@@ -163,17 +167,26 @@ export const WORKFLOW_HANDLERS: Record<string, () => Promise<HandlerResult>> = {
         client: c.companyName,
         leads: leadCount,
         revenue: Math.round(leadCount * leadPrice * 100) / 100,
+        // Lead price is agreed in the client's lead-price currency (falls
+        // back to the client currency) — feedback M3: this email said £ for
+        // CHF/EUR/PLN clients.
+        currency: normalizeCurrencyCode(c.leadPriceCurrency ?? c.currency),
         email: c.contactEmail,
       });
     }
 
-    const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
+    // Never add money across currencies: one total per currency.
+    const totalsByCurrency = new Map<string, number>();
+    for (const r of rows) totalsByCurrency.set(r.currency, (totalsByCurrency.get(r.currency) ?? 0) + r.revenue);
+    const totalRevenueText = [...totalsByCurrency.entries()]
+      .map(([cur, total]) => formatMoney(total, cur))
+      .join(' + ') || formatMoney(0, 'GBP');
     const html = `
       <p>Monthly validation report for ${monthStart} – ${monthEnd}.</p>
-      <p><strong>${rows.length} clients</strong> · <strong>${rows.reduce((s, r) => s + r.leads, 0)} total leads</strong> · <strong>£${totalRevenue.toFixed(2)} revenue</strong></p>
+      <p><strong>${rows.length} clients</strong> · <strong>${rows.reduce((s, r) => s + r.leads, 0)} total leads</strong> · <strong>${totalRevenueText} revenue</strong></p>
       <table cellpadding="6" cellspacing="0" border="1" style="border-collapse:collapse;">
         <tr><th>Client</th><th>Leads</th><th>Revenue</th><th>Contact</th></tr>
-        ${rows.map((r) => `<tr><td>${r.client}</td><td align="right">${r.leads}</td><td align="right">£${r.revenue.toFixed(2)}</td><td>${r.email ?? '—'}</td></tr>`).join('')}
+        ${rows.map((r) => `<tr><td>${r.client}</td><td align="right">${r.leads}</td><td align="right">${formatMoney(r.revenue, r.currency)}</td><td>${r.email ?? '—'}</td></tr>`).join('')}
       </table>
       <p>Reply to each client requesting sign-off, then run auto-invoice.</p>
     `;
@@ -187,7 +200,7 @@ export const WORKFLOW_HANDLERS: Record<string, () => Promise<HandlerResult>> = {
     }
     return {
       ok: true,
-      summary: `Validation summary for ${rows.length} clients queued (${rows.reduce((s, r) => s + r.leads, 0)} leads, £${totalRevenue.toFixed(2)} revenue).`,
+      summary: `Validation summary for ${rows.length} clients queued (${rows.reduce((s, r) => s + r.leads, 0)} leads, ${totalRevenueText} revenue).`,
     };
   },
 

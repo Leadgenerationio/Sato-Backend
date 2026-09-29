@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import * as importService from '../services/client-import.service.js';
-import { AttioNotConfiguredError } from '../integrations/attio/attio-client.js';
+import { AttioNotConfiguredError, isAttioConfigured } from '../integrations/attio/attio-client.js';
 import { logger } from '../utils/logger.js';
 
 function handleAttioError(err: unknown, res: Response): boolean {
@@ -62,4 +62,10 @@ export async function importFromAttio(req: Request, res: Response) {
       message: err instanceof Error ? err.message : 'Failed to import from Attio',
     });
   }
+}
+
+// Feedback S16 (29 Sep 2026): lets the Clients list hide "Import from Attio"
+// when there's no Attio key, instead of offering a button that can only fail.
+export function attioStatus(_req: Request, res: Response) {
+  res.json({ status: 'success', data: { configured: isAttioConfigured() } });
 }

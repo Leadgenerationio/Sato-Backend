@@ -302,11 +302,51 @@ async function getRevenueForClient(clientId: string): Promise<Record<string, num
 
 // ─── Service ───
 
+// Feedback S14 (29 Sep 2026): the Clients list had no sorting or filters.
+// Sort keys are an allow-list — the query-string value never reaches SQL.
+export const CLIENT_SORT_KEYS = ['company', 'status', 'revenue', 'campaigns', 'credit', 'created'] as const;
+export type ClientSortKey = (typeof CLIENT_SORT_KEYS)[number];
+
 export interface ListClientsParams {
   status?: string;
   search?: string;
+  /** ISO 4217 code, matched exactly (e.g. 'EUR'). */
+  currency?: string;
+  /** Case-insensitive "contains" match on address_country (free text today). */
+  country?: string;
+  sort?: ClientSortKey;
+  dir?: 'asc' | 'desc';
   page?: number;
   limit?: number;
+}
+
+/**
+ * ORDER BY expression for a sort key. Revenue mirrors loadRevenueByClient +
+ * clientRevenueFigures (paid invoices in the client's OWN currency) and
+ * campaigns mirrors loadActiveCampaignCounts, so the order always agrees
+ * with the figures printed in the row.
+ */
+/** Hard cap on CSV export rows — far above today's client count. */
+export const EXPORT_LIMIT = 5000;
+
+export function clientSortExpression(sort: ClientSortKey) {
+  switch (sort) {
+    case 'company': return sql`lower(${clients.companyName})`;
+    case 'status': return sql`${clients.status}::text`;
+    case 'credit': return sql`${clients.creditScore}`;
+    case 'revenue': return sql`(
+      select coalesce(sum(i.total), 0) from invoices i
+      where i.client_id = ${clients.id} and i.status = 'paid'
+        and coalesce(i.currency, 'GBP') = coalesce(${clients.currency}, 'GBP')
+    )`;
+    case 'campaigns': return sql`(
+      select count(distinct cc.campaign_id) from client_campaigns cc
+      join campaigns c on c.id = cc.campaign_id
+      where cc.client_id = ${clients.id} and c.status = 'active'
+    )`;
+    case 'created':
+    default: return sql`${clients.createdAt}`;
+  }
 }
 
 export interface ListClientsResult {
@@ -327,12 +367,14 @@ export interface ListClientsResult {
 export async function listClients(
   requester: AuthPayload,
   params: ListClientsParams = {},
+  // Internal only (CSV export) — never wired to the query string.
+  opts: { maxPageSize?: number } = {},
 ): Promise<ListClientsResult> {
   const businessId = requester.businessId;
   if (!businessId) return { items: [], total: 0, page: 1, pageSize: 10 };
 
   const page = Math.max(1, params.page ?? 1);
-  const pageSize = Math.min(100, Math.max(1, params.limit ?? 10));
+  const pageSize = Math.min(opts.maxPageSize ?? 100, Math.max(1, params.limit ?? 10));
   const offset = (page - 1) * pageSize;
 
   const filters = [eq(clients.businessId, businessId)];
@@ -349,7 +391,21 @@ export async function listClients(
       or lower(coalesce(${clients.contactEmail}, '')) like ${q}
     )`);
   }
+  if (params.currency) {
+    filters.push(sql`upper(coalesce(${clients.currency}, 'GBP')) = ${params.currency.toUpperCase()}`);
+  }
+  if (params.country) {
+    // Contains, case-insensitive: country is free text today, so "pol"
+    // should find "Poland". LIKE wildcards in the input are escaped.
+    const needle = params.country.trim().toLowerCase().replace(/[\\%_]/g, (ch) => `\\${ch}`);
+    filters.push(sql`lower(coalesce(${clients.addressCountry}, '')) like ${`%${needle}%`}`);
+  }
   const whereClause = and(...filters);
+  const sortKey: ClientSortKey = params.sort && CLIENT_SORT_KEYS.includes(params.sort) ? params.sort : 'created';
+  const dir = params.dir === 'asc' ? sql`asc` : sql`desc`;
+  // NULLS LAST both ways so "no credit score" never floats to the top, and a
+  // stable id tiebreak so paging doesn't repeat or skip rows with equal keys.
+  const orderBy = sql`${clientSortExpression(sortKey)} ${dir} nulls last, ${clients.id} asc`;
 
   // 4 queries in parallel: page rows, total count, active-campaign map,
   // revenue map. The aggregate maps are scoped to the same business but not
@@ -361,7 +417,7 @@ export async function listClients(
       .select()
       .from(clients)
       .where(whereClause)
-      .orderBy(desc(clients.createdAt))
+      .orderBy(orderBy)
       .limit(pageSize)
       .offset(offset),
     db
@@ -379,6 +435,47 @@ export async function listClients(
     page,
     pageSize,
   };
+}
+
+// Feedback S14: CSV export of the filtered list. Built server-side from the
+// same listClients query so the file matches the on-screen filters + sort
+// exactly (and revenue is the same own-currency figure), without the FE
+// paging through the API.
+const CSV_COLUMNS: Array<[string, (c: ClientSummary) => string | number]> = [
+  ['Company', (c) => c.companyName],
+  ['Contact', (c) => c.contactName],
+  ['Email', (c) => c.contactEmail],
+  ['Status', (c) => c.status],
+  ['Currency', (c) => c.currency],
+  ['Revenue (own currency)', (c) => c.totalRevenue.toFixed(2)],
+  ['Other-currency revenue', (c) => Object.entries(c.revenueByCurrency)
+    .filter(([cur]) => cur !== c.currency)
+    .map(([cur, v]) => `${cur} ${v.toFixed(2)}`).join('; ')],
+  ['Active campaigns', (c) => c.activeCampaigns],
+  ['Credit score', (c) => c.creditScore ?? ''],
+  ['Agreement signed', (c) => (c.agreementSigned ? 'yes' : 'no')],
+  ['Created', (c) => c.createdAt.slice(0, 10)],
+];
+
+export function csvCell(v: string | number): string {
+  let s = String(v ?? '');
+  // Neutralise spreadsheet formula injection (a company named "=HYPERLINK(...)").
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+export function clientsToCsv(items: ClientSummary[]): string {
+  const lines = [CSV_COLUMNS.map(([h]) => csvCell(h)).join(',')];
+  for (const c of items) lines.push(CSV_COLUMNS.map(([, get]) => csvCell(get(c))).join(','));
+  return lines.join('\r\n') + '\r\n';
+}
+
+export async function exportClientsCsv(
+  requester: AuthPayload,
+  params: Omit<ListClientsParams, 'page' | 'limit'>,
+): Promise<{ csv: string; count: number; truncated: boolean }> {
+  const result = await listClients(requester, { ...params, page: 1, limit: EXPORT_LIMIT }, { maxPageSize: EXPORT_LIMIT });
+  return { csv: clientsToCsv(result.items), count: result.items.length, truncated: result.total > result.items.length };
 }
 
 export async function getClient(id: string, requester: AuthPayload): Promise<ClientDetail | null> {

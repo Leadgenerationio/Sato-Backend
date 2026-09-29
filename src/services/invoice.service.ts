@@ -39,6 +39,12 @@ export interface InvoiceSummary {
   paidDate: string | null;
   daysOverdue: number;
   createdAt: string;
+  /**
+   * The invoice's own date (Xero `Date`) — feedback S12: the list showed the
+   * import timestamp as "Created" for Xero-synced invoices. NULL for invoices
+   * raised in Stato that haven't been synced back; show `createdAt` then.
+   */
+  invoiceDate: string | null;
   xeroInvoiceId: string | null;
 }
 
@@ -158,6 +164,7 @@ function invoiceToSummary(row: InvoiceRow, client: ClientRow): InvoiceSummary {
     paidDate: row.paidDate ? row.paidDate.toISOString() : null,
     daysOverdue: liveDaysOverdue,
     createdAt: (row.createdAt ?? new Date()).toISOString(),
+    invoiceDate: row.invoiceDate ? row.invoiceDate.toISOString() : null,
     xeroInvoiceId: row.xeroInvoiceId,
   };
 }
@@ -196,8 +203,12 @@ export interface ListInvoicesParams {
   sortDir?: SortDir;
 }
 
+// Feedback S12: "Created" sorts by the invoice's own date (Xero `Date`) when
+// known, so Xero imports don't all cluster on the day they were synced.
+const invoiceDateOrCreated = sql`coalesce(${invoices.invoiceDate}, ${invoices.createdAt})`;
+
 const SORT_COLUMNS = {
-  createdAt: invoices.createdAt,
+  createdAt: invoiceDateOrCreated,
   dueDate: invoices.dueDate,
   total: invoices.total,
   status: invoices.status,
@@ -285,7 +296,7 @@ export async function listInvoices(
   // Whitelist sortBy to a known column so a hostile query param can't be
   // used to ORDER BY arbitrary expressions. Default: createdAt DESC (matches
   // historical behaviour).
-  const sortColumn = params.sortBy && SORT_COLUMNS[params.sortBy] ? SORT_COLUMNS[params.sortBy] : invoices.createdAt;
+  const sortColumn = params.sortBy && SORT_COLUMNS[params.sortBy] ? SORT_COLUMNS[params.sortBy] : invoiceDateOrCreated;
   const sortOrder = params.sortDir === 'asc' ? sortColumn : desc(sortColumn);
 
   // Page rows, total count, and the client-row map (for invoiceToSummary)
@@ -520,6 +531,7 @@ export async function syncInvoicesFromXero(
         subtotal: i.subtotal,
         vatAmount: i.totalTax,
         total: i.total,
+        invoiceDate: i.date ? new Date(i.date) : null,
         dueDate: i.dueDate ? new Date(i.dueDate) : null,
         // Mark as paid right away if Xero says so — we don't have a
         // separate "paid date" from Xero on the wire, use today as best-effort.
@@ -548,6 +560,9 @@ export async function syncInvoicesFromXero(
         subtotal: i.subtotal,
         vatAmount: i.totalTax,
         total: i.total,
+        // Backfills invoice_date (migration 0044) for rows imported before it
+        // existed — every sync re-upserts, so existing rows fill in here.
+        invoiceDate: i.date ? new Date(i.date) : null,
         dueDate: i.dueDate ? new Date(i.dueDate) : null,
         // Stamp a paidDate only on the FIRST transition to paid and keep it
         // stable thereafter (Xero gives us no paid-date on the wire, so today

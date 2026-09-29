@@ -219,6 +219,49 @@ export interface SupplierReportRow {
  */
 export const RECOGNISED_INVOICE_STATUSES = ['paid', 'authorised'] as const;
 
+// ─── Feedback S12 / M3 (Sam, 29 Sep 2026) ───────────────────────────────────
+// Two defects made the dashboard's money figures contradict each other:
+//   1. Revenue summed invoices.total across currencies, so Sonova's €34,860
+//      was added into a "£" figure as £34,860.
+//   2. The P&L card windowed revenue by created_at — for Xero imports that's
+//      the SYNC date, so every imported invoice counted as "last 30 days"
+//      (hence P&L +£371k beside Net Profit −£771k). The dashboard + chart
+//      used due_date. None used the invoice's own date.
+// Every revenue figure now shares ONE recognition date and counts only the
+// base currency; other-currency revenue is returned alongside, never folded
+// in. No FX source exists yet, so nothing is converted.
+export const BASE_CURRENCY = 'GBP';
+/** Invoice currency, NULL treated as GBP (the column default). */
+export const invoiceCurrencySql = sql<string>`coalesce(${invoices.currency}, 'GBP')`;
+/**
+ * The date an invoice's revenue belongs to: Xero's invoice Date when known
+ * (migration 0044, filled on sync), else due date, else when Stato created it.
+ */
+// NB: bind Date bounds as ISO strings (`${d.toISOString()}::timestamp`) —
+// postgres-js can't serialise a Date passed through a raw sql template.
+export const recognitionDateSql = sql`coalesce(${invoices.invoiceDate}, ${invoices.dueDate}, ${invoices.createdAt})`;
+
+export interface CurrencyTotal { currency: string; total: number }
+
+/**
+ * Split per-currency sums into the base-currency figure and the rest.
+ * `rows` is one row per currency; non-positive-currency noise is dropped.
+ */
+export function splitBaseCurrency(
+  rows: Array<{ currency: string | null; total: string | number | null }>,
+): { base: number; others: CurrencyTotal[] } {
+  let base = 0;
+  const others: CurrencyTotal[] = [];
+  for (const r of rows) {
+    const total = Number(r.total ?? 0);
+    const cur = (r.currency ?? BASE_CURRENCY).toUpperCase();
+    if (cur === BASE_CURRENCY) base += total;
+    else if (total !== 0) others.push({ currency: cur, total: Math.round(total * 100) / 100 });
+  }
+  others.sort((a, b) => b.total - a.total);
+  return { base: Math.round(base * 100) / 100, others };
+}
+
 export interface FinancialOverviewRow {
   month: string;
   revenue: number;
@@ -236,6 +279,11 @@ export interface FinancialOverviewRow {
   /** Invoices that are neither paid nor overdue — i.e. drafts + sent + due-but-not-late. */
   invoicesPending: number;
   vatCollected: number;
+  /**
+   * Recognised revenue this month in currencies OTHER than GBP, e.g.
+   * { EUR: 34860 }. Not included in `revenue` (which is GBP only) — feedback M3.
+   */
+  otherCurrencyRevenue: Record<string, number>;
   /**
    * True for the current calendar month (which is always incomplete until
    * month-end). Charts can dash-stroke / fade it so users don't read the
@@ -456,16 +504,19 @@ export async function getClientPnl(requester: AuthPayload): Promise<ClientPnlRow
   const businessId = requester.businessId;
   if (!businessId) return [];
 
-  const sixMonthsAgo = new Date();
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-  sixMonthsAgo.setDate(1);
+  // Built from the 1st directly — setMonth() on the 29th–31st overflows into
+  // the next month (same bug as the dashboard month axis, feedback S12).
+  const nowForWindow = new Date();
+  const sixMonthsAgo = new Date(nowForWindow.getFullYear(), nowForWindow.getMonth() - 6, 1);
   const sixMonthsAgoIso = sixMonthsAgo.toISOString().split('T')[0];
 
   const [revenueRows, costRows] = await Promise.all([
     db
       .select({
         clientId: invoices.clientId,
-        month: sql<string>`to_char(${invoices.createdAt}, 'YYYY-MM')`,
+        // S12: bucket by the invoice's own date — created_at is the Xero
+        // sync time for imports, which piled every import into one month.
+        month: sql<string>`to_char(${recognitionDateSql}, 'YYYY-MM')`,
         revenue: sql<string>`coalesce(sum(${invoices.total}), 0)`,
       })
       .from(invoices)
@@ -477,9 +528,9 @@ export async function getClientPnl(requester: AuthPayload): Promise<ClientPnlRow
         // per-client P&L under-report authorised-but-unpaid invoices that the
         // dashboard already counts — the two screens then disagreed.
         inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]),
-        gte(invoices.createdAt, sixMonthsAgo),
+        sql`${recognitionDateSql} >= ${sixMonthsAgo.toISOString()}::timestamp`,
       ))
-      .groupBy(invoices.clientId, sql`to_char(${invoices.createdAt}, 'YYYY-MM')`),
+      .groupBy(invoices.clientId, sql`to_char(${recognitionDateSql}, 'YYYY-MM')`),
     db
       .select({
         clientId: leadDeliveries.clientId,
@@ -740,13 +791,14 @@ export async function getFinancialOverview(
   const [revenueRows, expenseRows, invoiceCountRows] = await Promise.all([
     db
       .select({
-        month: sql<string>`to_char(${invoices.dueDate}, 'YYYY-MM')`,
+        month: sql<string>`to_char(${recognitionDateSql}, 'YYYY-MM')`,
+        currency: invoiceCurrencySql,
         revenue: sql<string>`coalesce(sum(${invoices.total}), 0)`,
         vat: sql<string>`coalesce(sum(${invoices.vatAmount}), 0)`,
       })
       .from(invoices)
-      .where(and(inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]), gte(invoices.dueDate, windowStart)))
-      .groupBy(sql`to_char(${invoices.dueDate}, 'YYYY-MM')`),
+      .where(and(inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]), sql`${recognitionDateSql} >= ${windowStart.toISOString()}::timestamp`))
+      .groupBy(sql`to_char(${recognitionDateSql}, 'YYYY-MM')`, invoiceCurrencySql),
     // Sam jam-video #2: dedupe on natural key before grouping by month
     // — Catchr 3× auth-id duplication was inflating the monthly expense
     // series by ~3x on Google rows, which is what feeds the Financial
@@ -765,13 +817,13 @@ export async function getFinancialOverview(
     `).then((rows) => (rows as unknown as Array<{ month: string; expenses: string }>)),
     db
       .select({
-        month: sql<string>`to_char(${invoices.dueDate}, 'YYYY-MM')`,
+        month: sql<string>`to_char(${recognitionDateSql}, 'YYYY-MM')`,
         status: invoices.status,
         count: sql<number>`count(*)::int`,
       })
       .from(invoices)
-      .where(gte(invoices.dueDate, windowStart))
-      .groupBy(sql`to_char(${invoices.dueDate}, 'YYYY-MM')`, invoices.status),
+      .where(sql`${recognitionDateSql} >= ${windowStart.toISOString()}::timestamp`)
+      .groupBy(sql`to_char(${recognitionDateSql}, 'YYYY-MM')`, invoices.status),
   ]);
 
   // No real data → return empty. UI charts fall back to a flat-zero
@@ -783,7 +835,19 @@ export async function getFinancialOverview(
   const months = trailingMonthKeys(monthsCount, today);
   const currentMonthKey = months[months.length - 1];
 
-  const revenueByMonth = new Map(revenueRows.map((r) => [r.month, { revenue: Number(r.revenue), vat: Number(r.vat) }]));
+  // GBP only in `revenue`/`vat`; other currencies go to otherCurrencyRevenue.
+  const revenueByMonth = new Map<string, { revenue: number; vat: number; others: Record<string, number> }>();
+  for (const r of revenueRows) {
+    const bucket = revenueByMonth.get(r.month) ?? { revenue: 0, vat: 0, others: {} };
+    const cur = (r.currency ?? BASE_CURRENCY).toUpperCase();
+    if (cur === BASE_CURRENCY) {
+      bucket.revenue += Number(r.revenue);
+      bucket.vat += Number(r.vat);
+    } else {
+      bucket.others[cur] = Math.round(((bucket.others[cur] ?? 0) + Number(r.revenue)) * 100) / 100;
+    }
+    revenueByMonth.set(r.month, bucket);
+  }
   const expensesByMonth = new Map(expenseRows.map((r) => [r.month, Number(r.expenses)]));
   // Months that have AT LEAST ONE ad_spend row. Pre-Catchr months land here
   // as `null` (not 0) so the chart can render a gap rather than implying
@@ -807,7 +871,7 @@ export async function getFinancialOverview(
   }
 
   return months.map((m): FinancialOverviewRow => {
-    const r = revenueByMonth.get(m) ?? { revenue: 0, vat: 0 };
+    const r = revenueByMonth.get(m) ?? { revenue: 0, vat: 0, others: {} };
     const expenses = monthsWithCostData.has(m) ? (expensesByMonth.get(m) ?? 0) : null;
     const [year, mm] = m.split('-');
     const monthLabel = new Date(Number(year), Number(mm) - 1, 1).toLocaleDateString('en-GB', {
@@ -825,6 +889,7 @@ export async function getFinancialOverview(
       invoicesOverdue: overdueByMonth.get(m) ?? 0,
       invoicesPending: pendingByMonth.get(m) ?? 0,
       vatCollected: Math.round(r.vat * 100) / 100,
+      otherCurrencyRevenue: r.others,
       isPartial: m === currentMonthKey,
     };
   });
@@ -854,6 +919,8 @@ export interface PnlSummary {
   totalCosts: string;
   netProfit: string;
   margin: string; // 0..1 fraction (e.g. "0.42" = 42%)
+  /** Recognised revenue in the window in non-GBP currencies — NOT in `revenue`. */
+  otherCurrencyRevenue: CurrencyTotal[];
   uncategorisedCount: number;
   /**
    * Catchr ad-spend rows in window whose Catchr-campaign-id hasn't been
@@ -1275,6 +1342,7 @@ export async function getPnlSummary(
       totalCosts: '0.00',
       netProfit: '0.00',
       margin: '0.0000',
+      otherCurrencyRevenue: [],
       uncategorisedCount: 0,
       unattributedSpendRows: 0,
     };
@@ -1287,8 +1355,8 @@ export async function getPnlSummary(
   // matching the pattern getClientPnl already uses. Without this guard the
   // P&L Summary would sum paid revenue across every tenant in the database
   // the moment a second business is provisioned.
-  const [revenueRow] = await db
-    .select({ total: sql<string>`coalesce(sum(${invoices.total}::numeric), 0)::text` })
+  const revenueByCurrency = await db
+    .select({ currency: invoiceCurrencySql, total: sql<string>`coalesce(sum(${invoices.total}::numeric), 0)::text` })
     .from(invoices)
     .innerJoin(clients, eq(clients.id, invoices.clientId))
     .where(
@@ -1300,10 +1368,13 @@ export async function getPnlSummary(
         // showed lower revenue/margin than the dashboard + financial-overview
         // for the same window.
         inArray(invoices.status, RECOGNISED_INVOICE_STATUSES as unknown as string[]),
-        gte(invoices.createdAt, fromDate),
-        lte(invoices.createdAt, today),
+        // S12: window by the invoice's own date, not created_at (= Xero
+        // sync time for imports, which pulled every import into "last 30d").
+        sql`${recognitionDateSql} >= ${fromDate.toISOString()}::timestamp and ${recognitionDateSql} <= ${today.toISOString()}::timestamp`,
       ),
-    );
+    )
+    .groupBy(invoiceCurrencySql);
+  const revenueSplit = splitBaseCurrency(revenueByCurrency);
 
   // Costs by bucket from bank_transactions (amount is signed; SPEND is negative).
   const txWhere = and(
@@ -1438,7 +1509,7 @@ export async function getPnlSummary(
     );
   const unattributedSpendRows = unattributedRow?.count ?? 0;
 
-  const revenue = parseFloat(revenueRow?.total ?? '0');
+  const revenue = revenueSplit.base;
   const adSpendTotal = parseFloat(adSpendRow?.total ?? '0');
   const totalCosts = fixed + oneOff + advertising + adSpendTotal;
   const netProfit = revenue - totalCosts;
@@ -1456,6 +1527,7 @@ export async function getPnlSummary(
     totalCosts: totalCosts.toFixed(2),
     netProfit: netProfit.toFixed(2),
     margin: margin.toFixed(4),
+    otherCurrencyRevenue: revenueSplit.others,
     uncategorisedCount,
     unattributedSpendRows,
   };

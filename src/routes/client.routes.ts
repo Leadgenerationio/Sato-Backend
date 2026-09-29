@@ -19,6 +19,10 @@ const listClientsQuerySchema = z.object({
   query: paginationQuerySchema.extend({
     status: z.string().optional(),
     search: z.string().optional(),
+    currency: z.string().length(3).optional(),
+    country: z.string().max(100).optional(),
+    sort: z.enum(['company', 'status', 'revenue', 'campaigns', 'credit', 'created']).optional(),
+    dir: z.enum(['asc', 'desc']).optional(),
   }),
 });
 
@@ -125,6 +129,7 @@ clientRoutes.use(requireRole('owner', 'finance_admin', 'ops_manager'));
 
 clientRoutes.get('/', validate(listClientsQuerySchema), clientController.listClients);
 clientRoutes.get('/credit-alerts', clientController.getCreditAlerts);
+clientRoutes.get('/export.csv', validate(listClientsQuerySchema), clientController.exportClientsCsv);
 
 // #39 Attio bulk import. Static paths must be registered BEFORE /:id
 // catch-alls so Express doesn't route "import" to getClient.
@@ -133,6 +138,7 @@ const importAttioSchema = z.object({
     attioIds: z.array(z.string().min(1).max(100)).min(1).max(200),
   }),
 });
+clientRoutes.get('/import/attio/status', clientImportController.attioStatus);
 clientRoutes.get('/import/attio/companies', clientImportController.browseAttio);
 clientRoutes.post('/import/attio', validate(importAttioSchema), clientImportController.importFromAttio);
 clientRoutes.get('/:id', clientController.getClient);
