@@ -28,6 +28,7 @@ type UserRow = {
   isActive: boolean;
   isPrimaryOwner: boolean;
   allowedTabs: string[] | null;
+  accessExpiresAt: Date | null;
   createdAt: Date | null;
   updatedAt: Date | null;
 };
@@ -74,6 +75,8 @@ export async function listUsers(requester: AuthPayload) {
     // so the admin Portal Users card can pre-fill the Permissions dialog.
     // client_admin masked to null since admins always see everything.
     allowedTabs: u.role === 'client_admin' ? null : normalizeAllowedTabs(u.allowedTabs),
+    // S8: time-limited access; null = no end date.
+    accessExpiresAt: u.accessExpiresAt ? u.accessExpiresAt.toISOString() : null,
     createdAt: u.createdAt,
   }));
 }
@@ -559,6 +562,33 @@ export async function adminResetPassword(
   };
 }
 
+/**
+ * S8 (Sam feedback 29 Sep 2026): give a login an end date (e.g. the agency),
+ * or clear it with null. Owner-only route. You can't put an end date on your
+ * own login or on the primary Owner — that is how an account gets locked out.
+ */
+export async function setAccessExpiry(userId: string, accessExpiresAt: string | null, requester: AuthPayload) {
+  const user = await findById(userId);
+  if (!user) throw new NotFoundError('User');
+  if (requester.role !== 'owner' && requester.businessId && user.businessId !== requester.businessId) {
+    throw new ForbiddenError('Cannot change users outside your business');
+  }
+  if (accessExpiresAt !== null) {
+    if (user.id === requester.userId) throw new ValidationError("You can't set an end date on your own login");
+    if (user.isPrimaryOwner) throw new ForbiddenError('The primary owner account is protected');
+  }
+  const [updated] = await db
+    .update(users)
+    .set({ accessExpiresAt: accessExpiresAt ? new Date(accessExpiresAt) : null, updatedAt: new Date() })
+    .where(eq(users.id, userId))
+    .returning();
+  return {
+    id: updated.id,
+    email: updated.email,
+    accessExpiresAt: updated.accessExpiresAt ? updated.accessExpiresAt.toISOString() : null,
+  };
+}
+
 export async function updateOwnProfile(userId: string, name: string) {
   const user = await findById(userId);
   if (!user) throw new NotFoundError('User');
@@ -609,4 +639,38 @@ export async function changeOwnPassword(userId: string, currentPassword: string,
     .update(users)
     .set({ passwordHash: newHash, updatedAt: new Date() })
     .where(eq(users.id, userId));
+}
+
+// ─── Per-user UI preferences (feedback N2, 29 Sep 2026) ───
+// Dashboard layout, campaign grouping and task filters used to live only in
+// localStorage, so they didn't follow the user to another device. Stored as
+// one jsonb bag per user; keys are allow-listed at the route (zod), and a PUT
+// merges — sending `{ campaignGrouping: … }` never wipes `dashboardLayout`.
+// A key sent as null is removed.
+
+export const PREFERENCE_KEYS = ['dashboardLayout', 'campaignGrouping', 'taskFilters'] as const;
+export type PreferenceKey = (typeof PREFERENCE_KEYS)[number];
+export type UserPreferences = Partial<Record<PreferenceKey, unknown>>;
+
+export function mergePreferences(current: UserPreferences | null | undefined, patch: UserPreferences): UserPreferences {
+  const next: UserPreferences = { ...(current ?? {}) };
+  for (const key of PREFERENCE_KEYS) {
+    if (!(key in patch)) continue;
+    if (patch[key] === null) delete next[key];
+    else next[key] = patch[key];
+  }
+  return next;
+}
+
+export async function getOwnPreferences(userId: string): Promise<UserPreferences> {
+  const [row] = await db.select({ preferences: users.preferences }).from(users).where(eq(users.id, userId));
+  if (!row) throw new NotFoundError('User');
+  return (row.preferences ?? {}) as UserPreferences;
+}
+
+export async function updateOwnPreferences(userId: string, patch: UserPreferences): Promise<UserPreferences> {
+  const current = await getOwnPreferences(userId);
+  const next = mergePreferences(current, patch);
+  await db.update(users).set({ preferences: next, updatedAt: new Date() }).where(eq(users.id, userId));
+  return next;
 }

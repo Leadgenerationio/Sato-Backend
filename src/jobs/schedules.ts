@@ -1,5 +1,6 @@
 import { invoiceQueue, syncQueue } from './queue.js';
 import { logger } from '../utils/logger.js';
+import { syncEveryHours } from '../services/platform-creative-sync.service.js';
 
 export async function registerSchedules() {
   if (!invoiceQueue || !syncQueue) {
@@ -75,6 +76,16 @@ export async function registerSchedules() {
     data: {},
   });
 
+  // Plan phase 3 — pull ads + creatives from Meta / Taboola for every linked
+  // ad account (docs/creative-library-and-api-plan.md). Registered always;
+  // the job itself no-ops until credentials are set.
+  await syncQueue.upsertJobScheduler('platform-creative-sync', {
+    every: syncEveryHours() * 3_600_000,
+  }, {
+    name: 'platform-creative-sync',
+    data: {},
+  });
+
   // SMS alerts to Sam — poll the notifications table every 30s for unsent
   // system_error rows. Hard no-op in mock mode (see alert-sms.service.ts).
   await syncQueue.upsertJobScheduler('sms-alert-poll', {
@@ -92,6 +103,15 @@ export async function registerSchedules() {
     pattern: '15 * * * *',
   }, {
     name: 'global-invoice-sync',
+    data: {},
+  });
+
+  // Feedback M3: ECB publishes reference rates ~16:00 CET on working days.
+  // 16:30 UTC catches them; weekends just re-store Friday's (no-op insert).
+  await syncQueue.upsertJobScheduler('fx-rates-daily', {
+    pattern: '30 16 * * *',
+  }, {
+    name: 'fx-rates-daily',
     data: {},
   });
 

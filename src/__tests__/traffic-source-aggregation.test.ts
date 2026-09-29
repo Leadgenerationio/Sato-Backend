@@ -8,6 +8,7 @@ import {
   aggregateCatchrSpend,
   aggregateCatchrSpendByLbId,
   aggregateUnlinkedSpend,
+  catchrDailySpendByPlatform,
 } from '../services/traffic-source-aggregation.service.js';
 
 // T1 (Sam, 2026-05-20) — Manual ad-account → campaign attribution.
@@ -245,6 +246,82 @@ describe('traffic-source-aggregation — unlinked diagnostic', () => {
     const mine = summary.rows.find((r) => r.accountId === acctOf(1));
     expect(mine).toBeDefined();
     expect(mine!.spend).toBeCloseTo(90, 5);
+  });
+});
+
+// Sam S11 (2026-09-29): Catchr ingests the same day's spend once per
+// authorization id. Every campaign-cost figure must count it once, the same
+// way dedupedSpendSumSql (dashboard) and listSourcesForCampaign (Ad Account
+// Links) already do — otherwise the headline cost and the Ad Account Links
+// spend disagree for the same account.
+async function seedSpendRow(opts: {
+  platform: string; accountId: string; spend: number; authorizationId: number; date?: string;
+}): Promise<void> {
+  await db.insert(adSpend).values({
+    platform: opts.platform,
+    authorizationId: opts.authorizationId,
+    accountId: opts.accountId,
+    accountName: `Acct ${opts.accountId}`,
+    campaignId: `cat-${opts.accountId}`,
+    campaignName: 'Test',
+    date: opts.date ?? todayIso(),
+    spend: opts.spend.toString(),
+    currency: 'GBP',
+  });
+}
+
+function daysAgoIso(n: number): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+
+describe('traffic-source-aggregation — Catchr duplicate authorizations', () => {
+  afterEach(cleanup);
+
+  it('aggregateCatchrSpend counts a day once when Catchr ingested it under 3 authorization ids', async () => {
+    const campaignId = await makeCampaign(`Dedupe ${tag}`, lbIdOf(20));
+    await linkSource({ campaignId, platform: 'facebook', accountId: acctOf(1) });
+    for (const authorizationId of [1, 2, 3]) {
+      await seedSpendRow({ platform: 'facebook-ads', accountId: acctOf(1), spend: 100, authorizationId });
+    }
+    expect(await aggregateCatchrSpend(campaignId)).toBeCloseTo(100, 5);
+    const byLb = await aggregateCatchrSpendByLbId();
+    expect(byLb.get(lbIdOf(20))).toBeCloseTo(100, 5);
+  });
+
+  it('aggregateUnlinkedSpend counts a duplicated day once', async () => {
+    for (const authorizationId of [1, 2, 3]) {
+      await seedSpendRow({ platform: 'taboola', accountId: acctOf(2), spend: 40, authorizationId });
+    }
+    const summary = await aggregateUnlinkedSpend(30);
+    expect(summary.rows.find((r) => r.accountId === acctOf(2))?.spend).toBeCloseTo(40, 5);
+  });
+
+  it('catchrDailySpendByPlatform returns one deduped row per canonical platform per day', async () => {
+    const campaignId = await makeCampaign(`Daily ${tag}`, lbIdOf(21));
+    // FE-style spellings on the mapping side; Catchr spellings on ad_spend.
+    await linkSource({ campaignId, platform: 'Facebook', accountId: acctOf(1) });
+    await linkSource({ campaignId, platform: 'google', accountId: acctOf(3) });
+    await seedSpendRow({ platform: 'facebook-ads', accountId: acctOf(1), spend: 10, authorizationId: 1 });
+    await seedSpendRow({ platform: 'facebook-ads', accountId: acctOf(1), spend: 10, authorizationId: 2 });
+    await seedSpendRow({ platform: 'facebook-ads', accountId: acctOf(1), spend: 7, authorizationId: 1, date: daysAgoIso(2) });
+    await seedSpendRow({ platform: 'google-ads', accountId: acctOf(3), spend: 5, authorizationId: 1 });
+    // Unmapped account and a day before the window: both excluded.
+    await seedSpendRow({ platform: 'facebook-ads', accountId: acctOf(4), spend: 999, authorizationId: 1 });
+    await seedSpendRow({ platform: 'facebook-ads', accountId: acctOf(1), spend: 500, authorizationId: 1, date: daysAgoIso(10) });
+
+    const rows = await catchrDailySpendByPlatform(campaignId, daysAgoIso(5));
+    const key = (r: { platform: string; date: string }) => `${r.platform}|${r.date}`;
+    const byKey = new Map(rows.map((r) => [key(r), r.spend]));
+    expect(rows).toHaveLength(3);
+    expect(byKey.get(`facebook-ads|${todayIso()}`)).toBeCloseTo(10, 5);
+    expect(byKey.get(`facebook-ads|${daysAgoIso(2)}`)).toBeCloseTo(7, 5);
+    expect(byKey.get(`google-ads|${todayIso()}`)).toBeCloseTo(5, 5);
+  });
+
+  it('catchrDailySpendByPlatform returns [] for a non-UUID id', async () => {
+    expect(await catchrDailySpendByPlatform('38', daysAgoIso(5))).toEqual([]);
   });
 });
 

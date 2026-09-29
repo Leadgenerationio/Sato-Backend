@@ -1,4 +1,4 @@
-import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, isNull, or, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { sops, type SopScreenshot } from '../db/schema/sops.js';
 import type { AuthPayload } from '../types/index.js';
@@ -44,7 +44,8 @@ function toSop(row: SopRow): Sop {
 }
 
 export async function listSops(requester: AuthPayload, filters?: SopFilters): Promise<Sop[]> {
-  const conditions = [];
+  // N6: archived from Settings → Clean up — hidden, never deleted.
+  const conditions = [isNull(sops.archivedAt)];
   if (requester.businessId) conditions.push(eq(sops.businessId, requester.businessId));
   if (filters?.category && filters.category !== 'all') {
     conditions.push(sql`lower(${sops.category}) = ${filters.category.toLowerCase()}`);
@@ -160,7 +161,9 @@ export interface SopGenerationDraft {
 
 export async function generateSopFromLoom(input: SopGenerationInput): Promise<SopGenerationDraft> {
   if (!isAnthropicConfigured()) {
-    throw new Error('Anthropic API not configured. Set ANTHROPIC_API_KEY to enable AI SOP generation.');
+    // Shown to the user verbatim (sop.controller) — plain words, Sam S16.
+    // "not configured" drives the controller's 503 mapping; keep it.
+    throw new Error('AI drafting is not configured yet. You can still write the SOP by hand, or ask your administrator to turn AI drafting on.');
   }
   const userMessage = `Loom URL: ${input.loomUrl}\n\nTranscript:\n${input.transcript}`;
   const { text } = await callAnthropic({

@@ -685,6 +685,260 @@ Get the client's service agreement.
 
 ---
 
+## Ad accounts
+
+Which client (and optionally which campaign) owns each ad account. Accounts are matched on `platform` + `accountId` only, never on the account name. `platform` accepts any common spelling (`Facebook`, `meta`, `facebook-ads`) and is stored in canonical form (`facebook-ads`, `google-ads`, `tik-tok`, `taboola`, `bing-ads`).
+
+### GET /ad-accounts
+
+**Roles:** owner, ops_manager, finance_admin. **Query:** `days` (1–365, default 30).
+
+Every known ad account, plus the client and campaign options for the linking screen (campaigns by Sato UUID). Known accounts: accounts with Catchr spend in the window, accounts referenced by a campaign's Ad Account Links, and accounts already linked. Spend is deduplicated across Catchr authorization ids. Unlinked accounts come first, largest spend first. `totalSpend`/`unlinkedSpend` add across currencies; display `unlinkedSpendByCurrency` instead.
+
+```json
+{
+  "status": "success",
+  "data": {
+    "windowDays": 30,
+    "accounts": [
+      {
+        "platform": "facebook-ads", "platformLabel": "Facebook",
+        "accountId": "428353095282383", "accountName": "CH Hearing",
+        "currency": "GBP", "spend": 14527.53, "lastSpendDate": "2026-09-28",
+        "link": null,
+        "campaigns": [{ "campaignId": "…", "campaignName": "Hearing Aids (CH)" }]
+      }
+    ],
+    "options": {
+      "clients": [{ "id": "…", "companyName": "…", "status": "active", "currency": "EUR" }],
+      "campaigns": [{ "id": "…", "name": "Hearing Aids (CH)", "status": "active" }]
+    },
+    "summary": { "total": 40, "linked": 3, "unlinked": 37, "totalSpend": 612000.1, "unlinkedSpend": 586065.73, "unlinkedSpendByCurrency": { "GBP": 540000.0, "EUR": 46065.73 } }
+  }
+}
+```
+
+### PUT /ad-accounts/links
+
+**Roles:** owner, ops_manager. Create, change or remove up to 500 links in one transaction. `clientId: null` removes a link. An unknown client or campaign id rejects the whole batch (400) and nothing is written.
+
+```json
+{ "links": [
+  { "platform": "facebook", "accountId": "428353095282383", "clientId": "…", "campaignId": "…" },
+  { "platform": "taboola", "accountId": "…willwriting-sc", "clientId": null }
+] }
+```
+
+**Response (200):** `{ "created": 1, "updated": 0, "removed": 1, "unchanged": 0, "results": [{ "platform", "accountId", "action", "clientName", "campaignName" }] }`
+
+### GET /clients/lookup
+
+**Roles:** owner, ops_manager, finance_admin. **Query:** `platform`, `accountId` (both required).
+
+The client that owns an ad account. 404 when the account isn't linked.
+
+```json
+{ "status": "success", "data": {
+  "platform": "facebook-ads", "accountId": "428353095282383",
+  "client": { "id": "…", "companyName": "…", "currency": "CHF" },
+  "campaign": { "id": "…", "name": "Hearing Aids (CH)" }
+} }
+```
+
+### Scheduled Meta / Taboola creative sync (plan phase 3)
+
+Every `PLATFORM_SYNC_EVERY_HOURS` hours (default 3) a sync job pulls the ads of every linked **Meta** (`facebook-ads`) and **Taboola** ad account and files each creative under the client that owns the account, plus its campaign if one is set. The client always comes from the link above and is never guessed from a name. Each creative goes through the creative library's `upsertPlatformCreative()`, which copies the media into storage. Platform CDN links expire, so they are never kept as the file URL.
+
+- **Meta:** `GET /act_{id}/ads` with the creative fields and `updated_since`, following `paging.next`. Video sources come from `/{video_id}`, and image hashes (carousels, dynamic creative) from `/act_{id}/adimages`. Carousels and asset feeds give one creative per card/asset. The client backs off on throttling codes 4/17/32/613 and when `X-Business-Use-Case-Usage` is ≥ 90%.
+- **Taboola:** OAuth client_credentials, then `GET /{account_id}/campaigns` and `/{account_id}/campaigns/{id}/items/` for campaigns that are not terminated. Items still being crawled or stopped are skipped.
+- **No duplicates:** creatives are upserted on platform + creative id, so a second run updates rather than copies. The next Meta run asks only for ads updated since the last successful run, with 10 minutes of overlap. If any creative failed to save, the window is kept and retried.
+- **Off until connected:** with neither platform's credentials set, the job logs once and does nothing. The job runs on a fixed 3-hour slot (BullMQ scheduler), so the first run lands within one interval of deploy, not at boot. Use **Sync now** for an immediate pull.
+
+**Credentials needed from the account owner:**
+
+| Platform | What | Env |
+| --- | --- | --- |
+| Meta | Business Manager **system user token** with `ads_read`, and the system user assigned to every ad account that is linked to a client | `META_SYSTEM_USER_TOKEN` (optional `META_GRAPH_VERSION`, default `v21.0`) |
+| Taboola | **Backstage API client** (client_credentials) with access to each advertiser account | `TABOOLA_CLIENT_ID`, `TABOOLA_CLIENT_SECRET` |
+
+### GET /ad-accounts/sync-status
+
+**Roles:** owner, ops_manager, finance_admin.
+
+Whether each platform is connected, and for every linked Meta/Taboola account: the last run, the last error, and what the last run found.
+
+```json
+{ "status": "success", "data": {
+  "everyHours": 3,
+  "platforms": { "meta": { "connected": true }, "taboola": { "connected": false } },
+  "libraryInstalled": true,
+  "accounts": [{
+    "linkId": "…", "platform": "facebook-ads", "accountId": "428353095282383", "accountName": "CH Hearing",
+    "clientId": "…", "clientName": "…",
+    "lastRunAt": "2026-09-29T12:00:00.000Z", "lastSuccessAt": "2026-09-29T12:00:00.000Z", "lastError": null,
+    "adsSeen": 14, "created": 3, "updated": 11, "failed": 0
+  }]
+} }
+```
+
+### POST /ad-accounts/:id/sync-now
+
+**Roles:** owner, ops_manager. `:id` is the link id (`linkId` above).
+
+Pulls that one account now. **202** `{ "queued": true }` when queued (repeat clicks don't stack). **200** with the run's result when there is no queue. **404** for an unknown link. **409** when that platform isn't connected yet. **422** for platforms other than Meta/Taboola.
+
+## Creative library & landing pages
+
+Creatives belong to a **client** and optionally a campaign (migration 0045). A creative with `clientId: null` is *shared* on its campaign and is listed under every buyer on that campaign. Roles: owner / ops_manager write, finance_admin reads. See `docs/creative-library-and-api-plan.md`.
+
+### GET /creatives
+
+Query (all optional): `clientId`, `platform` (`meta|taboola|google|tiktok|manual`), `campaignId`, `landingPageId` (alias `landingPage`), `status` (`draft|sent_for_approval|approved|rejected|changes_requested`), `q` (name, headline, text, ad/creative id, platform campaign name), `from` / `to` (`YYYY-MM-DD`, on created date), `sort` (`created|last_seen|name`), `order` (`asc|desc`), `page`, `limit` (≤ 100, default 24).
+
+```json
+{ "status": "success", "data": { "creatives": [LibraryCreative], "total": 42, "page": 1, "pageSize": 24 } }
+```
+
+`LibraryCreative`: `id, name, clientId, clientName, campaignId, campaignName, shared, platform, platformAccountId, platformAdId, platformCreativeId, platformCampaignId, platformCampaignName, landingPage {id,url,title}|null, headline, bodyText, mediaType, contentType, sizeBytes, width, height, durationS, sha256, status, section, thumbnailUrl (signed, 1 h)|null, firstSeen, lastSeen, createdAt`.
+
+### GET /creatives/:id
+
+One `LibraryCreative` plus `fileUrl` (signed, 1 h).
+
+### POST /creatives
+
+One creative, or `{ "creatives": [ … up to 50 ] }` (response `data.results[]`, each `{ id, created, creative }` or `{ index, status, error }`).
+
+```json
+{
+  "platform": "meta",
+  "platformAccountId": "428353095282383",
+  "platformAdId": "120210000000001",
+  "platformCreativeId": "120210000000777",
+  "landingPageUrl": "https://offers.example.com/hearing?utm_source=fb",
+  "headline": "Hear clearly again",
+  "mediaType": "image",
+  "sourceUrl": "https://scontent.xx.fbcdn.net/…/ad.jpg"
+}
+```
+
+- **Client:** `clientId`, or found from `(platform, platformAccountId)` via the Link ad accounts table — IDs only, never names. Neither → `422`.
+- **File:** `r2Key` from `POST /uploads/presign` (folder `creatives`) with `contentType`/`sizeBytes`/`sha256`, **or** `sourceUrl` (downloaded by the server: public http(s) hosts only, images/videos only, max 50 MB → `422`/`413`).
+- **No duplicates:** the same `(platform, platformCreativeId)` — or the same file (sha256) for the same client — updates the existing creative (`200`, `created: false`) instead of copying it (`201`).
+- **Landing page:** `landingPageUrl` finds or creates the client's landing page by normalised URL (tracking params such as `utm_*`, `fbclid`, `gclid` ignored).
+- The pre-library campaign upload body (`campaignId, name, type, r2Key, fileUrl, sizeBytes, contentType, section`) is still accepted and behaves as before.
+
+### PATCH /creatives/:id
+
+`{ clientId?, campaignId?, landingPageId?, name?, headline?, bodyText? }`. Moving to another client drops a landing page that belongs to the old client.
+
+### POST /creatives/:id/landing-page
+
+`{ "url": "https://…" }` or `{ "landingPageId": "uuid" }`.
+
+### POST /creatives/bulk
+
+`{ "action": "assign_landing_page", "ids": [...], "url"|"landingPageId" }`, `{ "action": "move_client", "ids": [...], "clientId" }`, `{ "action": "submit_for_approval", "ids": [...] }` → `{ ok: [ids], failed: [{ id, message }] }`.
+
+### GET /landing-pages · GET /clients/:id/landing-pages
+
+Query: `clientId`, `q`, `includeArchived=true`. Each page: `id, clientId, campaignId, url, normalisedUrl, title, status, creativeCount, createdAt`.
+
+### POST /landing-pages
+
+`{ clientId, url, title?, campaignId? }` → `201` new, `200` when the client already has that (normalised) page.
+
+### PATCH /landing-pages/:id · DELETE /landing-pages/:id
+
+PATCH `{ url?, title?, status? }` (`409` if the new URL clashes with another page of the client). DELETE archives (soft delete); creatives keep their link.
+
+### Thumbnails
+
+New creatives queue a `media` → `thumbnail` job: images → 480 px webp via sharp; videos → poster frame via ffmpeg when installed (see Dockerfile note), else `thumbnailUrl` stays `null`.
+
+## Public API (API keys)
+
+Docs: **`GET /openapi.json`** (OpenAPI 3.1, generated from the routes' zod schemas) and **`GET /docs`** (reference page). Both public.
+
+**Auth:** `X-API-Key: stk_…`. Keys act inside their business with **scopes** only: `clients:read`, `ad_accounts:write`, `creatives:read`, `creatives:write`, `landing_pages:write`. 120 requests/minute per key; every call is logged. Unknown/revoked/expired key → `401`; missing scope → `403 { code: "insufficient_scope" }`.
+
+Key-enabled endpoints: `GET /clients/lookup`, `POST /clients/:id/ad-accounts`, `GET /creatives`, `GET /creatives/:id`, `POST /creatives` (supports `Idempotency-Key`: first response stored 24 h and replayed with `Idempotent-Replayed: true`; same key + different body → `422 idempotency_key_reused`), `POST /creatives/:id/landing-page`, `POST /landing-pages`. All other routes are JWT only.
+
+### POST /clients/:id/ad-accounts
+`{ platform, accountId, campaignId?, accountName?, currency? }` — upsert on (platform, accountId); `201` created, `200` updated/unchanged.
+
+### Settings → API keys (JWT, Owner only)
+- `GET /api-keys` → `{ apiKeys: [{ id, name, prefix, scopes, lastUsedAt, expiresAt, revokedAt, createdAt }], scopes }`
+- `POST /api-keys` `{ name, scopes[], expiresAt? }` → `201 { key, apiKey }` — **the key is shown once**; only its SHA-256 is stored.
+- `DELETE /api-keys/:id` — revoke.
+- `GET /api-keys/:id/usage` → last 100 calls `{ method, path, status, at }`.
+
+---
+
+## Outbound webhooks
+
+Stato POSTs a signed JSON event to your URL when something happens. The events are `creative.added`, `creative.changed` and `client.added`. These routes manage your endpoints. They are **Owner only** and sit under `/webhook-endpoints`, because `/webhooks` is where providers such as Xero and Resend call *us*.
+
+### Delivery format
+
+```http
+POST https://your-server.example/stato-hook
+Content-Type: application/json
+User-Agent: Stato-Webhooks/1.0
+X-Stato-Event: creative.added
+X-Stato-Delivery: 3b1f…   (same value on every retry of this delivery — use it to ignore duplicates)
+X-Stato-Signature: t=1790683200,v1=5f2c…
+```
+
+```json
+{ "id": "3b1f…", "event": "creative.added", "createdAt": "2026-09-29T12:00:00.000Z", "data": { "creative": { "id": "…" } } }
+```
+
+**Checking the signature.** `v1` is `hex(HMAC_SHA256(secret, "<t>.<raw body>"))`. Check it against the **raw** body, before you parse the JSON, and reject a `t` more than 5 minutes old. During a secret rotation there may be several `v1=` entries; accept the request if any of them matches. `verifyStatoSignature()` in `src/services/webhook-signature.ts` is a reference implementation you can copy; it only uses `node:crypto`.
+
+**Retries.**
+- Any answer other than a 2xx, a network error, or no answer within 10 s counts as a failure. Redirects are not followed.
+- A failed delivery is retried with exponential backoff: after 1, 2, 4, 8, 16, 32 and 64 minutes, for 8 attempts in total (about 2 h). The delivery row shows `status`, `attempts`, `nextAttemptAt` and `lastError`.
+- After **5 deliveries in a row** fail all their attempts, the endpoint is switched off (`active: false`, with `disabledReason` filled in). Switching it back on resets the count.
+
+**Allowed addresses.**
+- In production, only `https://` addresses to public hosts are accepted.
+- Loopback, private (10/8, 172.16/12, 192.168/16), link-local and cloud-metadata (169.254/16), CGNAT, unique-local IPv6 and IPv4-mapped forms are refused. They are checked when the endpoint is saved, and checked again at connect time, which stops DNS rebinding.
+
+Production needs **`WEBHOOK_SECRET_KEY`**. It encrypts each endpoint's signing secret at rest. Signing needs the raw secret, so a hash can't be stored. If you change the key, rotate every endpoint's secret afterwards.
+
+### GET /webhook-endpoints
+
+Returns your endpoints and the list of available events. The secret is never returned here; `secretHint` holds its first 12 characters.
+
+### POST /webhook-endpoints
+
+```json
+{ "url": "https://your-server.example/stato-hook", "events": ["creative.added", "client.added"], "description": "Media buying tool" }
+```
+
+**201** `{ "endpoint": { … }, "secret": "whsec_…" }`. The secret is shown **only in this response**. **400** for an unknown event or a refused address; the message says why in plain words.
+
+### PATCH /webhook-endpoints/:id
+
+Any of `url`, `events`, `description`, `active` or `rotateSecret: true`. Rotating returns a new `secret` once. Setting `active: true` on a switched-off endpoint clears its failure count.
+
+### DELETE /webhook-endpoints/:id
+
+Deletes the endpoint and its delivery history.
+
+### GET /webhook-endpoints/:id/deliveries?limit=50
+
+Returns the latest deliveries (up to 200), newest first.
+
+### POST /webhook-endpoints/:id/test
+
+Sends one signed `webhook.test` delivery straight away, with no retries, and returns `{ ok, status, error, delivery }`. Use it to check your signature verification.
+
+### POST /webhook-endpoints/:id/deliveries/:deliveryId/redeliver
+
+Queues a delivery again. **202**.
+
 ## Workflows
 
 All workflow endpoints require `owner` or `ops_manager` role.

@@ -23,7 +23,7 @@ import type { DeliveryWindow } from '../integrations/leadbyte/leadbyte-types.js'
 import { cached, LEADBYTE_SHARED_CACHE_TTL_SECONDS } from '../utils/cache.js';
 import { computeEffectiveAgreementStatus } from './agreement.service.js';
 import { logger } from '../utils/logger.js';
-import { normalizeCurrencyCode } from '../utils/currency.js';
+import { normalizeCurrencyCode, formatMoney } from '../utils/currency.js';
 import { canonicalPlatformSql, canonicalizePlatform } from '../utils/catchr-platform.js';
 import type { AuthPayload } from '../types/index.js';
 
@@ -1296,7 +1296,7 @@ export async function getCompliance(requester: AuthPayload): Promise<PortalCompl
             decidedByName: state?.decidedByName ?? null,
             feedback: state?.feedback ?? null,
           },
-          campaignMetrics: metricsByCampaign.get(cr.campaignId) ?? null,
+          campaignMetrics: (cr.campaignId && metricsByCampaign.get(cr.campaignId)) || null,
         };
       }),
     landingPages: landingRows
@@ -1415,14 +1415,15 @@ export async function getCreativesBySection(requester: AuthPayload): Promise<Por
     .where(eq(clients.id, clientId))
     .limit(1);
   const clientCurrency = normalizeCurrencyCode(clientCurrencyRow[0]?.currency ?? null, 'GBP');
-  const campaignIdsForMetrics = Array.from(new Set(rows.map((r) => r.campaignId)));
+  // Inner-joined on campaigns above, so campaignId is always set here.
+  const campaignIdsForMetrics = Array.from(new Set(rows.map((r) => r.campaignId!)));
   const metricsByCampaign = await getCampaignMetricsForCampaigns(campaignIdsForMetrics, clientCurrency);
 
   const items: PortalCreative[] = rows.map((r) => {
     const state = approvalStates.get(r.id);
     return {
       id: r.id,
-      campaignId: r.campaignId,
+      campaignId: r.campaignId!,
       campaignName: r.campaignName,
       name: r.name,
       type: r.type ?? 'unknown',
@@ -1437,7 +1438,7 @@ export async function getCreativesBySection(requester: AuthPayload): Promise<Por
         decidedByName: state?.decidedByName ?? null,
         feedback: state?.feedback ?? null,
       },
-      campaignMetrics: metricsByCampaign.get(r.campaignId) ?? null,
+      campaignMetrics: metricsByCampaign.get(r.campaignId!) ?? null,
     };
   });
 
@@ -1476,7 +1477,7 @@ export async function getCreativeSignedUrlForPortal(
   if (row.status === 'draft') return null;
 
   const linkedCampaignIds = await campaignIdsForClient(clientId);
-  if (!linkedCampaignIds.includes(row.campaignId)) return null;
+  if (!row.campaignId || !linkedCampaignIds.includes(row.campaignId)) return null;
 
   const location = resolveR2Location(row.fileUrl, row.r2Key);
   if (!location) return null;
@@ -1541,7 +1542,7 @@ export async function getAgreement(requester: AuthPayload): Promise<PortalAgreem
     signedAt: signedAt ? signedAt.toISOString() : null,
     documentUrl: row.documentUrl,
     clientName: client.companyName,
-    terms: `Lead Generation Service Agreement between leadgeneration.io and ${client.companyName}. Lead price: £${client.leadPrice ?? '0.00'} per valid lead. Payment terms: ${client.paymentTermsDays ?? 30} days.`,
+    terms: `Lead Generation Service Agreement between leadgeneration.io and ${client.companyName}. Lead price: ${formatMoney(client.leadPrice ?? 0, client.leadPriceCurrency ?? client.currency)} per valid lead. Payment terms: ${client.paymentTermsDays ?? 30} days.`,
   };
 }
 

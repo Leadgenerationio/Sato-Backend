@@ -1,4 +1,4 @@
-import { desc, eq } from 'drizzle-orm';
+import { desc, eq, isNull } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { sosHelpRequests } from '../db/schema/sos-help.js';
 import { users } from '../db/schema/users.js';
@@ -140,6 +140,8 @@ export async function listSosRequests(
     })
     .from(sosHelpRequests)
     .leftJoin(users, eq(users.id, sosHelpRequests.userId))
+    // N6: archived from Settings → Clean up — hidden, never deleted.
+    .where(isNull(sosHelpRequests.archivedAt))
     .orderBy(desc(sosHelpRequests.createdAt))
     .limit(limit);
 

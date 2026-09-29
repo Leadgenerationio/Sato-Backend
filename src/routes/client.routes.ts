@@ -19,6 +19,11 @@ const listClientsQuerySchema = z.object({
   query: paginationQuerySchema.extend({
     status: z.string().optional(),
     search: z.string().optional(),
+    currency: z.string().length(3).optional(),
+    country: z.string().max(100).optional(),
+    addedBy: z.union([z.guid(), z.literal('unknown')]).optional(),
+    sort: z.enum(['company', 'status', 'revenue', 'campaigns', 'credit', 'created']).optional(),
+    dir: z.enum(['asc', 'desc']).optional(),
   }),
 });
 
@@ -32,7 +37,9 @@ const listClientsQuerySchema = z.object({
 // API refuses to accept them (existing rows migrated via 0022). UI labels
 // live on the FE: 'onboarding' → "Onboarding", 'active' → "Active Client",
 // 'churned' → "Client Churned".
-const clientStatusEnum = z.enum(['onboarding', 'active', 'churned']);
+// Feedback M4 (29 Sep 2026): 'paused' is accepted again and shown as
+// "Paused" (it had been folded into churned by 0022). 'prospect' stays retired.
+const clientStatusEnum = z.enum(['onboarding', 'active', 'paused', 'churned']);
 const onboardingEnum = z.enum(['pending', 'documents_received', 'agreement_signed', 'active']);
 const billingWorkflowEnum = z.enum(['weekly_auto', 'monthly_validated', 'custom']);
 const contactTypeEnum = z.enum(['primary', 'billing', 'compliance', 'other']);
@@ -123,6 +130,8 @@ clientRoutes.use(requireRole('owner', 'finance_admin', 'ops_manager'));
 
 clientRoutes.get('/', validate(listClientsQuerySchema), clientController.listClients);
 clientRoutes.get('/credit-alerts', clientController.getCreditAlerts);
+clientRoutes.get('/export.csv', validate(listClientsQuerySchema), clientController.exportClientsCsv);
+clientRoutes.get('/added-by-options', clientController.listAddedByOptions);
 
 // #39 Attio bulk import. Static paths must be registered BEFORE /:id
 // catch-alls so Express doesn't route "import" to getClient.
@@ -131,6 +140,7 @@ const importAttioSchema = z.object({
     attioIds: z.array(z.string().min(1).max(100)).min(1).max(200),
   }),
 });
+clientRoutes.get('/import/attio/status', clientImportController.attioStatus);
 clientRoutes.get('/import/attio/companies', clientImportController.browseAttio);
 clientRoutes.post('/import/attio', validate(importAttioSchema), clientImportController.importFromAttio);
 clientRoutes.get('/:id', clientController.getClient);

@@ -11,6 +11,9 @@ export const invoices = pgTable('invoices', {
   subtotal: decimal('subtotal', { precision: 12, scale: 2 }),
   vatAmount: decimal('vat_amount', { precision: 12, scale: 2 }),
   total: decimal('total', { precision: 12, scale: 2 }),
+  // Migration 0044 (feedback S12): the invoice's own date (Xero `Date`).
+  // NULL for invoices raised in Stato — the FE falls back to createdAt.
+  invoiceDate: timestamp('invoice_date'),
   dueDate: timestamp('due_date'),
   paidDate: timestamp('paid_date'),
   daysOverdue: integer('days_overdue').default(0),
