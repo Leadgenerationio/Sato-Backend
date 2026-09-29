@@ -201,7 +201,7 @@ export async function hashObject(folder: R2Folder, key: string, maxBytes: number
   }
   const body = res.Body as (AsyncIterable<Uint8Array> & { destroy?: () => void }) | undefined;
   try {
-    if (!body) return null;
+    if (!body) throw new Error('R2 returned no body for the object');
     if (typeof res.ContentLength === 'number' && res.ContentLength > maxBytes) throw new ObjectTooLargeError(maxBytes);
     const hash = createHash('sha256');
     let total = 0;

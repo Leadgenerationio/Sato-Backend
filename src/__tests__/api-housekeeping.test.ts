@@ -17,4 +17,13 @@ describe('purgeApiHousekeeping', () => {
     const left = await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.owner, owner));
     expect(left.map((r) => r.key)).toEqual(['fresh']);
   });
+
+  it('keeps deleting across batches until nothing old is left, and reports the count', async () => {
+    const o = `${owner}-b`;
+    const rows = Array.from({ length: 5 }, (_, i) => ({ owner: o, key: `k${i}`, requestHash: 'c'.repeat(64), status: 201, response: {}, createdAt: hoursAgo(40) }));
+    await db.insert(idempotencyKeys).values(rows);
+    const res = await purgeApiHousekeeping(new Date(), 2);
+    expect(res.idempotencyKeys).toBeGreaterThanOrEqual(5);
+    expect(await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.owner, o))).toHaveLength(0);
+  });
 });
