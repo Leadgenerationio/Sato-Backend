@@ -50,6 +50,13 @@ export interface AdAccountRow {
 export interface AdAccountList {
   windowDays: number;
   accounts: AdAccountRow[];
+  /** Picker options for the bulk screen: every client in the business and
+   *  every Sato campaign (by UUID — the campaigns list API is keyed by
+   *  LeadByte id), so the screen needs one round-trip. */
+  options: {
+    clients: Array<{ id: string; companyName: string; status: string | null; currency: string | null }>;
+    campaigns: Array<{ id: string; name: string; status: string | null }>;
+  };
   summary: {
     total: number;
     linked: number;
@@ -80,7 +87,7 @@ export async function listAdAccounts(requester: AuthPayload, windowDays = 30): P
   const adPlatform = sql.raw(`coalesce(${canonicalPlatformSql('d.platform')}, lower(trim(d.platform)))`);
   const tsPlatform = sql.raw(`coalesce(${canonicalPlatformSql('ts.platform')}, lower(trim(ts.platform)))`);
 
-  const [spendRows, sourceRows, linkRows] = await Promise.all([
+  const [spendRows, sourceRows, linkRows, clientOptions, campaignOptions] = await Promise.all([
     // Deduped per natural key (Catchr ingests a day once per authorization
     // id), same rule as every other spend figure.
     db.execute(sql`
@@ -134,6 +141,15 @@ export async function listAdAccounts(requester: AuthPayload, windowDays = 30): P
       .innerJoin(clients, eq(clients.id, clientAdAccounts.clientId))
       .leftJoin(campaigns, eq(campaigns.id, clientAdAccounts.campaignId))
       .where(eq(clientAdAccounts.businessId, businessId)),
+    db
+      .select({ id: clients.id, companyName: clients.companyName, status: clients.status, currency: clients.currency })
+      .from(clients)
+      .where(eq(clients.businessId, businessId))
+      .orderBy(clients.companyName),
+    db
+      .select({ id: campaigns.id, name: campaigns.name, status: campaigns.status })
+      .from(campaigns)
+      .orderBy(campaigns.name),
   ]);
 
   const byKey = new Map<string, AdAccountRow>();
@@ -194,6 +210,10 @@ export async function listAdAccounts(requester: AuthPayload, windowDays = 30): P
   return {
     windowDays: days,
     accounts,
+    options: {
+      clients: clientOptions.map((c) => ({ ...c, status: c.status ?? null, currency: c.currency ?? null })),
+      campaigns: campaignOptions.map((c) => ({ ...c, status: c.status ?? null })),
+    },
     summary: {
       total: accounts.length,
       linked: accounts.length - unlinked.length,

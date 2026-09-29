@@ -86,6 +86,12 @@ describe('GET /api/v1/ad-accounts', () => {
     expect(byId[acct(2)]).toMatchObject({ platform: 'taboola', accountName: 'Hearing Aids Poland', spend: 250.5, currency: 'EUR' });
     expect(byId[acct(3)]).toMatchObject({ platform: 'google-ads', spend: 0, campaigns: [{ campaignId, campaignName: `Hearing Aids (CH) ${tag}` }] });
     expect(res.body.data.summary.unlinkedSpend).toBeGreaterThanOrEqual(1250.5);
+    // Picker options come with the list: clients of this business, Sato campaigns by UUID.
+    const clientIds = res.body.data.options.clients.map((c: { id: string }) => c.id);
+    expect(clientIds).toEqual(expect.arrayContaining([clientA, clientB]));
+    expect(res.body.data.options.campaigns).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: campaignId, name: `Hearing Aids (CH) ${tag}` })]),
+    );
   });
 
   it('is refused for client portal users', async () => {
