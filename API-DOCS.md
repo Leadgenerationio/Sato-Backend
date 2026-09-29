@@ -814,6 +814,23 @@ PATCH `{ url?, title?, status? }` (`409` if the new URL clashes with another pag
 
 New creatives queue a `media` → `thumbnail` job: images → 480 px webp via sharp; videos → poster frame via ffmpeg when installed (see Dockerfile note), else `thumbnailUrl` stays `null`.
 
+## Public API (API keys)
+
+Docs: **`GET /openapi.json`** (OpenAPI 3.1, generated from the routes' zod schemas) and **`GET /docs`** (reference page). Both public.
+
+**Auth:** `X-API-Key: stk_…`. Keys act inside their business with **scopes** only: `clients:read`, `ad_accounts:write`, `creatives:read`, `creatives:write`, `landing_pages:write`. 120 requests/minute per key; every call is logged. Unknown/revoked/expired key → `401`; missing scope → `403 { code: "insufficient_scope" }`.
+
+Key-enabled endpoints: `GET /clients/lookup`, `POST /clients/:id/ad-accounts`, `GET /creatives`, `GET /creatives/:id`, `POST /creatives` (supports `Idempotency-Key`: first response stored 24 h and replayed with `Idempotent-Replayed: true`; same key + different body → `422 idempotency_key_reused`), `POST /creatives/:id/landing-page`, `POST /landing-pages`. All other routes are JWT only.
+
+### POST /clients/:id/ad-accounts
+`{ platform, accountId, campaignId?, accountName?, currency? }` — upsert on (platform, accountId); `201` created, `200` updated/unchanged.
+
+### Settings → API keys (JWT, Owner only)
+- `GET /api-keys` → `{ apiKeys: [{ id, name, prefix, scopes, lastUsedAt, expiresAt, revokedAt, createdAt }], scopes }`
+- `POST /api-keys` `{ name, scopes[], expiresAt? }` → `201 { key, apiKey }` — **the key is shown once**; only its SHA-256 is stored.
+- `DELETE /api-keys/:id` — revoke.
+- `GET /api-keys/:id/usage` → last 100 calls `{ method, path, status, at }`.
+
 ---
 
 ## Workflows

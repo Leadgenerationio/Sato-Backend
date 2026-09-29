@@ -25,3 +25,13 @@ export async function lookup(req: Request, res: Response) {
   );
   res.json({ status: 'success', data });
 }
+
+/** POST /clients/:id/ad-accounts — one link, for the public API. */
+export async function linkOne(req: Request, res: Response) {
+  const { platform, accountId, campaignId, accountName, currency } = req.body as {
+    platform: string; accountId: string; campaignId?: string | null; accountName?: string | null; currency?: string | null;
+  };
+  const data = await service.bulkUpsertLinks(req.user!, [{ platform, accountId, clientId: String(req.params.id), campaignId, accountName, currency }]);
+  const action = data.results[0]?.action ?? 'unchanged';
+  res.status(action === 'created' ? 201 : 200).json({ status: 'success', data: { link: data.results[0] ?? null } });
+}
