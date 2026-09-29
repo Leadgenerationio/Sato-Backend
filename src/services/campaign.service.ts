@@ -10,9 +10,20 @@ import { cached, LEADBYTE_SHARED_CACHE_TTL_SECONDS } from '../utils/cache.js';
 import { logger } from '../utils/logger.js';
 import { pickVertical } from '../utils/vertical.js';
 import {
-  aggregateCatchrSpend,
   aggregateCatchrSpendByLbId,
+  catchrDailySpendByPlatform,
+  type CampaignDailyPlatformSpend,
 } from './traffic-source-aggregation.service.js';
+import {
+  earliestWindowStart,
+  mergeSuppliers,
+  spendByPlatform,
+  sumSpend,
+  windowBounds,
+  type MergedSupplier,
+  type MoneyWindow,
+} from './campaign-money.js';
+import { getCampaignSuppliers } from './campaign-suppliers.js';
 import type { AuthPayload } from '../types/index.js';
 import type { DeliveryWindow, LeadByteCampaignReportRow } from '../integrations/leadbyte/leadbyte-types.js';
 
@@ -314,7 +325,13 @@ export interface CampaignSummary {
 export interface CampaignWindowTotals {
   leads: number;
   revenue: number;
+  /** leadbyteCost + adSpend — the full cost for the window, so it agrees
+   *  with revenue − cost = profit (Sam S11). */
   cost: number;
+  /** What LeadByte paid out to suppliers in the window. */
+  leadbyteCost: number;
+  /** Catchr ad spend of this campaign's linked accounts in the window. */
+  adSpend: number;
 }
 
 export interface CampaignDetail extends CampaignSummary {
@@ -356,15 +373,19 @@ export interface CampaignDetail extends CampaignSummary {
     last_month: CampaignWindowTotals;
     ytd: CampaignWindowTotals;
   };
-  suppliers: {
-    id: string;
-    name: string;
-    platform: string;
-    totalSpend: number;
-    totalLeads: number;
-    cpl: number;
-  }[];
+  /** One row per source (LeadByte suppliers and Catchr platforms merged —
+   *  "facebook" and "Facebook Ads" are one row), last 30 days. */
+  suppliers: MergedSupplier[];
 }
+
+/** Days from Jan 1 to today — the `windowDays` that makes the Catchr
+ *  rollups cover the same year-to-date span as the headline revenue. */
+function daysSinceYearStart(now: Date = new Date()): number {
+  const jan1 = Date.UTC(now.getUTCFullYear(), 0, 1);
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  return Math.round((today - jan1) / 86_400_000);
+}
+
 
 export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSummary[]> {
   // Fetch the campaign list + 4 windows of /reports/campaign in parallel.
@@ -398,15 +419,16 @@ export async function listCampaigns(_requester: AuthPayload): Promise<CampaignSu
     'today', 'this_week', 'this_month', 'last_month', 'ytd',
   ]);
 
-  // Batched Catchr-spend rollup per campaign — one query attributes 30-day
-  // ad_spend to each campaign via the traffic_sources mapping (active rows
+  // Batched Catchr-spend rollup per campaign — one query attributes
+  // year-to-date ad_spend (the same span as the headline revenue, Sam S11)
+  // to each campaign via the traffic_sources mapping (active rows
   // only). Campaigns with no mappings get 0, matching T1's rule "no spend
   // counts against a campaign until you link the ad account". Returned map
   // is keyed by LeadByte campaign id because the per-row map step below
   // already has `c.id = leadbyteCampaignId` in hand.
   let catchrCostByLbId = new Map<string, number>();
   try {
-    catchrCostByLbId = await aggregateCatchrSpendByLbId(30);
+    catchrCostByLbId = await aggregateCatchrSpendByLbId(daysSinceYearStart());
   } catch (err) {
     logger.warn(
       { err: err instanceof Error ? err.message : String(err) },
@@ -659,7 +681,7 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
       ]);
       return [...last, ...current];
     }),
-    cached(`lb:suppliers:${id}:30d:v1`, PER_CAMPAIGN_TTL, () => leadbyte.getSuppliers(id)),
+    getCampaignSuppliers(id),
     // Sato-side metadata is intentionally NOT cached — cost_per_lead is
     // edited inline by users and stale reads break the UX immediately.
     // Sub-millisecond DB lookup so caching would add nothing anyway.
@@ -690,34 +712,63 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
   const lastMonthRow = findRow(lastMonthReport);
   const ytdRow = findRow(ytdReport);
 
-  const rowToWindow = (r: typeof todayRow): CampaignWindowTotals => ({
-    leads: r?.leads ?? 0,
-    revenue: Math.round((r?.revenue ?? 0) * 100) / 100,
-    cost: Math.round(
-      ((r?.payout ?? 0) + (r?.emailCost ?? 0) + (r?.smsCost ?? 0) + (r?.validationCost ?? 0)) * 100,
-    ) / 100,
-  });
+  // Catchr ad spend for this campaign's linked accounts, one row per
+  // (platform, day) since the earliest window we show. Every windowed cost,
+  // the headline cost and the per-source spend are bucketed from these same
+  // rows, so the figures on the page can't disagree (Sam S11: "Cost £0.00"
+  // sat next to a −£1,087.53 loss because windowed cost was LeadByte-only).
+  const SPEND_WINDOWS: readonly MoneyWindow[] = [
+    'today', 'yesterday', 'this_week', 'last_week', 'this_month', 'last_month', 'ytd', 'last_30d',
+  ];
+  let dailySpend: CampaignDailyPlatformSpend[] = [];
+  if (satoMeta.satoId) {
+    try {
+      dailySpend = await catchrDailySpendByPlatform(satoMeta.satoId, earliestWindowStart(SPEND_WINDOWS));
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), campaignId: satoMeta.satoId },
+        'getCampaign: Catchr ad-spend rollup failed — costs will only reflect LeadByte',
+      );
+    }
+  }
+  const adSpendIn = (w: MoneyWindow) => sumSpend(dailySpend, windowBounds(w));
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+
+  const rowToWindow = (r: typeof todayRow, w: MoneyWindow): CampaignWindowTotals => {
+    const leadbyteCost = round2(
+      (r?.payout ?? 0) + (r?.emailCost ?? 0) + (r?.smsCost ?? 0) + (r?.validationCost ?? 0),
+    );
+    const adSpend = adSpendIn(w);
+    return {
+      leads: r?.leads ?? 0,
+      revenue: round2(r?.revenue ?? 0),
+      cost: round2(leadbyteCost + adSpend),
+      leadbyteCost,
+      adSpend,
+    };
+  };
 
   // YTD totals — a true Jan 1 → today sum from local lead_deliveries when
   // present, else LeadByte's ytd row, else the this_month + last_month
   // approximation. Same source selection as listCampaigns (resolveYtdTotals).
   const ytdTotals = resolveYtdTotals(ytdRow, ytdByLbId.get(id), [monthRow, lastMonthRow]);
+  const ytdAdSpend = adSpendIn('ytd');
 
   const windowReports = {
-    today: rowToWindow(todayRow),
-    yesterday: rowToWindow(yesterdayRow),
-    this_week: rowToWindow(weekRow),
-    last_week: rowToWindow(lastWeekRow),
-    this_month: rowToWindow(monthRow),
-    last_month: rowToWindow(lastMonthRow),
+    today: rowToWindow(todayRow, 'today'),
+    yesterday: rowToWindow(yesterdayRow, 'yesterday'),
+    this_week: rowToWindow(weekRow, 'this_week'),
+    last_week: rowToWindow(lastWeekRow, 'last_week'),
+    this_month: rowToWindow(monthRow, 'this_month'),
+    last_month: rowToWindow(lastMonthRow, 'last_month'),
     // The YTD tab mirrors the resolved headline (true Jan 1 → today), not the
-    // raw LeadByte ytd row which is often zero. Cost here is LeadByte-only to
-    // match the other windows (Catchr ad-spend is folded into the headline
-    // totalCost below, not per-window).
+    // raw LeadByte ytd row which is often zero.
     ytd: {
       leads: ytdTotals.leads,
-      revenue: Math.round(ytdTotals.revenue * 100) / 100,
-      cost: Math.round(ytdTotals.leadbyteCost * 100) / 100,
+      revenue: round2(ytdTotals.revenue),
+      cost: round2(ytdTotals.leadbyteCost + ytdAdSpend),
+      leadbyteCost: round2(ytdTotals.leadbyteCost),
+      adSpend: ytdAdSpend,
     },
   };
 
@@ -727,25 +778,11 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
   const leadsThisMonth = monthRow?.leads ?? 0;
   const totalRevenue = ytdTotals.revenue;
   const leadbyteCost = ytdTotals.leadbyteCost;
-
-  // Add the real Catchr ad-spend attributed to this campaign via active
-  // traffic_sources mappings. LeadByte's `payout` field is zero for
-  // direct-traffic campaigns like Solar Panels (UK) where Sam runs his
-  // own ads — without this addition the campaign would show "100% margin"
-  // while real Facebook spend sits unattributed in ad_spend. Window is
-  // 30d to match Catchr's sync window; campaigns with no mappings get 0
-  // (T1 rule: nothing is attributed until you link the account).
-  let catchrCost = 0;
-  if (satoMeta.satoId) {
-    try {
-      catchrCost = await aggregateCatchrSpend(satoMeta.satoId, 30);
-    } catch (err) {
-      logger.warn(
-        { err: err instanceof Error ? err.message : String(err), campaignId: satoMeta.satoId },
-        'getCampaign: Catchr ad-spend rollup failed — top strip will only reflect LeadByte cost',
-      );
-    }
-  }
+  // Year-to-date ad spend, the same span as totalRevenue — previously a
+  // trailing 30 days, so the headline margin compared a year of revenue
+  // with a month of spend. Catchr only holds ~50 days of history, so in
+  // practice this is "all the ad spend we have".
+  const catchrCost = ytdAdSpend;
 
   const totalCost = leadbyteCost + catchrCost;
   const cpl = totalLeads > 0 ? totalCost / totalLeads : 0;
@@ -820,13 +857,8 @@ export async function getCampaign(id: string, _requester: AuthPayload): Promise<
       });
     })(),
     windowReports,
-    suppliers: suppliers.map((s) => ({
-      id: s.id,
-      name: s.name,
-      platform: s.platform,
-      totalSpend: s.totalSpend,
-      totalLeads: s.totalLeads,
-      cpl: s.totalLeads > 0 ? Math.round((s.totalSpend / s.totalLeads) * 100) / 100 : 0,
-    })),
+    // LeadByte's supplier report is last-30-days, so the ad spend folded in
+    // is the same 30 days.
+    suppliers: mergeSuppliers(suppliers, spendByPlatform(dailySpend, windowBounds('last_30d'))),
   };
 }
