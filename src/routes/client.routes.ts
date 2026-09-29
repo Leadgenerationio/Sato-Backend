@@ -32,7 +32,9 @@ const listClientsQuerySchema = z.object({
 // API refuses to accept them (existing rows migrated via 0022). UI labels
 // live on the FE: 'onboarding' → "Onboarding", 'active' → "Active Client",
 // 'churned' → "Client Churned".
-const clientStatusEnum = z.enum(['onboarding', 'active', 'churned']);
+// Feedback M4 (29 Sep 2026): 'paused' is accepted again and shown as
+// "Paused" (it had been folded into churned by 0022). 'prospect' stays retired.
+const clientStatusEnum = z.enum(['onboarding', 'active', 'paused', 'churned']);
 const onboardingEnum = z.enum(['pending', 'documents_received', 'agreement_signed', 'active']);
 const billingWorkflowEnum = z.enum(['weekly_auto', 'monthly_validated', 'custom']);
 const contactTypeEnum = z.enum(['primary', 'billing', 'compliance', 'other']);

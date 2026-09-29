@@ -34,7 +34,15 @@ export interface ClientSummary {
   currency: string;
   creditScore: number | null;
   activeCampaigns: number;
+  /**
+   * Paid revenue in the client's OWN currency (`currency`). Invoices raised in
+   * any other currency are NOT folded in — they're in `revenueByCurrency`.
+   * Feedback M3 (29 Sep 2026): the list used to sum every invoice regardless
+   * of currency and the FE printed it with a hard-coded £.
+   */
   totalRevenue: number;
+  /** Paid revenue per invoice currency, e.g. { EUR: 399791, GBP: 1200 }. */
+  revenueByCurrency: Record<string, number>;
   createdAt: string;
   // Reality-check fields for the "Active Client" badge on the list page —
   // matches the same gate the detail-page badge + stage indicator use.
@@ -129,12 +137,25 @@ async function loadContactsForClient(clientId: string): Promise<ClientContact[]>
   return rows.map(toContact);
 }
 
+/**
+ * Split a per-currency revenue map into the figure shown for the client (its
+ * own currency only — never a cross-currency sum) plus the full breakdown.
+ */
+export function clientRevenueFigures(
+  byCurrency: Record<string, number> | undefined,
+  clientCurrency: string,
+): { totalRevenue: number; revenueByCurrency: Record<string, number> } {
+  const revenueByCurrency = { ...(byCurrency ?? {}) };
+  return { totalRevenue: revenueByCurrency[clientCurrency] ?? 0, revenueByCurrency };
+}
+
 function toSummary(
   row: ClientRow,
   activeCampaigns: number,
-  totalRevenue: number,
+  revenueByCurrency: Record<string, number> | undefined,
   documentsCount: number,
 ): ClientSummary {
+  const currency = row.currency ?? 'GBP';
   return {
     id: row.id,
     companyName: row.companyName,
@@ -145,19 +166,19 @@ function toSummary(
     // (the new "first state") instead of 'prospect' so the FE label map never
     // sees the deprecated value.
     status: row.status ?? 'onboarding',
-    currency: row.currency ?? 'GBP',
+    currency,
     creditScore: row.creditScore,
     activeCampaigns,
-    totalRevenue,
+    ...clientRevenueFigures(revenueByCurrency, currency),
     createdAt: (row.createdAt ?? new Date()).toISOString(),
     agreementSigned: row.agreementSigned ?? false,
     documentsCount,
   };
 }
 
-function toDetail(row: ClientRow, activeCampaigns: number, totalRevenue: number, contacts: ClientContact[] = []): ClientDetail {
+function toDetail(row: ClientRow, activeCampaigns: number, revenueByCurrency: Record<string, number>, contacts: ClientContact[] = []): ClientDetail {
   return {
-    ...toSummary(row, activeCampaigns, totalRevenue, 0),
+    ...toSummary(row, activeCampaigns, revenueByCurrency, 0),
     contacts,
     clientType: row.clientType ?? 'ppl',
     companyNumber: row.companyNumber ?? '',
@@ -243,28 +264,40 @@ async function loadDocumentsCountByClient(businessId: string): Promise<Map<strin
   return map;
 }
 
-async function loadRevenueByClient(businessId: string): Promise<Map<string, number>> {
+// Paid revenue grouped by (client, invoice currency). Amounts in different
+// currencies are never added together — see clientRevenueFigures().
+async function loadRevenueByClient(businessId: string): Promise<Map<string, Record<string, number>>> {
+  const currencyExpr = sql<string>`coalesce(${invoices.currency}, 'GBP')`;
   const rows = await db
     .select({
       clientId: invoices.clientId,
+      currency: currencyExpr,
       total: sql<string>`coalesce(sum(${invoices.total}), 0)`,
     })
     .from(invoices)
     .innerJoin(clients, eq(clients.id, invoices.clientId))
     .where(and(eq(clients.businessId, businessId), eq(invoices.status, 'paid')))
-    .groupBy(invoices.clientId);
+    .groupBy(invoices.clientId, currencyExpr);
 
-  const map = new Map<string, number>();
-  for (const r of rows) map.set(r.clientId, Number(r.total ?? 0));
+  const map = new Map<string, Record<string, number>>();
+  for (const r of rows) {
+    const byCur = map.get(r.clientId) ?? {};
+    byCur[r.currency] = Number(r.total ?? 0);
+    map.set(r.clientId, byCur);
+  }
   return map;
 }
 
-async function getRevenueForClient(clientId: string): Promise<number> {
-  const [row] = await db
-    .select({ total: sql<string>`coalesce(sum(${invoices.total}), 0)` })
+async function getRevenueForClient(clientId: string): Promise<Record<string, number>> {
+  const currencyExpr = sql<string>`coalesce(${invoices.currency}, 'GBP')`;
+  const rows = await db
+    .select({ currency: currencyExpr, total: sql<string>`coalesce(sum(${invoices.total}), 0)` })
     .from(invoices)
-    .where(and(eq(invoices.clientId, clientId), eq(invoices.status, 'paid')));
-  return Number(row?.total ?? 0);
+    .where(and(eq(invoices.clientId, clientId), eq(invoices.status, 'paid')))
+    .groupBy(currencyExpr);
+  const out: Record<string, number> = {};
+  for (const r of rows) out[r.currency] = Number(r.total ?? 0);
+  return out;
 }
 
 // ─── Service ───
@@ -341,7 +374,7 @@ export async function listClients(
   ]);
 
   return {
-    items: rows.map((r) => toSummary(r, countMap.get(r.id) ?? 0, revenueMap.get(r.id) ?? 0, docsMap.get(r.id) ?? 0)),
+    items: rows.map((r) => toSummary(r, countMap.get(r.id) ?? 0, revenueMap.get(r.id), docsMap.get(r.id) ?? 0)),
     total: countResult[0]?.n ?? 0,
     page,
     pageSize,
@@ -550,7 +583,7 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
     companyName: row.companyName,
     companyNumber: row.companyNumber,
   });
-  return toDetail(row, 0, 0, contacts);
+  return toDetail(row, 0, {}, contacts);
 }
 
 /**

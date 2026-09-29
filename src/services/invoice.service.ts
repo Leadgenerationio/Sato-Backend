@@ -580,10 +580,24 @@ export async function syncInvoicesFromXero(
 
 export type OutstandingBucket = 'all' | 'due' | 'overdue';
 
+export interface CurrencyTotal {
+  currency: string;
+  total: string; // decimal-on-the-wire
+  count: number;
+}
+
 export interface OutstandingInvoicesResult {
   invoices: InvoiceSummary[];
   count: number;
+  /**
+   * @deprecated Sum of `total` across ALL currencies — meaningless when more
+   * than one currency is outstanding (€34,860 + £23,250 ≠ £58,110). Kept only
+   * so an already-deployed frontend keeps rendering; use `totalsByCurrency`.
+   * Feedback M3 (29 Sep 2026).
+   */
   totalOutstanding: string; // decimal-on-the-wire
+  /** One entry per invoice currency, largest total first. Never cross-summed. */
+  totalsByCurrency: CurrencyTotal[];
 }
 
 /**
@@ -601,7 +615,7 @@ export async function getOutstandingInvoices(
   bucket: OutstandingBucket = 'all',
 ): Promise<OutstandingInvoicesResult> {
   const businessId = requester.businessId;
-  if (!businessId) return { invoices: [], count: 0, totalOutstanding: '0' };
+  if (!businessId) return { invoices: [], count: 0, totalOutstanding: '0', totalsByCurrency: [] };
 
   // 'submitted' is part of OUTSTANDING_STATUSES (and the portal pending count),
   // so it must be treated like 'sent'/'authorised' here too — otherwise a
@@ -635,7 +649,8 @@ export async function getOutstandingInvoices(
     isNotNull(invoices.xeroInvoiceId),
   );
 
-  const [rows, summaryResult, clientMap] = await Promise.all([
+  const currencyExpr = sql<string>`coalesce(${invoices.currency}, 'GBP')`;
+  const [rows, summaryResult, currencyRows, clientMap] = await Promise.all([
     db
       .select({ inv: invoices, client: clients })
       .from(invoices)
@@ -651,6 +666,16 @@ export async function getOutstandingInvoices(
       .from(invoices)
       .innerJoin(clients, eq(clients.id, invoices.clientId))
       .where(whereClause),
+    db
+      .select({
+        currency: currencyExpr,
+        n: sql<number>`count(*)::int`,
+        total: sql<string>`coalesce(sum(${invoices.total}), 0)::text`,
+      })
+      .from(invoices)
+      .innerJoin(clients, eq(clients.id, invoices.clientId))
+      .where(whereClause)
+      .groupBy(currencyExpr),
     loadClientMap(businessId),
   ]);
 
@@ -666,6 +691,9 @@ export async function getOutstandingInvoices(
     invoices: items,
     count: summaryResult[0]?.n ?? 0,
     totalOutstanding: summaryResult[0]?.total ?? '0',
+    totalsByCurrency: currencyRows
+      .map((r) => ({ currency: r.currency, total: r.total, count: r.n }))
+      .sort((a, b) => Number(b.total) - Number(a.total)),
   };
 }
 
