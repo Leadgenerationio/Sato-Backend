@@ -1,29 +1,56 @@
 import { Request, Response } from 'express';
-import { getPermissions, updatePermission } from '../data/permissions.js';
+import * as permissionService from '../services/permission.service.js';
+import { ALL_ROLES } from '../config/sections.js';
+import type { UserRole } from '../types/index.js';
 
-export function list(_req: Request, res: Response) {
-  res.json({ status: 'success', data: { permissions: getPermissions() } });
+export async function list(req: Request, res: Response) {
+  const sections = await permissionService.getMatrix(req.user!.businessId);
+  res.json({
+    status: 'success',
+    data: {
+      roles: ALL_ROLES,
+      sections,
+      // Pre-S7 shape, kept so a Settings page deployed before this API
+      // still renders while the two deploys roll out.
+      permissions: permissionService.toLegacy(sections),
+    },
+  });
 }
 
-export function update(req: Request, res: Response) {
-  const { permission, role, allowed } = req.body;
+export async function me(req: Request, res: Response) {
+  const sections = await permissionService.getSectionsFor(req.user!);
+  res.json({ status: 'success', data: { role: req.user!.role, sections } });
+}
 
-  if (!permission || !role || typeof allowed !== 'boolean') {
-    res.status(400).json({ status: 'error', message: 'permission, role, and allowed are required' });
+export async function update(req: Request, res: Response) {
+  const { section, permission, role, allowed } = req.body as {
+    section?: string; permission?: string; role: UserRole; allowed: boolean;
+  };
+  const key = section ?? permission;
+  if (!key) {
+    res.status(400).json({ status: 'error', message: 'section, role, and allowed are required' });
     return;
   }
+  try {
+    const updated = await permissionService.setPermission(req.user!, key, role, allowed);
+    res.json({
+      status: 'success',
+      data: { section: updated, permission: permissionService.toLegacy([updated])[0] },
+    });
+  } catch (err) {
+    if (err instanceof permissionService.PermissionChangeError) {
+      res.status(err.statusCode).json({ status: 'error', message: err.message });
+      return;
+    }
+    throw err;
+  }
+}
 
-  // Owner role permissions are immutable — Owner always has full access
-  if (role === 'owner') {
-    res.status(403).json({ status: 'error', message: 'Owner permissions are immutable' });
+export async function changes(req: Request, res: Response) {
+  if (!req.user!.businessId) {
+    res.json({ status: 'success', data: { changes: [] } });
     return;
   }
-
-  const entry = updatePermission(permission, role, allowed);
-  if (!entry) {
-    res.status(404).json({ status: 'error', message: 'Permission not found' });
-    return;
-  }
-
-  res.json({ status: 'success', data: { permission: entry } });
+  const rows = await permissionService.listChanges(req.user!.businessId);
+  res.json({ status: 'success', data: { changes: rows } });
 }

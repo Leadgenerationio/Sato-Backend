@@ -55,6 +55,51 @@ describe('Upload routes (R2 presigned URLs)', () => {
         sizeBytes: 60 * 1024 * 1024,
       });
     expect(res.status).toBe(400);
+    expect(res.body.message).toBe('File too large: max 50 MB.');
+  });
+
+  // Sam feedback S9 — executables never get a presigned URL.
+  it('refuses executables in any folder', async () => {
+    for (const [folder, filename, contentType] of [
+      ['creatives', 'setup.exe', 'application/x-msdownload'],
+      ['misc', 'run.sh', 'application/octet-stream'],
+      ['agreements', 'contract.pdf.exe', 'application/pdf'],
+    ]) {
+      const res = await request(app)
+        .post('/api/v1/uploads/presign')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ folder, filename, contentType, sizeBytes: 1000 });
+      expect(res.status, filename).toBe(400);
+      expect(res.body.message).toBe("This file type can't be uploaded.");
+    }
+  });
+
+  it('limits creatives to images, videos and copy documents', async () => {
+    const refused = await request(app)
+      .post('/api/v1/uploads/presign')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ folder: 'creatives', filename: 'data.zip', contentType: 'application/zip', sizeBytes: 1000 });
+    expect(refused.status).toBe(400);
+    expect(refused.body.message).toMatch(/^Creatives must be images/);
+
+    for (const [filename, contentType] of [
+      ['banner.png', 'image/png'], ['ad.mp4', 'video/mp4'], ['copy.docx',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'], ['lp.pdf', 'application/pdf'],
+    ]) {
+      const ok = await request(app)
+        .post('/api/v1/uploads/presign')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ folder: 'creatives', filename, contentType, sizeBytes: 1000 });
+      expect(ok.status, filename).toBe(200);
+    }
+  });
+
+  it('still accepts general documents outside creatives (e.g. a zip in misc)', async () => {
+    const res = await request(app)
+      .post('/api/v1/uploads/presign')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ folder: 'misc', filename: 'receipts.zip', contentType: 'application/zip', sizeBytes: 1000 });
+    expect(res.status).toBe(200);
   });
 
   it('returns a presigned upload+download URL pair for valid input', async () => {

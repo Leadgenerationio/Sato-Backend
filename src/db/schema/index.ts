@@ -3,6 +3,7 @@ export * from './clients.js';
 export * from './client-contacts.js';
 export * from './client-documents.js';
 export * from './users.js';
+export * from './role-permissions.js';
 export * from './campaigns.js';
 export * from './client-campaigns.js';
 export * from './lead-deliveries.js';

@@ -25,6 +25,9 @@ export const users = pgTable('users', {
   // null = full access (backward compat). non-null = only these tabs +
   // dashboard + account. client_admin ignores this column.
   allowedTabs: text('allowed_tabs').array(),
+  // Migration 0044 (feedback N2): per-user UI preferences (dashboard layout,
+  // campaign grouping, task filters) so they follow the user across devices.
+  preferences: jsonb('preferences').$type<Record<string, unknown>>(),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 });
