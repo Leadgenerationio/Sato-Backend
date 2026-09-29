@@ -11,6 +11,7 @@ import { registerSchedules } from './jobs/schedules.js';
 import { startWorkers } from './jobs/worker-entry.js';
 import { redis } from './config/redis.js';
 import { isOriginAllowed } from './utils/cors-origins.js';
+import { registerWebhookSubscriber } from './services/webhook.service.js';
 
 const app: Express = express();
 
@@ -119,6 +120,9 @@ app.use('/api/v1', (req, res, next) => {
 
 // API routes
 app.use('/api/v1', router);
+
+// Domain events (creative.added, client.added, …) → outbound webhooks.
+registerWebhookSubscriber();
 
 // Error handling
 app.use(errorHandler);

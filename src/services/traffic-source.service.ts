@@ -3,12 +3,12 @@ import { db } from '../config/database.js';
 import { trafficSources } from '../db/schema/traffic-sources.js';
 import { campaigns as campaignsTable } from '../db/schema/campaigns.js';
 import { adSpend } from '../db/schema/ad-spend.js';
-import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { isUuid } from '../utils/zod-helpers.js';
 import { resolveSatoCampaignId } from '../utils/resolve-campaign-id.js';
-import * as leadbyte from '../integrations/leadbyte/leadbyte-client.js';
 import { logger } from '../utils/logger.js';
 import { invalidateCache } from '../utils/cache.js';
+import { canonicalizePlatform, sourceKey } from '../utils/catchr-platform.js';
+import { getCampaignSuppliers } from './campaign-suppliers.js';
 import type { AuthPayload } from '../types/index.js';
 
 /**
@@ -35,10 +35,23 @@ export interface TrafficSource {
   totalLeads: number;
   cpl: number;
   // Sam Loom #42-46: leadreports.io-style row needs revenue + net profit
-  // alongside spend. Revenue = leadPrice × totalLeads (campaign-level proxy
-  // until per-buyer breakdown is wired up via client_campaigns).
+  // alongside spend.
   revenue: number;
   netProfit: number;
+  /**
+   * Where totalLeads / revenue / cpl / netProfit came from (Sam S11,
+   * 2026-09-29 — the card showed revenue £0.00 against £13,440 for the
+   * campaign, because revenue was campaigns.lead_price × leads and that
+   * column is empty now per-buyer prices live on client_campaigns):
+   *   - 'platform': LeadByte's last-30-days supplier report for this
+   *     campaign, for the suppliers on this row's ad platform. Real figures.
+   *   - 'shared': another active row is on the same platform, and LeadByte
+   *     can't split leads between two ad accounts on one platform — the
+   *     figures are 0 and the UI shows "—" rather than guess a split.
+   *   - 'unavailable': LeadByte couldn't be reached; figures are 0.
+   * Spend is always this row's own accounts.
+   */
+  attribution: 'platform' | 'shared' | 'unavailable';
   createdAt: string;
 }
 
@@ -61,10 +74,13 @@ function toDto(
   leadPrice = 0,
   liveSpend?: number,
   liveLeads?: number,
+  live?: { revenue: number; attribution: TrafficSource['attribution'] },
 ): TrafficSource {
   const totalSpend = liveSpend !== undefined ? liveSpend : Number(row.totalSpend ?? 0);
   const totalLeads = liveLeads !== undefined ? liveLeads : (row.totalLeads ?? 0);
-  const revenue = Math.round(leadPrice * totalLeads * 100) / 100;
+  // Without live LeadByte figures (create/update responses) fall back to the
+  // stored lead count × campaign lead price, as before.
+  const revenue = live ? live.revenue : Math.round(leadPrice * totalLeads * 100) / 100;
   return {
     id: row.id,
     campaignId: row.campaignId ?? '',
@@ -79,6 +95,7 @@ function toDto(
     cpl: totalLeads > 0 ? Math.round((totalSpend / totalLeads) * 100) / 100 : 0,
     revenue,
     netProfit: Math.round((revenue - totalSpend) * 100) / 100,
+    attribution: live?.attribution ?? 'platform',
     createdAt: (row.createdAt ?? new Date()).toISOString(),
   };
 }
@@ -130,7 +147,7 @@ export async function listSourcesForCampaign(
   const adSpendWindowStart = new Date();
   adSpendWindowStart.setDate(adSpendWindowStart.getDate() - 30);
   const adSpendWindowIso = adSpendWindowStart.toISOString().slice(0, 10);
-  const [rows, spendRows, leadAgg] = await Promise.all([
+  const [rows, spendRows, suppliersResult] = await Promise.all([
     db
       .select()
       .from(trafficSources)
@@ -154,55 +171,47 @@ export async function listSourcesForCampaign(
       from deduped
       group by platform, account_id
     `).then((rows) => (rows as unknown as Array<{ platform: string; accountId: string; spend: string }>)),
-    // Campaign-level total leads. Per-source attribution isn't possible from
-    // the LeadByte aggregate report, so for now every source on the same
-    // campaign shows the same lead count (shared denominator).
-    db
-      .select({ leads: sql<number>`coalesce(sum(${leadDeliveries.leadCount}), 0)::int` })
-      .from(leadDeliveries)
-      .where(eq(leadDeliveries.campaignId, satoId)),
+    // LeadByte's last-30-days supplier report for this campaign — leads and
+    // buyer revenue per supplier, the same window as the spend above.
+    lbCampaignId
+      ? getCampaignSuppliers(lbCampaignId).then(
+          (r) => ({ ok: true as const, rows: r }),
+          (err: unknown) => {
+            logger.warn(
+              { err: err instanceof Error ? err.message : String(err), satoId },
+              'traffic-source: LeadByte supplier report failed — leads/revenue unavailable',
+            );
+            return { ok: false as const, rows: [] };
+          },
+        )
+      : Promise.resolve({ ok: true as const, rows: [] }),
   ]);
-  // Suppress unused-var TS warning during transition — lbCampaignId may
-  // still be used by callers reading the export.
-  void lbCampaignId;
 
+  // Key spend by CANONICAL platform so a row saved as "Facebook" matches
+  // Catchr's 'facebook-ads' rows (the raw-string key silently summed to 0).
   const spendByKey = new Map<string, number>();
   for (const s of spendRows) {
-    spendByKey.set(`${s.platform}|${s.accountId}`, Number(s.spend));
+    const k = `${canonicalizePlatform(s.platform) ?? s.platform}|${s.accountId}`;
+    spendByKey.set(k, (spendByKey.get(k) ?? 0) + Number(s.spend));
   }
 
-  // Local lead_deliveries only gets populated for single-linked-client
-  // campaigns (Piece 3). For everything else — most campaigns currently —
-  // the local sum is 0 even when LeadByte has thousands of real leads. Fall
-  // back to LeadByte's last_month + this_month windowed report so the
-  // sources table doesn't sit at 0 leads next to a non-empty
-  // /reports/campaign result on the same page.
-  let totalLeadsForCampaign = leadAgg[0]?.leads ?? 0;
-  if (totalLeadsForCampaign === 0 && rows.length > 0 && lbCampaignId) {
-    try {
-      const [thisMonth, lastMonth] = await Promise.all([
-        leadbyte.getCampaignReport('this_month'),
-        leadbyte.getCampaignReport('last_month'),
-      ]);
-      // /reports/campaign rows key by campaign name, which we don't have here
-      // — but we DO have the leadbyte_campaign_id. Pull the campaign name
-      // from the resolved row, then sum matching rows.
-      const [campNameRow] = await db
-        .select({ name: campaignsTable.name })
-        .from(campaignsTable)
-        .where(eq(campaignsTable.id, satoId));
-      const campName = campNameRow?.name;
-      if (campName) {
-        const thisMonthLeads = thisMonth.find((r) => r.campaign === campName)?.leads ?? 0;
-        const lastMonthLeads = lastMonth.find((r) => r.campaign === campName)?.leads ?? 0;
-        totalLeadsForCampaign = thisMonthLeads + lastMonthLeads;
-      }
-    } catch (err) {
-      logger.warn(
-        { err: err instanceof Error ? err.message : String(err), satoId },
-        'traffic-source: LeadByte lead fallback failed — using local 0',
-      );
-    }
+  // LeadByte leads + revenue per platform (sourceKey merges "facebook" and
+  // "Facebook Ads").
+  const leadbyteByPlatform = new Map<string, { leads: number; revenue: number }>();
+  for (const sup of suppliersResult.rows) {
+    const k = sourceKey(sup.name);
+    const cur = leadbyteByPlatform.get(k) ?? { leads: 0, revenue: 0 };
+    cur.leads += Number(sup.totalLeads ?? 0);
+    cur.revenue += Number(sup.revenue ?? 0);
+    leadbyteByPlatform.set(k, cur);
+  }
+  // Active rows per platform — two ad-account rows on one platform can't
+  // have LeadByte's platform figures split between them.
+  const activeRowsPerPlatform = new Map<string, number>();
+  for (const r of rows) {
+    if (!r.isActive) continue;
+    const k = sourceKey(r.platform);
+    activeRowsPerPlatform.set(k, (activeRowsPerPlatform.get(k) ?? 0) + 1);
   }
 
   return rows.map((r) => {
@@ -210,7 +219,7 @@ export async function listSourcesForCampaign(
     // (legacy primary + new accountIds[]). Each (platform, accountId)
     // pair contributes its 30-day ad_spend total; missing pairs add 0.
     const ids = allAccountIds(r);
-    const platform = r.platform ?? '';
+    const platform = canonicalizePlatform(r.platform) ?? (r.platform ?? '');
     let liveSpend: number | undefined;
     if (ids.length > 0) {
       liveSpend = 0;
@@ -218,13 +227,19 @@ export async function listSourcesForCampaign(
         liveSpend += spendByKey.get(`${platform}|${accId}`) ?? 0;
       }
     }
+    const k = sourceKey(r.platform);
+    const attribution: TrafficSource['attribution'] = !suppliersResult.ok
+      ? 'unavailable'
+      : (activeRowsPerPlatform.get(k) ?? 0) > 1
+        ? 'shared'
+        : 'platform';
+    const lb = attribution === 'platform' ? (leadbyteByPlatform.get(k) ?? { leads: 0, revenue: 0 }) : { leads: 0, revenue: 0 };
     return toDto(
       r,
       leadPrice,
-      // Override the static columns with live aggregates when we have them.
       liveSpend !== undefined ? liveSpend : Number(r.totalSpend ?? 0),
-      // Leads stay campaign-total until per-source attribution exists.
-      totalLeadsForCampaign,
+      lb.leads,
+      { revenue: Math.round(lb.revenue * 100) / 100, attribution },
     );
   });
 }

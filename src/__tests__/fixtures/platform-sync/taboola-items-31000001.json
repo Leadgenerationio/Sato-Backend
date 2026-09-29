@@ -1,0 +1,5 @@
+{ "results": [
+  { "id": "4100000001", "campaign_id": "31000001", "type": "ITEM", "url": "https://aparaty.example.pl/bezplatny-test?utm_source=taboola&utm_medium=native", "thumbnail_url": "https://images.taboola.com/taboola/image/fetch/f_jpg,q_auto,h_627,w_1200/aparaty-1.jpg", "title": "Bezpłatny test słuchu w Twoim mieście", "description": "Sprawdź, czy kwalifikujesz się do dopłaty.", "status": "RUNNING", "approval_state": "APPROVED", "is_active": true },
+  { "id": "4100000002", "campaign_id": "31000001", "type": "ITEM", "url": "https://aparaty.example.pl/nowy", "thumbnail_url": null, "title": "", "status": "CRAWLING", "approval_state": "PENDING", "is_active": true },
+  { "id": "4100000003", "campaign_id": "31000001", "type": "ITEM", "creative_type": "MOTION_ADS", "url": "https://aparaty.example.pl/wideo", "thumbnail_url": "https://images.taboola.com/taboola/image/fetch/motion-poster.jpg", "title": "Zobacz, jak działa nowy aparat", "description": "", "status": "PAUSED", "approval_state": "APPROVED", "is_active": false, "performance_video_data": { "video_url": "https://cdn.taboola.com/motion/aparaty.mp4" } }
+] }

@@ -1,13 +1,16 @@
 import { Request, Response } from 'express';
 import * as importService from '../services/client-import.service.js';
-import { AttioNotConfiguredError } from '../integrations/attio/attio-client.js';
+import { AttioNotConfiguredError, isAttioConfigured } from '../integrations/attio/attio-client.js';
 import { logger } from '../utils/logger.js';
 
 function handleAttioError(err: unknown, res: Response): boolean {
   if (err instanceof AttioNotConfiguredError) {
     res.status(503).json({
       status: 'error',
-      message: 'Attio import is not configured. Add ATTIO_API_KEY to the backend environment.',
+      // Plain words (Sam S16): this reaches the Owner's screen verbatim. Keep
+      // "not configured" — the deployed FE matches on it.
+      code: 'attio_not_configured',
+      message: 'Attio import is not configured yet. Ask your administrator to connect your Attio account, then try again.',
     });
     return true;
   }
@@ -59,4 +62,10 @@ export async function importFromAttio(req: Request, res: Response) {
       message: err instanceof Error ? err.message : 'Failed to import from Attio',
     });
   }
+}
+
+// Feedback S16 (29 Sep 2026): lets the Clients list hide "Import from Attio"
+// when there's no Attio key, instead of offering a button that can only fail.
+export function attioStatus(_req: Request, res: Response) {
+  res.json({ status: 'success', data: { configured: isAttioConfigured() } });
 }

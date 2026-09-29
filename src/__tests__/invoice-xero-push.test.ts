@@ -117,6 +117,46 @@ describe('Invoice push to Xero', () => {
     expect(body.Invoices?.[0]?.LineItems?.[0]?.TaxType).toBe('OUTPUT2');
   });
 
+  it('pushes a no-VAT invoice as TaxType NONE even for a VAT-registered client', async () => {
+    // Sam feedback 2026-09-29 (M7): TaxType used to follow client.vatRegistered,
+    // so Xero added 20% VAT to an invoice Stato created without VAT.
+    const noVat = await request(app)
+      .post('/api/v1/invoices')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        clientId,
+        currency: 'GBP',
+        addVat: false,
+        lineItems: [{ description: 'No VAT leads', quantity: 1, unitPrice: 100 }],
+      });
+    const noVatId = noVat.body.data.invoice.id;
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      const json = String(url).includes('/connect/token')
+        ? { access_token: 'tok', expires_in: 1800 }
+        : String(url).endsWith('/connections')
+          ? [{ id: 'c', tenantId: 'tenant-abc', tenantName: 'Test Org' }]
+          : { Invoices: [{ InvoiceID: 'xero-inv-novat', InvoiceNumber: 'INV-9002' }] };
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => json,
+        text: async () => '',
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    const res = await request(app)
+      .post(`/api/v1/invoices/${noVatId}/push-to-xero`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+    expect(res.status).toBe(200);
+    const xeroCall = calls.find((c) => c.url.includes('/api.xro/2.0/Invoices'));
+    const body = JSON.parse(String(xeroCall!.init.body));
+    expect(body.Invoices?.[0]?.LineItems?.[0]?.TaxType).toBe('NONE');
+    await db.delete(invoices).where(eq(invoices.id, noVatId));
+  });
+
   it('is a no-op when the invoice already has a xeroInvoiceId', async () => {
     // Pre-stamp the invoice as already pushed.
     await db.update(invoices).set({ xeroInvoiceId: 'already-pushed-id' }).where(eq(invoices.id, invoiceId));

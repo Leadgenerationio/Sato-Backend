@@ -30,6 +30,8 @@ export interface AuthPayload {
   role: UserRole;
   businessId?: string;
   clientId?: string;
+  /** S8: ISO end of access, when the Owner set one. Checked on every request. */
+  accessExpiresAt?: string;
 }
 
 export interface AuthTokens {

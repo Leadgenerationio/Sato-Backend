@@ -32,7 +32,9 @@ export class CreditProviderNotConfiguredError extends AppError {
   constructor() {
     super(
       503,
-      'Credit-check provider not configured. Add ENDOLE_APP_ID + ENDOLE_APP_KEY (or CREDITSAFE_API_KEY) to enable real credit checks.',
+      // Shown on the client page as-is (Sam S16) — no env var names. Setup:
+      // ENDOLE_APP_ID + ENDOLE_APP_KEY, or CREDITSAFE_API_KEY.
+      'Credit checks are not configured yet. Ask your administrator to connect a credit-check provider.',
     );
     this.name = 'CreditProviderNotConfiguredError';
   }

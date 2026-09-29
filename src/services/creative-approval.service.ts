@@ -309,6 +309,12 @@ export async function assertCreativeBelongsToClient(
   // Fast path: legacy 1:1 link still matches → grant access.
   if (creativeRow.legacyClientId === clientId) return;
 
+  // Library creatives (0045) can have no campaign; the inner join above
+  // already drops those, but keep the guard explicit for the types.
+  if (!creativeRow.campaignId) {
+    throw new CreativeApprovalError('ACCESS_DENIED', "This creative belongs to another client's campaign");
+  }
+
   // Slow path: check the many-to-many join. If the requesting client is
   // a buyer on this vertical campaign, they have access to its creatives.
   const [linkRow] = await db

@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
 import { UnauthorizedError } from '../utils/errors.js';
+import { assertAccessNotExpired } from '../utils/access-expiry.js';
 import type { AuthPayload } from '../types/index.js';
 
 declare global {
@@ -21,11 +22,14 @@ export function authMiddleware(req: Request, _res: Response, next: NextFunction)
 
   const token = authHeader.split(' ')[1];
 
+  let payload: AuthPayload;
   try {
-    const payload = jwt.verify(token, env.JWT_SECRET) as AuthPayload;
-    req.user = payload;
-    next();
+    payload = jwt.verify(token, env.JWT_SECRET) as AuthPayload;
   } catch {
     throw new UnauthorizedError('Invalid or expired token');
   }
+  // S8: an end date set by the Owner stops the login mid-session too.
+  assertAccessNotExpired(payload.accessExpiresAt);
+  req.user = payload;
+  next();
 }

@@ -89,6 +89,8 @@ export async function getOutstanding(req: Request, res: Response) {
       invoices: result.invoices,
       count: result.count,
       totalOutstanding: result.totalOutstanding,
+      totalsByCurrency: result.totalsByCurrency,
+      convertedTotalGbp: result.convertedTotalGbp,
     },
   });
 }
@@ -107,11 +109,17 @@ export const createInvoiceSchema = z.object({
       )
       .min(1),
     addVat: z.boolean(),
+    // M7 — due date defaults to today + the client's payment terms. Accepts
+    // YYYY-MM-DD (current FE) or a full ISO timestamp (the FE deployed before
+    // 2026-09-29 already sent toISOString(), which this endpoint ignored).
+    dueDate: z.string().refine((v) => !Number.isNaN(Date.parse(v)), 'dueDate must be a date').optional(),
+    // M7 — required to invoice in a currency other than the client's.
+    confirmCurrencyMismatch: z.boolean().optional(),
   }),
 });
 
 export async function createInvoice(req: Request, res: Response) {
-  const { clientId, currency, lineItems, addVat } = req.body;
+  const { clientId, currency, lineItems, addVat, dueDate, confirmCurrencyMismatch } = req.body;
   // Compute amount per line on the server to avoid trusting client-side math.
   const itemsWithAmount = (lineItems as Array<{ description: string; quantity: number; unitPrice: number }>).map(
     (li) => ({
@@ -120,7 +128,7 @@ export async function createInvoice(req: Request, res: Response) {
     }),
   );
   const invoice = await invoiceService.createInvoice(
-    { clientId, currency, lineItems: itemsWithAmount, addVat },
+    { clientId, currency, lineItems: itemsWithAmount, addVat, dueDate, confirmCurrencyMismatch },
     req.user!,
   );
   res.status(201).json({ status: 'success', data: { invoice } });

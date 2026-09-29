@@ -25,8 +25,7 @@ export async function login(req: Request, res: Response) {
 
 export async function refresh(req: Request, res: Response) {
   const { refreshToken } = req.body;
-  const payload = authService.verifyRefreshToken(refreshToken);
-  const tokens = authService.generateTokens(payload);
+  const tokens = await authService.refreshTokens(refreshToken);
 
   res.json({
     status: 'success',

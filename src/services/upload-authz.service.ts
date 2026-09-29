@@ -79,7 +79,7 @@ async function assertCanReadCreative(requester: AuthPayload, key: string): Promi
   // directly and walk to the owning client(s) via the campaign. Soft-deleted
   // rows are not openable by anyone — staff included.
   const [row] = await db
-    .select({ id: creatives.id, campaignId: creatives.campaignId, status: creatives.status })
+    .select({ id: creatives.id, campaignId: creatives.campaignId, clientId: creatives.clientId, status: creatives.status })
     .from(creatives)
     .where(and(eq(creatives.r2Key, key), eq(creatives.isDeleted, false)))
     .limit(1);
@@ -91,6 +91,8 @@ async function assertCanReadCreative(requester: AuthPayload, key: string): Promi
     // portal.service.getCreativesBySection — without it, a portal client
     // who guessed the key could open a draft via /uploads/signed-url.
     if (row.status === 'draft') throw new UploadAccessError();
+    // Library creatives with no campaign (0045) are not on the portal.
+    if (!row.campaignId) throw new UploadAccessError();
     // Must be one of THIS client's campaigns (via client_campaigns).
     const [link] = await db
       .select({ id: clientCampaigns.campaignId })
@@ -112,11 +114,19 @@ async function assertCanReadCreative(requester: AuthPayload, key: string): Promi
     // requester.businessId in the WHERE clause — a multi-tenant campaign
     // (same vertical served by buyers in different businesses) must not
     // false-deny because LIMIT 1 happened to return another tenant's row.
+    // Library creatives (0045) are owned by their client directly.
+    if (row.clientId) {
+      const [own] = await db.select({ b: clients.businessId }).from(clients).where(eq(clients.id, row.clientId)).limit(1);
+      if (own?.b === requester.businessId) return;
+      throw new UploadAccessError();
+    }
+    if (!row.campaignId) throw new UploadAccessError();
+    const campaignId = row.campaignId;
     const [direct] = await db
       .select({ businessId: clients.businessId })
       .from(campaigns)
       .innerJoin(clients, eq(clients.id, campaigns.clientId))
-      .where(and(eq(campaigns.id, row.campaignId), eq(clients.businessId, requester.businessId)))
+      .where(and(eq(campaigns.id, campaignId), eq(clients.businessId, requester.businessId)))
       .limit(1);
     if (direct) return;
     const [viaJoin] = await db
@@ -124,7 +134,7 @@ async function assertCanReadCreative(requester: AuthPayload, key: string): Promi
       .from(clientCampaigns)
       .innerJoin(clients, eq(clients.id, clientCampaigns.clientId))
       .where(and(
-        eq(clientCampaigns.campaignId, row.campaignId),
+        eq(clientCampaigns.campaignId, campaignId),
         eq(clients.businessId, requester.businessId),
       ))
       .limit(1);

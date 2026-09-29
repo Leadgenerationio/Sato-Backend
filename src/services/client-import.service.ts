@@ -149,6 +149,7 @@ export async function importAttioCompanies(
         .insert(clients)
         .values({
           businessId: requester.businessId,
+          createdBy: requester.userId,
           companyName: company.name ?? '(unnamed)',
           attioCompanyId: company.recordId,
           status: 'prospect',
