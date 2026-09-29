@@ -118,10 +118,13 @@ export interface LandingPageDto {
   title: string | null;
   status: string;
   creativeCount?: number;
+  /** Same as creativeCount — the name the admin screens read. */
+  creativesCount?: number;
+  clientName?: string | null;
   createdAt: string | null;
 }
 
-function lpDto(row: LandingPageRow, creativeCount?: number): LandingPageDto {
+function lpDto(row: LandingPageRow, creativeCount?: number, clientName?: string | null): LandingPageDto {
   return {
     id: row.id,
     clientId: row.clientId ?? null,
@@ -130,7 +133,8 @@ function lpDto(row: LandingPageRow, creativeCount?: number): LandingPageDto {
     normalisedUrl: row.normalisedUrl ?? null,
     title: row.title ?? null,
     status: row.status ?? 'active',
-    ...(creativeCount !== undefined ? { creativeCount } : {}),
+    ...(creativeCount !== undefined ? { creativeCount, creativesCount: creativeCount } : {}),
+    ...(clientName !== undefined ? { clientName } : {}),
     createdAt: row.createdAt ? row.createdAt.toISOString() : null,
   };
 }
@@ -191,11 +195,12 @@ export async function listLandingPages(
       // Qualified by hand: drizzle renders a column inside a select-field
       // subquery unqualified ("id"), which would bind to creatives.id.
       n: sql<number>`(select count(*)::int from creatives cr where cr.landing_page_id = "landing_pages"."id" and cr.is_deleted = false)`,
+      clientName: sql<string | null>`(select c2.company_name from clients c2 where c2.id = "landing_pages"."client_id")`,
     })
     .from(landingPages)
     .where(and(...where))
     .orderBy(desc(landingPages.createdAt));
-  return rows.map((r) => lpDto(r.lp, r.n));
+  return rows.map((r) => lpDto(r.lp, r.n, r.clientName));
 }
 
 export async function createLandingPage(
@@ -261,6 +266,10 @@ export interface LibraryCreativeDto {
   platformCampaignId: string | null;
   platformCampaignName: string | null;
   landingPage: { id: string; url: string; title: string | null } | null;
+  landingPageId: string | null;
+  landingPageUrl: string | null;
+  /** Fresh signed link (1 h); never stored. */
+  fileUrl: string | null;
   headline: string | null;
   bodyText: string | null;
   mediaType: string;
@@ -292,6 +301,11 @@ async function toLibraryDto(r: JoinedRow): Promise<LibraryCreativeDto> {
   if (cr.thumbnailKey) {
     thumbnailUrl = await getSignedDownloadUrl({ folder: 'creatives', key: cr.thumbnailKey, expiresInSeconds: 3600 }).catch(() => null);
   }
+  // Fresh signed link per row (never stored — N8) so the library grid can
+  // preview images that have no server thumbnail yet. Signing is local.
+  const fileUrl = cr.r2Key
+    ? await getSignedDownloadUrl({ folder: 'creatives', key: cr.r2Key, expiresInSeconds: 3600 }).catch(() => null)
+    : null;
   return {
     id: cr.id,
     name: cr.name,
@@ -307,6 +321,8 @@ async function toLibraryDto(r: JoinedRow): Promise<LibraryCreativeDto> {
     platformCampaignId: cr.platformCampaignId ?? null,
     platformCampaignName: cr.platformCampaignName ?? null,
     landingPage: cr.landingPageId && r.lpUrl ? { id: cr.landingPageId, url: r.lpUrl, title: r.lpTitle } : null,
+    landingPageId: cr.landingPageId ?? null,
+    landingPageUrl: r.lpUrl ?? null,
     headline: cr.headline ?? null,
     bodyText: cr.bodyText ?? null,
     mediaType: cr.type ?? 'image',
@@ -319,6 +335,7 @@ async function toLibraryDto(r: JoinedRow): Promise<LibraryCreativeDto> {
     status: cr.status,
     section: cr.section,
     thumbnailUrl,
+    fileUrl,
     firstSeen: cr.firstSeen ? cr.firstSeen.toISOString() : null,
     lastSeen: cr.lastSeen ? cr.lastSeen.toISOString() : null,
     createdAt: cr.createdAt ? cr.createdAt.toISOString() : null,
