@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
+import { users } from '../db/schema/users.js';
 import { apiKeys, apiKeyUsage, type ApiKeyRow } from '../db/schema/api-keys.js';
 import { AppError } from '../utils/errors.js';
 
@@ -79,6 +80,11 @@ export async function verifyApiKey(key: string): Promise<ApiKeyRow | null> {
   const [row] = await db.select().from(apiKeys).where(eq(apiKeys.hash, hashKey(key)));
   if (!row || row.revokedAt) return null;
   if (row.expiresAt && row.expiresAt.getTime() <= Date.now()) return null;
+  // A key acts as the person who made it: deactivating that user switches the key off too.
+  if (row.createdBy) {
+    const [creator] = await db.select({ isActive: users.isActive }).from(users).where(eq(users.id, row.createdBy));
+    if (!creator?.isActive) return null;
+  }
   // Throttled: at most one write a minute per key.
   if (!row.lastUsedAt || Date.now() - row.lastUsedAt.getTime() > 60_000) {
     void db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, row.id)).catch(() => {});

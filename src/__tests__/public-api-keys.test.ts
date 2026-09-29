@@ -8,6 +8,7 @@ import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { creatives } from '../db/schema/creatives.js';
 import { landingPages } from '../db/schema/landing-pages.js';
 import { apiKeys } from '../db/schema/api-keys.js';
+import { users } from '../db/schema/users.js';
 
 // Public API (plan phase 2): API keys with scopes, Idempotency-Key, lookup by
 // ad-account IDs, OpenAPI docs.
@@ -162,5 +163,29 @@ describe('published docs', () => {
     expect(res.status).toBe(200);
     expect(res.text).toContain('/api/v1/openapi.json');
     expect(res.headers['content-security-policy']).toContain('https://cdn.jsdelivr.net');
+  });
+});
+
+describe('review fixes', () => {
+  it('a key stops working when the user who created it is deactivated', async () => {
+    const { key, id } = await makeKey(['creatives:read']);
+    const [opsUser] = await db.select().from(users).where(eq(users.email, 'ops@stato.app'));
+    await db.update(apiKeys).set({ createdBy: opsUser!.id }).where(eq(apiKeys.id, id));
+    try {
+      expect((await request(app).get('/api/v1/creatives').set('X-API-Key', key)).status).toBe(200);
+      await db.update(users).set({ isActive: false }).where(eq(users.id, opsUser!.id));
+      expect((await request(app).get('/api/v1/creatives').set('X-API-Key', key)).status).toBe(401);
+    } finally {
+      await db.update(users).set({ isActive: true }).where(eq(users.id, opsUser!.id));
+    }
+  });
+
+  it('a rejected (4xx) request is not stored against its Idempotency-Key', async () => {
+    const { key } = await makeKey(['creatives:write']);
+    const bad = await request(app).post('/api/v1/creatives').set('X-API-Key', key).set('Idempotency-Key', `${tag}-fix4xx`).send({ clientId, mediaType: 'image' });
+    expect(bad.status).toBeGreaterThanOrEqual(400);
+    const good = await request(app).post('/api/v1/creatives').set('X-API-Key', key).set('Idempotency-Key', `${tag}-fix4xx`)
+      .send({ clientId, mediaType: 'image', r2Key: `${tag}-fix.png`, contentType: 'image/png', sizeBytes: 10, name: 'Fixed body' });
+    expect(good.status).toBe(201);
   });
 });
