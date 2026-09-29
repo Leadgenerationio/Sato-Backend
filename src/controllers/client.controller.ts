@@ -4,6 +4,7 @@ import * as clientService from '../services/client.service.js';
 import * as userService from '../services/user.service.js';
 import { logger } from '../utils/logger.js';
 import { NotFoundError } from '../utils/errors.js';
+import { domainEvents } from '../services/events.js';
 
 interface CreateContactBody { contactType?: string; name?: string; email?: string }
 
@@ -66,6 +67,7 @@ export async function getClient(req: Request, res: Response) {
 
 export async function createClient(req: Request, res: Response) {
   const client = await clientService.createClient(req.body, req.user!);
+  domainEvents.emit('client.added', { businessId: req.user!.businessId ?? '', data: { clientId: client.id, companyName: client.companyName } });
 
   // Sam (2026-06-19): onboard the primary contact automatically — create a
   // portal login for their email and send the branded welcome. Best-effort:

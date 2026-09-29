@@ -11,6 +11,7 @@ import * as clientCampaignsController from '../controllers/client-campaigns.cont
 import * as clientActivityController from '../controllers/client-activity.controller.js';
 import * as clientEmailsController from '../controllers/client-emails.controller.js';
 import * as clientImportController from '../controllers/client-import.controller.js';
+import { VAT_TREATMENTS, isPlausiblePhone, isPlausiblePostcode } from '../utils/client-locale.js';
 
 export const clientRoutes: RouterType = Router();
 
@@ -20,7 +21,7 @@ const listClientsQuerySchema = z.object({
     search: z.string().optional(),
     currency: z.string().length(3).optional(),
     country: z.string().max(100).optional(),
-    addedBy: z.union([z.string().uuid(), z.literal('unknown')]).optional(),
+    addedBy: z.union([z.guid(), z.literal('unknown')]).optional(),
     sort: z.enum(['company', 'status', 'revenue', 'campaigns', 'credit', 'created']).optional(),
     dir: z.enum(['asc', 'desc']).optional(),
   }),
@@ -43,32 +44,49 @@ const onboardingEnum = z.enum(['pending', 'documents_received', 'agreement_signe
 const billingWorkflowEnum = z.enum(['weekly_auto', 'monthly_validated', 'custom']);
 const contactTypeEnum = z.enum(['primary', 'billing', 'compliance', 'other']);
 
+// Sam feedback 2026-09-29 (M5): "not-a-phone ###" and "!!!!!!!!" went straight
+// to the save. Lenient on purpose — the FE applies the per-country formats;
+// here we only refuse input that can't be a phone number / postcode anywhere.
+const phoneField = z.string().max(50).refine(isPlausiblePhone, {
+  message: 'Enter a phone number with its country code, e.g. +41 44 668 18 00',
+});
+const postcodeField = z.string().max(20).refine(isPlausiblePostcode, {
+  message: 'Postcode can only contain letters, numbers, spaces and hyphens',
+});
+
 const contactSchema = z.object({
   contactType: contactTypeEnum.optional(),
   name: z.string().min(1).max(255),
-  email: z.string().email().or(z.literal('')).optional(),
-  phone: z.string().max(50).optional(),
+  // N7 — trim before the format check (the validate middleware doesn't
+  // replace req.body, so the service trims again when it writes).
+  email: z.string().trim().email().or(z.literal('')).optional(),
+  phone: phoneField.optional(),
   role: z.string().max(100).optional(),
 });
 
 const clientCoreFields = {
   companyName: z.string().min(1).max(200),
-  companyNumber: z.string().min(1).max(50).optional(),
+  // DB column is varchar(20) — anything longer used to 500 on insert. 20
+  // fits every local format we support (CHE-123.456.789, KRS 0000123456…).
+  companyNumber: z.string().min(1).max(20).optional(),
   contactName: z.string().min(1).max(200).optional(),
-  contactEmail: z.string().email().optional(),
-  contactPhone: z.string().max(50).optional(),
+  contactEmail: z.string().trim().email().optional(),
+  contactPhone: phoneField.optional(),
   address: z.string().max(500).optional(),
   addressLine: z.string().max(255).optional(),
   addressTown: z.string().max(100).optional(),
   addressCounty: z.string().max(100).optional(),
   addressCountry: z.string().max(100).optional(),
-  addressPostcode: z.string().max(20).optional(),
+  addressPostcode: postcodeField.optional(),
   currency: z.string().length(3).optional(),
   paymentTermsDays: z.number().int().min(0).max(365).optional(),
   vatRegistered: z.boolean().optional(),
   addVatToInvoices: z.boolean().optional(),
   vatNumber: z.string().max(50).optional(),
   vatRate: z.union([z.number(), z.string()]).optional(),
+  // M5/S4 — replaces the single "VAT registered" tick. When sent, the service
+  // derives vatRegistered/addVatToInvoices from it (those two are ignored).
+  vatTreatment: z.enum(VAT_TREATMENTS).optional(),
   leadPrice: z.union([z.number(), z.string()]).optional(),
   // Fix 6a (2026-06-15): managed vs pay-per-lead. Gates portal ad-spend
   // visibility (PPL clients must never see spend).

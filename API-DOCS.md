@@ -685,6 +685,154 @@ Get the client's service agreement.
 
 ---
 
+## Ad accounts
+
+Which client (and optionally which campaign) owns each ad account. Accounts are matched on `platform` + `accountId` only, never on the account name. `platform` accepts any common spelling (`Facebook`, `meta`, `facebook-ads`) and is stored in canonical form (`facebook-ads`, `google-ads`, `tik-tok`, `taboola`, `bing-ads`).
+
+### GET /ad-accounts
+
+**Roles:** owner, ops_manager, finance_admin. **Query:** `days` (1–365, default 30).
+
+Every known ad account, plus the client and campaign options for the linking screen (campaigns by Sato UUID). Known accounts: accounts with Catchr spend in the window, accounts referenced by a campaign's Ad Account Links, and accounts already linked. Spend is deduplicated across Catchr authorization ids. Unlinked accounts come first, largest spend first. `totalSpend`/`unlinkedSpend` add across currencies; display `unlinkedSpendByCurrency` instead.
+
+```json
+{
+  "status": "success",
+  "data": {
+    "windowDays": 30,
+    "accounts": [
+      {
+        "platform": "facebook-ads", "platformLabel": "Facebook",
+        "accountId": "428353095282383", "accountName": "CH Hearing",
+        "currency": "GBP", "spend": 14527.53, "lastSpendDate": "2026-09-28",
+        "link": null,
+        "campaigns": [{ "campaignId": "…", "campaignName": "Hearing Aids (CH)" }]
+      }
+    ],
+    "options": {
+      "clients": [{ "id": "…", "companyName": "…", "status": "active", "currency": "EUR" }],
+      "campaigns": [{ "id": "…", "name": "Hearing Aids (CH)", "status": "active" }]
+    },
+    "summary": { "total": 40, "linked": 3, "unlinked": 37, "totalSpend": 612000.1, "unlinkedSpend": 586065.73, "unlinkedSpendByCurrency": { "GBP": 540000.0, "EUR": 46065.73 } }
+  }
+}
+```
+
+### PUT /ad-accounts/links
+
+**Roles:** owner, ops_manager. Create, change or remove up to 500 links in one transaction. `clientId: null` removes a link. An unknown client or campaign id rejects the whole batch (400) and nothing is written.
+
+```json
+{ "links": [
+  { "platform": "facebook", "accountId": "428353095282383", "clientId": "…", "campaignId": "…" },
+  { "platform": "taboola", "accountId": "…willwriting-sc", "clientId": null }
+] }
+```
+
+**Response (200):** `{ "created": 1, "updated": 0, "removed": 1, "unchanged": 0, "results": [{ "platform", "accountId", "action", "clientName", "campaignName" }] }`
+
+### GET /clients/lookup
+
+**Roles:** owner, ops_manager, finance_admin. **Query:** `platform`, `accountId` (both required).
+
+The client that owns an ad account. 404 when the account isn't linked.
+
+```json
+{ "status": "success", "data": {
+  "platform": "facebook-ads", "accountId": "428353095282383",
+  "client": { "id": "…", "companyName": "…", "currency": "CHF" },
+  "campaign": { "id": "…", "name": "Hearing Aids (CH)" }
+} }
+```
+
+## Creative library & landing pages
+
+Creatives belong to a **client** and optionally a campaign (migration 0045). A creative with `clientId: null` is *shared* on its campaign and is listed under every buyer on that campaign. Roles: owner / ops_manager write, finance_admin reads. See `docs/creative-library-and-api-plan.md`.
+
+### GET /creatives
+
+Query (all optional): `clientId`, `platform` (`meta|taboola|google|tiktok|manual`), `campaignId`, `landingPageId` (alias `landingPage`), `status` (`draft|sent_for_approval|approved|rejected|changes_requested`), `q` (name, headline, text, ad/creative id, platform campaign name), `from` / `to` (`YYYY-MM-DD`, on created date), `sort` (`created|last_seen|name`), `order` (`asc|desc`), `page`, `limit` (≤ 100, default 24).
+
+```json
+{ "status": "success", "data": { "creatives": [LibraryCreative], "total": 42, "page": 1, "pageSize": 24 } }
+```
+
+`LibraryCreative`: `id, name, clientId, clientName, campaignId, campaignName, shared, platform, platformAccountId, platformAdId, platformCreativeId, platformCampaignId, platformCampaignName, landingPage {id,url,title}|null, headline, bodyText, mediaType, contentType, sizeBytes, width, height, durationS, sha256, status, section, thumbnailUrl (signed, 1 h)|null, firstSeen, lastSeen, createdAt`.
+
+### GET /creatives/:id
+
+One `LibraryCreative` plus `fileUrl` (signed, 1 h).
+
+### POST /creatives
+
+One creative, or `{ "creatives": [ … up to 50 ] }` (response `data.results[]`, each `{ id, created, creative }` or `{ index, status, error }`).
+
+```json
+{
+  "platform": "meta",
+  "platformAccountId": "428353095282383",
+  "platformAdId": "120210000000001",
+  "platformCreativeId": "120210000000777",
+  "landingPageUrl": "https://offers.example.com/hearing?utm_source=fb",
+  "headline": "Hear clearly again",
+  "mediaType": "image",
+  "sourceUrl": "https://scontent.xx.fbcdn.net/…/ad.jpg"
+}
+```
+
+- **Client:** `clientId`, or found from `(platform, platformAccountId)` via the Link ad accounts table — IDs only, never names. Neither → `422`.
+- **File:** `r2Key` from `POST /uploads/presign` (folder `creatives`) with `contentType`/`sizeBytes`/`sha256`, **or** `sourceUrl` (downloaded by the server: public http(s) hosts only, images/videos only, max 50 MB → `422`/`413`).
+- **No duplicates:** the same `(platform, platformCreativeId)` — or the same file (sha256) for the same client — updates the existing creative (`200`, `created: false`) instead of copying it (`201`).
+- **Landing page:** `landingPageUrl` finds or creates the client's landing page by normalised URL (tracking params such as `utm_*`, `fbclid`, `gclid` ignored).
+- The pre-library campaign upload body (`campaignId, name, type, r2Key, fileUrl, sizeBytes, contentType, section`) is still accepted and behaves as before.
+
+### PATCH /creatives/:id
+
+`{ clientId?, campaignId?, landingPageId?, name?, headline?, bodyText? }`. Moving to another client drops a landing page that belongs to the old client.
+
+### POST /creatives/:id/landing-page
+
+`{ "url": "https://…" }` or `{ "landingPageId": "uuid" }`.
+
+### POST /creatives/bulk
+
+`{ "action": "assign_landing_page", "ids": [...], "url"|"landingPageId" }`, `{ "action": "move_client", "ids": [...], "clientId" }`, `{ "action": "submit_for_approval", "ids": [...] }` → `{ ok: [ids], failed: [{ id, message }] }`.
+
+### GET /landing-pages · GET /clients/:id/landing-pages
+
+Query: `clientId`, `q`, `includeArchived=true`. Each page: `id, clientId, campaignId, url, normalisedUrl, title, status, creativeCount, createdAt`.
+
+### POST /landing-pages
+
+`{ clientId, url, title?, campaignId? }` → `201` new, `200` when the client already has that (normalised) page.
+
+### PATCH /landing-pages/:id · DELETE /landing-pages/:id
+
+PATCH `{ url?, title?, status? }` (`409` if the new URL clashes with another page of the client). DELETE archives (soft delete); creatives keep their link.
+
+### Thumbnails
+
+New creatives queue a `media` → `thumbnail` job: images → 480 px webp via sharp; videos → poster frame via ffmpeg when installed (see Dockerfile note), else `thumbnailUrl` stays `null`.
+
+## Public API (API keys)
+
+Docs: **`GET /openapi.json`** (OpenAPI 3.1, generated from the routes' zod schemas) and **`GET /docs`** (reference page). Both public.
+
+**Auth:** `X-API-Key: stk_…`. Keys act inside their business with **scopes** only: `clients:read`, `ad_accounts:write`, `creatives:read`, `creatives:write`, `landing_pages:write`. 120 requests/minute per key; every call is logged. Unknown/revoked/expired key → `401`; missing scope → `403 { code: "insufficient_scope" }`.
+
+Key-enabled endpoints: `GET /clients/lookup`, `POST /clients/:id/ad-accounts`, `GET /creatives`, `GET /creatives/:id`, `POST /creatives` (supports `Idempotency-Key`: first response stored 24 h and replayed with `Idempotent-Replayed: true`; same key + different body → `422 idempotency_key_reused`), `POST /creatives/:id/landing-page`, `POST /landing-pages`. All other routes are JWT only.
+
+### POST /clients/:id/ad-accounts
+`{ platform, accountId, campaignId?, accountName?, currency? }` — upsert on (platform, accountId); `201` created, `200` updated/unchanged.
+
+### Settings → API keys (JWT, Owner only)
+- `GET /api-keys` → `{ apiKeys: [{ id, name, prefix, scopes, lastUsedAt, expiresAt, revokedAt, createdAt }], scopes }`
+- `POST /api-keys` `{ name, scopes[], expiresAt? }` → `201 { key, apiKey }` — **the key is shown once**; only its SHA-256 is stored.
+- `DELETE /api-keys/:id` — revoke.
+- `GET /api-keys/:id/usage` → last 100 calls `{ method, path, status, at }`.
+
+---
+
 ## Workflows
 
 All workflow endpoints require `owner` or `ops_manager` role.

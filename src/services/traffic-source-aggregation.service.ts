@@ -36,6 +36,21 @@ import { canonicalPlatformSql } from '../utils/catchr-platform.js';
 const DEFAULT_WINDOW_DAYS = 30;
 
 /**
+ * `ad_spend` collapsed to one row per natural key (platform, account,
+ * platform campaign, day) — Catchr ingests the same spend once per
+ * authorization id, so a raw sum triple-counts. Same rule as
+ * dedupedSpendSumSql (dashboard) and listSourcesForCampaign (Ad Account
+ * Links). Sam S11 (2026-09-29): without it the campaign headline cost and
+ * the Ad Account Links spend disagreed for the same accounts.
+ */
+const dedupedAdSpend = sql`(
+  select platform, account_id, campaign_id, date,
+         max(spend::numeric) as spend, max(account_name) as account_name
+  from ad_spend
+  group by platform, account_id, campaign_id, date
+)`;
+
+/**
  * Result row for the unlinked-spend diagnostic. One row per
  * `(platform, account_id)` pair that has spend in the window but no
  * matching active traffic_sources mapping.
@@ -96,7 +111,7 @@ export async function aggregateCatchrSpend(
         and ts.platform is not null
     )
     select coalesce(sum(a.spend::numeric), 0)::float as total
-    from ad_spend a
+    from ${dedupedAdSpend} a
     join source_accounts sa
       on ${adPlatform} = sa.platform
      and a.account_id = sa.acc_id
@@ -141,7 +156,7 @@ export async function aggregateCatchrSpendByLbId(
            coalesce(sum(a.spend::numeric), 0)::float as total
     from source_accounts sa
     join campaigns c on c.id = sa.campaign_id
-    join ad_spend a
+    join ${dedupedAdSpend} a
       on ${adPlatform} = sa.platform
      and a.account_id = sa.acc_id
     where a.date >= current_date - make_interval(days => ${windowDays})
@@ -193,7 +208,7 @@ export async function aggregateUnlinkedSpend(
            max(a.account_name) as account_name,
            coalesce(sum(a.spend::numeric), 0)::float as spend,
            count(distinct a.date)::int as days_active
-    from ad_spend a
+    from ${dedupedAdSpend} a
     left join mapped m
       on m.platform = ${adPlatform} and m.acc_id = a.account_id
     where a.date >= current_date - make_interval(days => ${windowDays})
@@ -222,4 +237,56 @@ export async function aggregateUnlinkedSpend(
     total: Math.round(total * 100) / 100,
     rows: result,
   };
+}
+
+export interface CampaignDailyPlatformSpend {
+  /** canonicalPlatformSql() value, e.g. 'facebook-ads'. */
+  platform: string;
+  /** YYYY-MM-DD */
+  date: string;
+  spend: number;
+}
+
+/**
+ * Daily Catchr spend for ONE campaign, split by canonical platform, from
+ * `sinceIso` (inclusive) to today. Same mapping + dedupe rules as
+ * {@link aggregateCatchrSpend}; the caller buckets the rows into whatever
+ * windows it needs (today / this week / … on campaign detail, and the
+ * per-platform 30-day totals behind the Supplier CPL chart) so one query
+ * serves every figure on the page and they can't disagree.
+ */
+export async function catchrDailySpendByPlatform(
+  campaignId: string,
+  sinceIso: string,
+): Promise<CampaignDailyPlatformSpend[]> {
+  if (!isUuid(campaignId)) return [];
+  const adPlatform = sql.raw(canonicalPlatformSql('a.platform'));
+  const tsPlatform = sql.raw(canonicalPlatformSql('ts.platform'));
+  const rows = (await db.execute(sql`
+    with source_accounts as (
+      select ${tsPlatform} as platform, ts.account_id as acc_id
+      from traffic_sources ts
+      where ts.campaign_id = ${campaignId}::uuid
+        and ts.is_active = true
+        and ts.account_id is not null
+        and ts.platform is not null
+      union
+      select ${tsPlatform} as platform, jsonb_array_elements_text(ts.account_ids) as acc_id
+      from traffic_sources ts
+      where ts.campaign_id = ${campaignId}::uuid
+        and ts.is_active = true
+        and ts.platform is not null
+    )
+    select sa.platform as platform,
+           to_char(a.date, 'YYYY-MM-DD') as date,
+           coalesce(sum(a.spend), 0)::float as spend
+    from ${dedupedAdSpend} a
+    join source_accounts sa
+      on ${adPlatform} = sa.platform
+     and a.account_id = sa.acc_id
+    where a.date >= ${sinceIso}::date
+      and sa.platform is not null
+    group by sa.platform, a.date
+  `)) as unknown as Array<{ platform: string; date: string; spend: number }>;
+  return rows.map((r) => ({ platform: r.platform, date: r.date, spend: Number(r.spend ?? 0) }));
 }
