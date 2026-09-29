@@ -6,6 +6,8 @@ import { authMiddleware } from './auth.middleware.js';
 import { requireRole } from './rbac.middleware.js';
 import { verifyApiKey, logApiKeyUse, type ApiScope } from '../services/api-key.service.js';
 import { db } from '../config/database.js';
+import { redis } from '../config/redis.js';
+import { RedisRateLimitStore } from './redis-rate-limit-store.js';
 import { idempotencyKeys } from '../db/schema/api-keys.js';
 import { UnauthorizedError, AppError } from '../utils/errors.js';
 import type { UserRole } from '../types/index.js';
@@ -60,6 +62,8 @@ export const apiKeyRateLimit = rateLimit({
   max: 120,
   standardHeaders: true,
   legacyHeaders: false,
+  // Shared across instances when Redis is configured; per-process otherwise.
+  ...(redis ? { store: new RedisRateLimitStore(redis) } : {}),
   skip: (req) => !req.apiKey,
   keyGenerator: (req) => `api-key:${req.apiKey?.id ?? 'none'}`,
   message: { status: 'error', message: 'Rate limit for this API key reached (120 requests a minute). Try again shortly.' },
