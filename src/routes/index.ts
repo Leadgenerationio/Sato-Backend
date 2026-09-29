@@ -19,6 +19,7 @@ import { adSpendRoutes } from './ad-spend.routes.js';
 import { adAccountRoutes, clientLookupRoutes } from './ad-account.routes.js';
 import { uploadRoutes } from './upload.routes.js';
 import { creativeRoutes } from './creative.routes.js';
+import { creativeLibraryRoutes } from './creative-library.routes.js';
 import { bankFeedRoutes } from './bank-feed.routes.js';
 import { dashboardRoutes } from './dashboard.routes.js';
 import { sosHelpRoutes } from './sos-help.routes.js';
@@ -59,6 +60,9 @@ router.use('/uploads', uploadRoutes);
 // 403 any client-token request matching its '/' prefix before /sos
 // could pick it up).
 router.use('/sos', sosHelpRoutes);
+// Creative library (M2) — per-route guards; must precede creativeRoutes'
+// router-level owner/ops guard so Finance can read the library.
+router.use('/', creativeLibraryRoutes);
 router.use('/', creativeRoutes);
 router.use('/finance/bank-feed', bankFeedRoutes);
 router.use('/finance/auto-invoice', autoInvoiceRoutes);

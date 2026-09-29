@@ -11,6 +11,7 @@ import { notifyBuyersOfNewCreative } from './creative-review-email.service.js';
 import { getSignedDownloadUrl, parseR2LocationFromFileUrl } from '../integrations/r2/r2-client.js';
 import type { R2Folder } from '../integrations/r2/r2-types.js';
 import type { AuthPayload } from '../types/index.js';
+import { domainEvents } from './events.js';
 
 /**
  * Verify a campaign belongs to a client owned by the requester's business.
@@ -46,9 +47,24 @@ async function campaignBelongsToBusiness(campaignId: string, businessId: string)
   return Boolean(linked);
 }
 
+/**
+ * Library creatives (migration 0045) may belong to a client with no campaign.
+ * Ownership then comes from the client; otherwise from the campaign.
+ */
+async function creativeRowInBusiness(
+  row: { clientId: string | null; campaignId: string | null },
+  businessId: string,
+): Promise<boolean> {
+  if (row.clientId) {
+    const [c] = await db.select({ b: clients.businessId }).from(clients).where(eq(clients.id, row.clientId));
+    return c?.b === businessId;
+  }
+  return row.campaignId ? campaignBelongsToBusiness(row.campaignId, businessId) : false;
+}
+
 export interface CreativeDto {
   id: string;
-  campaignId: string;
+  campaignId: string | null;
   name: string;
   type: 'image' | 'video' | 'text' | string;
   fileUrl: string;
@@ -151,6 +167,7 @@ export async function createCreative(
     .returning();
 
   logger.info({ creativeId: row.id, campaignId: satoId, section: row.section }, 'Creative uploaded');
+  domainEvents.emit('creative.added', { businessId, data: { creativeId: row.id, campaignId: satoId, clientId: null, platform: null } });
 
   // Day 3 — notify every linked buyer their portal has a new asset to
   // review. Fire-and-forget so Resend failures don't break upload. The
@@ -202,7 +219,7 @@ export async function getCreativeSignedUrlForStaff(
     .from(creatives)
     .where(and(eq(creatives.id, id), eq(creatives.isDeleted, false)));
   if (!row) return null;
-  if (!(await campaignBelongsToBusiness(row.campaignId, businessId))) return null;
+  if (!(await creativeRowInBusiness(row, businessId))) return null;
 
   const location = resolveR2Location(row.fileUrl, row.r2Key);
   if (!location) return null;
@@ -237,7 +254,7 @@ export async function softDeleteCreative(
 
   const [row] = await db.select().from(creatives).where(eq(creatives.id, id));
   if (!row) return false;
-  if (!(await campaignBelongsToBusiness(row.campaignId, businessId))) return false;
+  if (!(await creativeRowInBusiness(row, businessId))) return false;
 
   await db
     .update(creatives)
