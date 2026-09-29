@@ -6,8 +6,9 @@
  * Behaviour:
  *  - If the `users` table has any rows: no-op (subsequent deploys don't disturb
  *    real users).
- *  - If empty: insert the four internal users (owner / finance / ops / readonly)
- *    using passwords from SEED_*_PASSWORD env vars.
+ *  - If empty: insert the internal users (owner / finance / ops / readonly) using
+ *    passwords from SEED_*_PASSWORD env vars. In production only accounts whose
+ *    password is set are created (never a default one).
  *  - In production, REFUSES to seed if SEED_OWNER_PASSWORD is unset — would
  *    otherwise create a well-known-password owner account, which is a
  *    credential leak. The container exits non-zero so Railway surfaces the
@@ -19,6 +20,7 @@
 import 'dotenv/config';
 import postgres from 'postgres';
 import bcryptjs from 'bcryptjs';
+import { buildSeedUsers, SeedConfigError, type SeedUser } from '../src/utils/seed-users.js';
 
 const LEADGEN_BUSINESS_ID = '26d6b2b4-c867-460e-8473-eca2b1ffd232';
 
@@ -44,49 +46,21 @@ async function run(): Promise<void> {
 
     console.log('[seed-if-empty] users table empty — seeding internal users');
 
-    // In production, NEVER fall back to dev defaults. Fail loudly so the
-    // operator notices and sets real passwords.
-    const ownerPw = process.env.SEED_OWNER_PASSWORD;
-    if (isProd && !ownerPw) {
-      console.error(
-        '[seed-if-empty] FATAL: SEED_OWNER_PASSWORD is required in production. ' +
-          'Set SEED_OWNER_PASSWORD (and optionally SEED_FINANCE_PASSWORD, ' +
-          'SEED_OPS_PASSWORD, SEED_READONLY_PASSWORD) in Railway env vars, ' +
-          'then redeploy. Refusing to seed with default passwords.',
-      );
-      process.exit(1);
+    // In production, NEVER fall back to dev defaults. The owner's password is mandatory (fail
+    // loudly so the operator notices); the other three accounts are only created when their
+    // own password env var is set (see src/utils/seed-users.ts).
+    let seed: SeedUser[];
+    try {
+      const built = buildSeedUsers(process.env, isProd);
+      seed = built.users;
+      for (const s of built.skipped) console.log(`[seed-if-empty] not creating ${s}`);
+    } catch (err) {
+      if (err instanceof SeedConfigError) {
+        console.error(`[seed-if-empty] FATAL: ${err.message}`);
+        process.exit(1);
+      }
+      throw err;
     }
-
-    const seed = [
-      {
-        email: 'owner@stato.app',
-        password: ownerPw || 'owner123',
-        name: 'Sam Owner',
-        role: 'owner',
-        isPrimaryOwner: true,
-      },
-      {
-        email: 'finance@stato.app',
-        password: process.env.SEED_FINANCE_PASSWORD || 'finance123',
-        name: 'Finance Admin',
-        role: 'finance_admin',
-        isPrimaryOwner: false,
-      },
-      {
-        email: 'ops@stato.app',
-        password: process.env.SEED_OPS_PASSWORD || 'ops123',
-        name: 'Ops Manager',
-        role: 'ops_manager',
-        isPrimaryOwner: false,
-      },
-      {
-        email: 'readonly@stato.app',
-        password: process.env.SEED_READONLY_PASSWORD || 'readonly123',
-        name: 'Readonly User',
-        role: 'readonly',
-        isPrimaryOwner: false,
-      },
-    ];
 
     // Make sure the leadgeneration.io business row exists (FK target).
     await sql`

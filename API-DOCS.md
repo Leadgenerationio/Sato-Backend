@@ -62,6 +62,8 @@ Paginated responses include:
 
 Create a new user account.
 
+> **Closed in production.** When `NODE_ENV=production` this endpoint answers `403` with `code: "registration_closed"` and creates nothing, unless `ALLOW_PUBLIC_REGISTRATION=true` is set on purpose. Staff are added by an owner from Settings → User Management. It stays open in development and test.
+
 **Roles:** Public (no auth required)
 
 **Request body:**
