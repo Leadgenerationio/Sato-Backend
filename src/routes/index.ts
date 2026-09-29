@@ -29,6 +29,8 @@ import { agreementTemplateRoutes } from './agreement-template.routes.js';
 import { webhookRoutes } from './webhook.routes.js';
 import { apiKeyRoutes } from './api-key.routes.js';
 import { buildOpenApi, docsHtml } from '../docs/openapi.js';
+import { requireSection } from '../middleware/section.middleware.js';
+import { SECTIONS } from '../config/sections.js';
 export const router: RouterType = Router();
 
 // Public — must be before any auth middleware on individual routers.
@@ -48,6 +50,15 @@ router.get('/docs', (_req, res) => {
 });
 
 router.use('/auth', authRoutes);
+
+// Role Access Matrix (S7): an Owner can switch a section off for a role in
+// Settings → User Management, and that is enforced here, in front of every
+// router below. It only restricts — each router's requireRole() stays the
+// real gate. See src/config/sections.ts for the prefix → section map.
+for (const section of SECTIONS) {
+  for (const prefix of section.apiPrefixes) router.use(prefix, requireSection(section.key));
+}
+
 router.use('/users', userRoutes);
 router.use('/permissions', permissionRoutes);
 router.use('/integrations', integrationRoutes);

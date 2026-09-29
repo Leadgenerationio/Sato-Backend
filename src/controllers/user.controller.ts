@@ -123,3 +123,14 @@ export async function sendWelcomeEmail(req: Request, res: Response) {
     data: result,
   });
 }
+
+// Feedback N2: the caller's own UI preferences (any signed-in role).
+export async function getMyPreferences(req: Request, res: Response) {
+  const preferences = await userService.getOwnPreferences(req.user!.userId);
+  res.json({ status: 'success', data: { preferences } });
+}
+
+export async function updateMyPreferences(req: Request, res: Response) {
+  const preferences = await userService.updateOwnPreferences(req.user!.userId, req.body);
+  res.json({ status: 'success', data: { preferences } });
+}

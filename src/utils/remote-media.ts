@@ -63,7 +63,13 @@ export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps 
     throw new AppError(422, 'sourceUrl must point to a public address');
   }
 
-  const res = await fetchImpl(url, { redirect: 'error', signal: AbortSignal.timeout(30_000) });
+  // Some image hosts (Wikimedia, several CDNs) answer 400/403 to requests
+  // without a User-Agent — send an honest one.
+  const res = await fetchImpl(url, {
+    redirect: 'error',
+    signal: AbortSignal.timeout(30_000),
+    headers: { 'User-Agent': 'StatoCreativeFetcher/1.0 (+https://leadgenerationio.stato.tech)', Accept: 'image/*,video/*' },
+  });
   if (!res.ok) throw new AppError(422, `Could not download sourceUrl (HTTP ${res.status})`);
   const contentType = res.headers.get('content-type') ?? '';
   const mediaType = mediaTypeOf(contentType);

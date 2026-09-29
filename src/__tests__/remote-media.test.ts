@@ -44,4 +44,11 @@ describe('fetchRemoteMedia', () => {
   it('refuses non-http schemes', async () => {
     await expect(fetchRemoteMedia('file:///etc/passwd')).rejects.toMatchObject({ statusCode: 422 });
   });
+  it('sends a User-Agent (hosts like Wikimedia refuse requests without one)', async () => {
+    let seen: Headers | undefined;
+    const png = Buffer.from('89504e470d0a1a0a', 'hex');
+    const spyFetch = (async (_u: string, init?: RequestInit) => { seen = new Headers(init?.headers); return new Response(new Uint8Array(png), { headers: { 'content-type': 'image/png' } }); }) as unknown as typeof fetch;
+    await fetchRemoteMedia('https://cdn.example.com/a.png', { lookup: publicLookup, fetchImpl: spyFetch });
+    expect(seen?.get('user-agent')).toMatch(/Stato/);
+  });
 });

@@ -180,6 +180,21 @@ describe('edit, bulk and landing pages', () => {
     expect(lps.body.data.landingPages[0].creativeCount).toBe(rows.length);
   });
 
+  it('list rows carry what the admin screens read (fileUrl, landing page fields, LP client name)', async () => {
+    const list = await request(app).get(`/api/v1/creatives?clientId=${buyerA}`).set(auth(owner));
+    expect(list.status).toBe(200);
+    for (const c of list.body.data.creatives) {
+      expect(c).toHaveProperty('fileUrl');
+      expect(c).toHaveProperty('landingPageId');
+      expect(c).toHaveProperty('landingPageUrl');
+    }
+    const lp = await request(app).post('/api/v1/landing-pages').set(auth(owner)).send({ clientId: buyerA, url: `https://example.com/${tag}/lp-fields?utm_source=x` });
+    const pages = await request(app).get(`/api/v1/landing-pages?clientId=${buyerA}`).set(auth(owner));
+    const row = pages.body.data.landingPages.find((x: { id: string }) => x.id === (lp.body.data.landingPage ?? lp.body.data).id);
+    expect(row.clientName).toMatch(/Yash Test Buyer A/);
+    expect(row.creativesCount).toBe(row.creativeCount);
+  });
+
   it('landing pages: create is idempotent per client, rename, archive', async () => {
     const one = await request(app).post('/api/v1/landing-pages').set(auth(owner)).send({ clientId: solo, url: 'https://lp.example.com/solo', title: 'Solo LP' });
     const two = await request(app).post('/api/v1/landing-pages').set(auth(owner)).send({ clientId: solo, url: 'lp.example.com/solo/?utm_campaign=z' });
