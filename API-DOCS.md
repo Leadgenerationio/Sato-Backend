@@ -745,6 +745,134 @@ The client that owns an ad account. 404 when the account isn't linked.
 } }
 ```
 
+### Scheduled Meta / Taboola creative sync (plan phase 3)
+
+Every `PLATFORM_SYNC_EVERY_HOURS` hours (default 3) a sync job pulls the ads of every linked **Meta** (`facebook-ads`) and **Taboola** ad account and files each creative under the client that owns the account, plus its campaign if one is set. The client always comes from the link above and is never guessed from a name. Each creative goes through the creative library's `upsertPlatformCreative()`, which copies the media into storage. Platform CDN links expire, so they are never kept as the file URL.
+
+- **Meta:** `GET /act_{id}/ads` with the creative fields and `updated_since`, following `paging.next`. Video sources come from `/{video_id}`, and image hashes (carousels, dynamic creative) from `/act_{id}/adimages`. Carousels and asset feeds give one creative per card/asset. The client backs off on throttling codes 4/17/32/613 and when `X-Business-Use-Case-Usage` is ≥ 90%.
+- **Taboola:** OAuth client_credentials, then `GET /{account_id}/campaigns` and `/{account_id}/campaigns/{id}/items/` for campaigns that are not terminated. Items still being crawled or stopped are skipped.
+- **No duplicates:** creatives are upserted on platform + creative id, so a second run updates rather than copies. The next Meta run asks only for ads updated since the last successful run, with 10 minutes of overlap. If any creative failed to save, the window is kept and retried.
+- **Off until connected:** with neither platform's credentials set, the job logs once and does nothing. The job runs on a fixed 3-hour slot (BullMQ scheduler), so the first run lands within one interval of deploy, not at boot. Use **Sync now** for an immediate pull.
+
+**Credentials needed from the account owner:**
+
+| Platform | What | Env |
+| --- | --- | --- |
+| Meta | Business Manager **system user token** with `ads_read`, and the system user assigned to every ad account that is linked to a client | `META_SYSTEM_USER_TOKEN` (optional `META_GRAPH_VERSION`, default `v21.0`) |
+| Taboola | **Backstage API client** (client_credentials) with access to each advertiser account | `TABOOLA_CLIENT_ID`, `TABOOLA_CLIENT_SECRET` |
+
+### GET /ad-accounts/sync-status
+
+**Roles:** owner, ops_manager, finance_admin.
+
+Whether each platform is connected, and for every linked Meta/Taboola account: the last run, the last error, and what the last run found.
+
+```json
+{ "status": "success", "data": {
+  "everyHours": 3,
+  "platforms": { "meta": { "connected": true }, "taboola": { "connected": false } },
+  "libraryInstalled": true,
+  "accounts": [{
+    "linkId": "…", "platform": "facebook-ads", "accountId": "428353095282383", "accountName": "CH Hearing",
+    "clientId": "…", "clientName": "…",
+    "lastRunAt": "2026-09-29T12:00:00.000Z", "lastSuccessAt": "2026-09-29T12:00:00.000Z", "lastError": null,
+    "adsSeen": 14, "created": 3, "updated": 11, "failed": 0
+  }]
+} }
+```
+
+### POST /ad-accounts/:id/sync-now
+
+**Roles:** owner, ops_manager. `:id` is the link id (`linkId` above).
+
+Pulls that one account now. **202** `{ "queued": true }` when queued (repeat clicks don't stack). **200** with the run's result when there is no queue. **404** for an unknown link. **409** when that platform isn't connected yet. **422** for platforms other than Meta/Taboola.
+
+## Creative library & landing pages
+
+Creatives belong to a **client** and optionally a campaign (migration 0045). A creative with `clientId: null` is *shared* on its campaign and is listed under every buyer on that campaign. Roles: owner / ops_manager write, finance_admin reads. See `docs/creative-library-and-api-plan.md`.
+
+### GET /creatives
+
+Query (all optional): `clientId`, `platform` (`meta|taboola|google|tiktok|manual`), `campaignId`, `landingPageId` (alias `landingPage`), `status` (`draft|sent_for_approval|approved|rejected|changes_requested`), `q` (name, headline, text, ad/creative id, platform campaign name), `from` / `to` (`YYYY-MM-DD`, on created date), `sort` (`created|last_seen|name`), `order` (`asc|desc`), `page`, `limit` (≤ 100, default 24).
+
+```json
+{ "status": "success", "data": { "creatives": [LibraryCreative], "total": 42, "page": 1, "pageSize": 24 } }
+```
+
+`LibraryCreative`: `id, name, clientId, clientName, campaignId, campaignName, shared, platform, platformAccountId, platformAdId, platformCreativeId, platformCampaignId, platformCampaignName, landingPage {id,url,title}|null, headline, bodyText, mediaType, contentType, sizeBytes, width, height, durationS, sha256, status, section, thumbnailUrl (signed, 1 h)|null, firstSeen, lastSeen, createdAt`.
+
+### GET /creatives/:id
+
+One `LibraryCreative` plus `fileUrl` (signed, 1 h).
+
+### POST /creatives
+
+One creative, or `{ "creatives": [ … up to 50 ] }` (response `data.results[]`, each `{ id, created, creative }` or `{ index, status, error }`).
+
+```json
+{
+  "platform": "meta",
+  "platformAccountId": "428353095282383",
+  "platformAdId": "120210000000001",
+  "platformCreativeId": "120210000000777",
+  "landingPageUrl": "https://offers.example.com/hearing?utm_source=fb",
+  "headline": "Hear clearly again",
+  "mediaType": "image",
+  "sourceUrl": "https://scontent.xx.fbcdn.net/…/ad.jpg"
+}
+```
+
+- **Client:** `clientId`, or found from `(platform, platformAccountId)` via the Link ad accounts table — IDs only, never names. Neither → `422`.
+- **File:** `r2Key` from `POST /uploads/presign` (folder `creatives`) with `contentType`/`sizeBytes`/`sha256`, **or** `sourceUrl` (downloaded by the server: public http(s) hosts only, images/videos only, max 50 MB → `422`/`413`).
+- **No duplicates:** the same `(platform, platformCreativeId)` — or the same file (sha256) for the same client — updates the existing creative (`200`, `created: false`) instead of copying it (`201`).
+- **Landing page:** `landingPageUrl` finds or creates the client's landing page by normalised URL (tracking params such as `utm_*`, `fbclid`, `gclid` ignored).
+- The pre-library campaign upload body (`campaignId, name, type, r2Key, fileUrl, sizeBytes, contentType, section`) is still accepted and behaves as before.
+
+### PATCH /creatives/:id
+
+`{ clientId?, campaignId?, landingPageId?, name?, headline?, bodyText? }`. Moving to another client drops a landing page that belongs to the old client.
+
+### POST /creatives/:id/landing-page
+
+`{ "url": "https://…" }` or `{ "landingPageId": "uuid" }`.
+
+### POST /creatives/bulk
+
+`{ "action": "assign_landing_page", "ids": [...], "url"|"landingPageId" }`, `{ "action": "move_client", "ids": [...], "clientId" }`, `{ "action": "submit_for_approval", "ids": [...] }` → `{ ok: [ids], failed: [{ id, message }] }`.
+
+### GET /landing-pages · GET /clients/:id/landing-pages
+
+Query: `clientId`, `q`, `includeArchived=true`. Each page: `id, clientId, campaignId, url, normalisedUrl, title, status, creativeCount, createdAt`.
+
+### POST /landing-pages
+
+`{ clientId, url, title?, campaignId? }` → `201` new, `200` when the client already has that (normalised) page.
+
+### PATCH /landing-pages/:id · DELETE /landing-pages/:id
+
+PATCH `{ url?, title?, status? }` (`409` if the new URL clashes with another page of the client). DELETE archives (soft delete); creatives keep their link.
+
+### Thumbnails
+
+New creatives queue a `media` → `thumbnail` job: images → 480 px webp via sharp; videos → poster frame via ffmpeg when installed (see Dockerfile note), else `thumbnailUrl` stays `null`.
+
+## Public API (API keys)
+
+Docs: **`GET /openapi.json`** (OpenAPI 3.1, generated from the routes' zod schemas) and **`GET /docs`** (reference page). Both public.
+
+**Auth:** `X-API-Key: stk_…`. Keys act inside their business with **scopes** only: `clients:read`, `ad_accounts:write`, `creatives:read`, `creatives:write`, `landing_pages:write`. 120 requests/minute per key; every call is logged. Unknown/revoked/expired key → `401`; missing scope → `403 { code: "insufficient_scope" }`.
+
+Key-enabled endpoints: `GET /clients/lookup`, `POST /clients/:id/ad-accounts`, `GET /creatives`, `GET /creatives/:id`, `POST /creatives` (supports `Idempotency-Key`: first response stored 24 h and replayed with `Idempotent-Replayed: true`; same key + different body → `422 idempotency_key_reused`), `POST /creatives/:id/landing-page`, `POST /landing-pages`. All other routes are JWT only.
+
+### POST /clients/:id/ad-accounts
+`{ platform, accountId, campaignId?, accountName?, currency? }` — upsert on (platform, accountId); `201` created, `200` updated/unchanged.
+
+### Settings → API keys (JWT, Owner only)
+- `GET /api-keys` → `{ apiKeys: [{ id, name, prefix, scopes, lastUsedAt, expiresAt, revokedAt, createdAt }], scopes }`
+- `POST /api-keys` `{ name, scopes[], expiresAt? }` → `201 { key, apiKey }` — **the key is shown once**; only its SHA-256 is stored.
+- `DELETE /api-keys/:id` — revoke.
+- `GET /api-keys/:id/usage` → last 100 calls `{ method, path, status, at }`.
+
 ---
 
 ## Outbound webhooks

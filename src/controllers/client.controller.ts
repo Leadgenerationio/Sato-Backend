@@ -8,10 +8,20 @@ import { domainEvents } from '../services/events.js';
 
 interface CreateContactBody { contactType?: string; name?: string; email?: string }
 
-export async function listClients(req: Request, res: Response) {
-  const result = await clientService.listClients(req.user!, {
+function listFilters(req: Request) {
+  return {
     status: req.query.status as string | undefined,
     search: req.query.search as string | undefined,
+    currency: req.query.currency as string | undefined,
+    country: req.query.country as string | undefined,
+    sort: req.query.sort as clientService.ClientSortKey | undefined,
+    dir: req.query.dir as 'asc' | 'desc' | undefined,
+  };
+}
+
+export async function listClients(req: Request, res: Response) {
+  const result = await clientService.listClients(req.user!, {
+    ...listFilters(req),
     page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
     limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
   });
@@ -25,6 +35,18 @@ export async function listClients(req: Request, res: Response) {
       pageSize: result.pageSize,
     },
   });
+}
+
+// Feedback S14: CSV of the filtered + sorted list (same filters as GET /).
+export async function exportClientsCsv(req: Request, res: Response) {
+  const { csv, count, truncated } = await clientService.exportClientsCsv(req.user!, listFilters(req));
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="clients-${stamp}.csv"`);
+  res.setHeader('X-Row-Count', String(count));
+  if (truncated) res.setHeader('X-Truncated', 'true');
+  // BOM so Excel opens £/€ and accented company names correctly.
+  res.send('\uFEFF' + csv);
 }
 
 export async function getClient(req: Request, res: Response) {

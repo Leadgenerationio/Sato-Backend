@@ -98,6 +98,21 @@ export const env = {
   CATCHR_ACCESS_TOKEN: v('CATCHR_ACCESS_TOKEN'),
   CATCHR_SYNC_BACKFILL_DAYS: parseInt(v('CATCHR_SYNC_BACKFILL_DAYS', '30'), 10),
 
+  // Plan phase 3 — scheduled pull of ads + creatives (docs/creative-library-
+  // and-api-plan.md). All optional: with neither Meta nor Taboola set the
+  // sync job logs once and does nothing. The clients read process.env at
+  // call time; these entries document the names and defaults.
+  // Meta: a Business Manager system user token with `ads_read` on every ad
+  // account that is linked to a client.
+  META_SYSTEM_USER_TOKEN: v('META_SYSTEM_USER_TOKEN'),
+  META_GRAPH_VERSION: v('META_GRAPH_VERSION', 'v21.0'),
+  // Taboola: a Backstage API client (client_credentials) with access to each
+  // advertiser account.
+  TABOOLA_CLIENT_ID: v('TABOOLA_CLIENT_ID'),
+  TABOOLA_CLIENT_SECRET: v('TABOOLA_CLIENT_SECRET'),
+  PLATFORM_SYNC_EVERY_HOURS: parseInt(v('PLATFORM_SYNC_EVERY_HOURS', '3'), 10),
+  PLATFORM_SYNC_LOOKBACK_DAYS: parseInt(v('PLATFORM_SYNC_LOOKBACK_DAYS', '90'), 10),
+
   // Slice 5 Day 6 — SOS help button target. Phone number that the SOS
   // WhatsApp deep-link opens. Plain digits with country code, no `+` or
   // spaces (wa.me format). Optional: when blank, the endpoint records
