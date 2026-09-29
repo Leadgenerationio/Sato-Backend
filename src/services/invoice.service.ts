@@ -11,6 +11,8 @@ import {
   type XeroInvoice,
 } from '../integrations/xero/xero-client.js';
 import { logger } from '../utils/logger.js';
+import { AppError } from '../utils/errors.js';
+import { deriveVatTreatment, treatmentChargesVat, type VatTreatment } from '../utils/client-locale.js';
 import type { AuthPayload } from '../types/index.js';
 
 export interface LineItem {
@@ -55,6 +57,7 @@ export interface InvoiceDetail extends InvoiceSummary {
   lastChasedAt: string | null;
   clientEmail: string;
   vatRegistered: boolean;
+  vatTreatment: VatTreatment;
   attachments: InvoiceAttachment[];
 }
 
@@ -167,6 +170,7 @@ function invoiceToDetail(row: InvoiceRow, client: ClientRow): InvoiceDetail {
     lastChasedAt: row.lastChasedAt ? row.lastChasedAt.toISOString() : null,
     clientEmail: client.contactEmail ?? '',
     vatRegistered: client.vatRegistered ?? false,
+    vatTreatment: deriveVatTreatment(client.vatTreatment, client.addVatToInvoices, client.vatRegistered),
     attachments: (row.attachments as InvoiceAttachment[] | null) ?? [],
   };
 }
@@ -576,10 +580,24 @@ export async function syncInvoicesFromXero(
 
 export type OutstandingBucket = 'all' | 'due' | 'overdue';
 
+export interface CurrencyTotal {
+  currency: string;
+  total: string; // decimal-on-the-wire
+  count: number;
+}
+
 export interface OutstandingInvoicesResult {
   invoices: InvoiceSummary[];
   count: number;
+  /**
+   * @deprecated Sum of `total` across ALL currencies — meaningless when more
+   * than one currency is outstanding (€34,860 + £23,250 ≠ £58,110). Kept only
+   * so an already-deployed frontend keeps rendering; use `totalsByCurrency`.
+   * Feedback M3 (29 Sep 2026).
+   */
   totalOutstanding: string; // decimal-on-the-wire
+  /** One entry per invoice currency, largest total first. Never cross-summed. */
+  totalsByCurrency: CurrencyTotal[];
 }
 
 /**
@@ -597,7 +615,7 @@ export async function getOutstandingInvoices(
   bucket: OutstandingBucket = 'all',
 ): Promise<OutstandingInvoicesResult> {
   const businessId = requester.businessId;
-  if (!businessId) return { invoices: [], count: 0, totalOutstanding: '0' };
+  if (!businessId) return { invoices: [], count: 0, totalOutstanding: '0', totalsByCurrency: [] };
 
   // 'submitted' is part of OUTSTANDING_STATUSES (and the portal pending count),
   // so it must be treated like 'sent'/'authorised' here too — otherwise a
@@ -631,7 +649,8 @@ export async function getOutstandingInvoices(
     isNotNull(invoices.xeroInvoiceId),
   );
 
-  const [rows, summaryResult, clientMap] = await Promise.all([
+  const currencyExpr = sql<string>`coalesce(${invoices.currency}, 'GBP')`;
+  const [rows, summaryResult, currencyRows, clientMap] = await Promise.all([
     db
       .select({ inv: invoices, client: clients })
       .from(invoices)
@@ -647,6 +666,16 @@ export async function getOutstandingInvoices(
       .from(invoices)
       .innerJoin(clients, eq(clients.id, invoices.clientId))
       .where(whereClause),
+    db
+      .select({
+        currency: currencyExpr,
+        n: sql<number>`count(*)::int`,
+        total: sql<string>`coalesce(sum(${invoices.total}), 0)::text`,
+      })
+      .from(invoices)
+      .innerJoin(clients, eq(clients.id, invoices.clientId))
+      .where(whereClause)
+      .groupBy(currencyExpr),
     loadClientMap(businessId),
   ]);
 
@@ -662,11 +691,38 @@ export async function getOutstandingInvoices(
     invoices: items,
     count: summaryResult[0]?.n ?? 0,
     totalOutstanding: summaryResult[0]?.total ?? '0',
+    totalsByCurrency: currencyRows
+      .map((r) => ({ currency: r.currency, total: r.total, count: r.n }))
+      .sort((a, b) => Number(b.total) - Number(a.total)),
   };
 }
 
+/** 422 with a machine-readable code so the FE can show the right prompt. */
+class InvoiceRuleError extends AppError {
+  constructor(public code: string, message: string) {
+    super(422, message);
+    Object.setPrototypeOf(this, InvoiceRuleError.prototype);
+  }
+}
+
+/** Today (UTC midnight) + N days — the default due date from payment terms. */
+export function dueDateFromTerms(termsDays: number | null | undefined, from = new Date()): Date {
+  const d = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()));
+  d.setUTCDate(d.getUTCDate() + (termsDays ?? 30));
+  return d;
+}
+
 export async function createInvoice(
-  data: { clientId: string; currency: string; lineItems: LineItem[]; addVat: boolean },
+  data: {
+    clientId: string;
+    currency: string;
+    lineItems: LineItem[];
+    addVat: boolean;
+    /** YYYY-MM-DD or ISO timestamp. Defaults to today + the client's payment terms. */
+    dueDate?: string;
+    /** Required to invoice in a currency other than the client's. */
+    confirmCurrencyMismatch?: boolean;
+  },
   requester: AuthPayload,
 ): Promise<InvoiceDetail> {
   const businessId = requester.businessId;
@@ -676,10 +732,44 @@ export async function createInvoice(
     .select()
     .from(clients)
     .where(and(eq(clients.id, data.clientId), eq(clients.businessId, businessId)));
-  if (!client) throw new Error('Client not found');
+  if (!client) throw new AppError(404, 'Client not found');
+
+  // M7 (Sam feedback 2026-09-29): a EUR invoice was accepted for a GBP
+  // client with no warning, and every invoice got 20% VAT + 30-day terms
+  // whatever the client record said. The client record is the default; a
+  // different currency needs an explicit confirmation.
+  const clientCurrency = (client.currency ?? 'GBP').toUpperCase();
+  const currency = data.currency.toUpperCase();
+  if (currency !== clientCurrency && data.confirmCurrencyMismatch !== true) {
+    throw new InvoiceRuleError(
+      'currency_mismatch',
+      `${client.companyName} is billed in ${clientCurrency}, but this invoice is in ${currency}. ` +
+        'Change the currency back, or confirm you mean to invoice in a different currency.',
+    );
+  }
+  const treatment = deriveVatTreatment(client.vatTreatment, client.addVatToInvoices, client.vatRegistered);
+  if (data.addVat && !treatmentChargesVat(treatment)) {
+    const label: Record<VatTreatment, string> = {
+      uk_standard: 'UK VAT',
+      uk_zero_rated: 'zero-rated',
+      reverse_charge: 'reverse charge',
+      outside_scope: 'outside the scope of VAT',
+    };
+    throw new InvoiceRuleError(
+      'vat_not_applicable',
+      `${client.companyName}'s VAT treatment is ${label[treatment]}, so VAT can't be added to this invoice. ` +
+        'Change the VAT treatment on the client first if it is wrong.',
+    );
+  }
+  const vatRate = Number(client.vatRate ?? 20);
+  const dueDate = !data.dueDate
+    ? dueDateFromTerms(client.paymentTermsDays)
+    : /^\d{4}-\d{2}-\d{2}$/.test(data.dueDate)
+      ? new Date(`${data.dueDate}T00:00:00Z`)
+      : new Date(data.dueDate);
 
   const subtotal = Math.round(data.lineItems.reduce((sum, l) => sum + l.amount, 0) * 100) / 100;
-  const vatAmount = data.addVat ? Math.round(subtotal * 0.2 * 100) / 100 : 0;
+  const vatAmount = data.addVat ? Math.round(subtotal * (vatRate / 100) * 100) / 100 : 0;
   const total = Math.round((subtotal + vatAmount) * 100) / 100;
 
   // Generate the invoice number from a Postgres SEQUENCE (created in
@@ -698,16 +788,30 @@ export async function createInvoice(
       clientId: data.clientId,
       invoiceNumber,
       status: 'draft',
-      currency: data.currency,
+      currency,
       subtotal: String(subtotal),
       vatAmount: String(vatAmount),
       total: String(total),
-      dueDate: new Date(Date.now() + 30 * 86_400_000),
+      dueDate,
       lineItems: data.lineItems,
     })
     .returning();
 
   return invoiceToDetail(row, client);
+}
+
+/**
+ * Xero tax code per line. Driven by what the invoice actually charges, not
+ * by client.vatRegistered: previously a no-VAT invoice for a VAT-registered
+ * client was pushed as OUTPUT2 and Xero added 20% the Stato invoice didn't
+ * have. ZERORATEDOUTPUT and NONE are Xero UK system tax types. Reverse
+ * charge goes as NONE for now — confirm the org's reverse-charge code with
+ * the accountant before switching it.
+ */
+function xeroTaxType(invoice: Pick<InvoiceDetail, 'vatAmount' | 'vatTreatment'>): string {
+  if (Number(invoice.vatAmount ?? 0) > 0) return 'OUTPUT2';
+  if (invoice.vatTreatment === 'uk_zero_rated') return 'ZERORATEDOUTPUT';
+  return 'NONE';
 }
 
 /**
@@ -743,7 +847,7 @@ export async function pushInvoiceToXero(invoiceId: string, requester: AuthPayloa
           Description: li.description,
           Quantity: li.quantity,
           UnitAmount: li.unitPrice,
-          TaxType: invoice.vatRegistered ? 'OUTPUT2' : 'NONE',
+          TaxType: xeroTaxType(invoice),
         })),
         Reference: invoice.invoiceNumber,
         Status: 'DRAFT',
@@ -877,23 +981,44 @@ export async function removeInvoiceAttachment(
  * requester's business. Same data the main clients API returns, but shaped
  * minimally for the dropdown.
  */
-export async function getInvoiceableClients(requester: AuthPayload): Promise<
-  Array<{ id: string; name: string; email: string; vatRegistered: boolean; currency: string }>
-> {
+export interface InvoiceableClient {
+  id: string;
+  name: string;
+  email: string;
+  status: string;
+  vatRegistered: boolean;
+  vatTreatment: VatTreatment;
+  vatRate: number;
+  currency: string;
+  paymentTermsDays: number;
+}
+
+export async function getInvoiceableClients(requester: AuthPayload): Promise<InvoiceableClient[]> {
   const businessId = requester.businessId;
   if (!businessId) return [];
 
+  // M7 (Sam feedback 2026-09-29): this used to be status = 'active' only, so
+  // every Onboarding client — including Sonova, with an open €34,860 invoice
+  // — was missing from New Invoice. Every client we still work with is
+  // billable; only churned ones are left out.
   const rows = await db
     .select()
     .from(clients)
-    .where(and(eq(clients.businessId, businessId), eq(clients.status, 'active')))
+    .where(and(
+      eq(clients.businessId, businessId),
+      sql`${clients.status} IS DISTINCT FROM 'churned'`,
+    ))
     .orderBy(clients.companyName);
 
   return rows.map((c) => ({
     id: c.id,
     name: c.companyName,
     email: c.contactEmail ?? '',
+    status: c.status ?? 'onboarding',
     vatRegistered: c.vatRegistered ?? false,
+    vatTreatment: deriveVatTreatment(c.vatTreatment, c.addVatToInvoices, c.vatRegistered),
+    vatRate: Number(c.vatRate ?? 20),
     currency: c.currency ?? 'GBP',
+    paymentTermsDays: c.paymentTermsDays ?? 30,
   }));
 }

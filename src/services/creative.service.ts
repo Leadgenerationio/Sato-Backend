@@ -8,7 +8,7 @@ import { logger } from '../utils/logger.js';
 import { uuidOrNull } from '../utils/zod-helpers.js';
 import { resolveSatoCampaignId } from '../utils/resolve-campaign-id.js';
 import { notifyBuyersOfNewCreative } from './creative-review-email.service.js';
-import { getSignedDownloadUrl, parseR2LocationFromFileUrl } from '../integrations/r2/r2-client.js';
+import { getSignedDownloadUrl, parseR2LocationFromFileUrl, stripPresignedQuery } from '../integrations/r2/r2-client.js';
 import type { R2Folder } from '../integrations/r2/r2-types.js';
 import type { AuthPayload } from '../types/index.js';
 
@@ -141,7 +141,8 @@ export async function createCreative(
       campaignId: satoId,
       name: input.name,
       type: input.type,
-      fileUrl: input.fileUrl,
+      // N8: never persist the expiring presigned URL — store the stable object URL.
+      fileUrl: stripPresignedQuery(input.fileUrl),
       r2Key: input.r2Key,
       sizeBytes: input.sizeBytes,
       contentType: input.contentType,

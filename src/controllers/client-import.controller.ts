@@ -7,7 +7,10 @@ function handleAttioError(err: unknown, res: Response): boolean {
   if (err instanceof AttioNotConfiguredError) {
     res.status(503).json({
       status: 'error',
-      message: 'Attio import is not configured. Add ATTIO_API_KEY to the backend environment.',
+      // Plain words (Sam S16): this reaches the Owner's screen verbatim. Keep
+      // "not configured" — the deployed FE matches on it.
+      code: 'attio_not_configured',
+      message: 'Attio import is not configured yet. Ask your administrator to connect your Attio account, then try again.',
     });
     return true;
   }

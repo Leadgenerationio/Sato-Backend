@@ -684,6 +684,22 @@ function monthsForFinancialOverviewWindow(window: import('../utils/dashboard-win
   }
 }
 
+/**
+ * The trailing `count` calendar months ending with `now`'s month, oldest first,
+ * as 'YYYY-MM' keys. Always steps from the 1st of the month: the previous
+ * `d.setMonth(d.getMonth() - i)` on today's date overflowed on the 29th–31st
+ * (29 Sep − 7 months → "29 Feb" → 1 Mar), so the dashboard axis read
+ * "Jan, Mar, Mar" with February missing. Feedback S12 (29 Sep 2026).
+ */
+export function trailingMonthKeys(count: number, now: Date = new Date()): string[] {
+  const keys: string[] = [];
+  for (let i = count - 1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    keys.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+  }
+  return keys;
+}
+
 export async function getFinancialOverview(
   _requester: AuthPayload,
   opts: { window?: import('../utils/dashboard-window.js').DashboardWindow } = {},
@@ -715,9 +731,10 @@ export async function getFinancialOverview(
   // monthsCount is driven by the dashboard window filter when supplied —
   // last_year (default / no filter) keeps the legacy 12-month series.
   const monthsCount = monthsForFinancialOverviewWindow(opts.window);
-  const windowStart = new Date();
-  windowStart.setMonth(windowStart.getMonth() - (monthsCount - 1));
-  windowStart.setDate(1);
+  // Built from the 1st directly — setMonth() on today's date overflows on the
+  // 29th–31st (see trailingMonthKeys).
+  const today = new Date();
+  const windowStart = new Date(today.getFullYear(), today.getMonth() - (monthsCount - 1), 1);
   const windowStartIso = windowStart.toISOString().split('T')[0];
 
   const [revenueRows, expenseRows, invoiceCountRows] = await Promise.all([
@@ -763,12 +780,7 @@ export async function getFinancialOverview(
 
   // Build the trailing monthsCount months as zero-baseline rows so charts
   // always render a continuous timeline even if some months had no activity.
-  const months: string[] = [];
-  for (let i = monthsCount - 1; i >= 0; i--) {
-    const d = new Date();
-    d.setMonth(d.getMonth() - i);
-    months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
-  }
+  const months = trailingMonthKeys(monthsCount, today);
   const currentMonthKey = months[months.length - 1];
 
   const revenueByMonth = new Map(revenueRows.map((r) => [r.month, { revenue: Number(r.revenue), vat: Number(r.vat) }]));

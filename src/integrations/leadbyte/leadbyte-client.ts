@@ -423,6 +423,7 @@ export async function getSuppliers(campaignId?: string): Promise<LeadByteSupplie
       campaignId: refId(r.campaign) || flatRef(r.campaign),
       totalSpend: r.payout,
       totalLeads: r.leads,
+      revenue: Number(r.revenue ?? 0),
     };
   });
 }

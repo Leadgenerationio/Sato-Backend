@@ -102,16 +102,26 @@ describe('Client API', () => {
       expect(res.status).toBe(400);
     });
 
-    it('rejects status=paused (dropped from enum on 13 May)', async () => {
+    // Feedback M4 (29 Sep 2026): 'paused' is a real status again (it was
+    // dropped on 13 May). 'prospect' stays retired.
+    it('accepts status=paused', async () => {
       const res = await request(app)
         .post('/api/v1/clients')
         .set('Authorization', `Bearer ${ownerToken}`)
         .send({
-          companyName: `Reject Paused ${Date.now()}`,
+          companyName: `Paused ${Date.now()}`,
           contactName: 'X',
-          contactEmail: 'x@y.com',
           status: 'paused',
         });
+      expect(res.status).toBe(201);
+      expect(res.body.data.client.status).toBe('paused');
+    });
+
+    it('rejects status=prospect (retired on 13 May)', async () => {
+      const res = await request(app)
+        .post('/api/v1/clients')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ companyName: `Reject Prospect ${Date.now()}`, contactName: 'X', status: 'prospect' });
       expect(res.status).toBe(400);
     });
 
