@@ -174,6 +174,34 @@ export async function objectExists(folder: R2Folder, key: string): Promise<boole
   }
 }
 
+/**
+ * SHA-256 (lowercase hex) of a stored object, computed from the bytes in R2 so
+ * a caller-supplied hash never has to be trusted. Returns null in mock mode
+ * (no creds) or when the object is missing. Throws if it exceeds maxBytes.
+ */
+export async function hashObject(folder: R2Folder, key: string, maxBytes: number): Promise<string | null> {
+  if (!isR2Configured()) return null;
+  const { createHash } = await import('node:crypto');
+  const { GetObjectCommand } = await import('@aws-sdk/client-s3');
+  const client = await getS3Client();
+  let res;
+  try {
+    res = await client.send(new GetObjectCommand({ Bucket: env.R2_BUCKET, Key: buildKey(folder, key) }));
+  } catch (err) {
+    const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+    if (e?.name === 'NoSuchKey' || e?.name === 'NotFound' || e?.$metadata?.httpStatusCode === 404) return null;
+    throw err;
+  }
+  const hash = createHash('sha256');
+  let total = 0;
+  for await (const chunk of res.Body as AsyncIterable<Uint8Array>) {
+    total += chunk.length;
+    if (total > maxBytes) throw new Error('Object exceeds size limit');
+    hash.update(chunk);
+  }
+  return hash.digest('hex');
+}
+
 export async function getSignedDownloadUrl(opts: R2SignedUrlOptions): Promise<string> {
   const fullKey = buildKey(opts.folder, opts.key);
   const expiresIn = opts.expiresInSeconds ?? 900;

@@ -11,7 +11,7 @@ import { logger } from '../utils/logger.js';
 import { canonicalizePlatform } from '../utils/catchr-platform.js';
 import { normaliseLandingUrl } from '../utils/landing-url.js';
 import { fetchRemoteMedia, mediaTypeOf, MAX_MEDIA_BYTES, type RemoteMediaDeps } from '../utils/remote-media.js';
-import { uploadFile, getSignedDownloadUrl } from '../integrations/r2/r2-client.js';
+import { uploadFile, getSignedDownloadUrl, hashObject } from '../integrations/r2/r2-client.js';
 import { resolveR2Location } from './creative.service.js';
 import { domainEvents } from './events.js';
 import { mediaQueue } from '../jobs/queue.js';
@@ -473,7 +473,10 @@ export async function upsertPlatformCreative(
       throw new AppError(409, 'This platform creative id is already registered to another business');
     }
   }
-  if (!existing && input.sha256 && clientId) {
+  // A client-supplied hash is only trusted for this lookup when there is no
+  // uploaded file to verify it against; with an r2Key the server hashes the
+  // stored object below and dedupes on that instead.
+  if (!existing && input.sha256 && clientId && !input.r2Key) {
     [existing] = await db.select().from(creatives)
       .where(and(eq(creatives.sha256, input.sha256.toLowerCase()), eq(creatives.clientId, clientId), eq(creatives.isDeleted, false)));
   }
@@ -497,6 +500,21 @@ export async function upsertPlatformCreative(
     for (const holder of holders) {
       if (!(await creativeBelongsToBusiness(holder, businessId))) {
         throw new AppError(409, 'This file is already registered to another business');
+      }
+    }
+    // Hash the stored object ourselves: the browser's hash is a hint, not proof.
+    let serverHash: string | null;
+    try {
+      serverHash = await hashObject('creatives', r2Key, MAX_MEDIA_BYTES);
+    } catch {
+      throw new AppError(413, 'File too large: max 50 MB');
+    }
+    if (serverHash) {
+      if (sha256 && sha256 !== serverHash) throw new AppError(422, 'sha256 does not match the uploaded file');
+      sha256 = serverHash;
+      if (!existing && clientId) {
+        [existing] = await db.select().from(creatives)
+          .where(and(eq(creatives.sha256, serverHash), eq(creatives.clientId, clientId), eq(creatives.isDeleted, false)));
       }
     }
     fileUrl = r2Ref(r2Key);
