@@ -73,7 +73,7 @@ async function campaignInBusiness(campaignId: string, businessId: string): Promi
 }
 
 /** SQL predicate: this creative row belongs to the business. */
-function creativeInBusiness(businessId: string): SQL {
+export function creativeInBusiness(businessId: string): SQL {
   return sql`(
     exists (select 1 from ${clients} c where c.id = ${creatives.clientId} and c.business_id = ${businessId})
     or (${creatives.clientId} is null and ${creatives.campaignId} is not null and (

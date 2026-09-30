@@ -9,11 +9,17 @@
  *   - test logins are DEACTIVATED (is_active=false) — audit rows keep pointing at them;
  *   - extra Owners are given a lower role;
  *   - SOS entries, SOPs and staff rows are ARCHIVED (archived_at) and hidden from lists;
- *   - contact names/emails are trimmed (whitespace only).
+ *   - contact names/emails are trimmed (whitespace only);
+ *   - creatives whose file is gone from storage are HIDDEN (is_deleted) — the row stays.
  */
 import { sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { adminCleanupLog } from '../db/schema/index.js';
+import { creatives } from '../db/schema/creatives.js';
+import { and, eq } from 'drizzle-orm';
+import { creativeInBusiness } from './creative-library.service.js';
+import { resolveR2Location } from './creative.service.js';
+import { isR2Configured, objectExists } from '../integrations/r2/r2-client.js';
 import { AppError } from '../utils/errors.js';
 import type { AuthPayload } from '../types/index.js';
 
@@ -43,6 +49,8 @@ export interface CleanupReport {
   testSops: CleanupRow[];
   placeholderStaff: CleanupRow[];
   untrimmedContacts: CleanupContact[];
+  /** Retest R2-1: rows whose stored file no longer exists — nothing to preview or download. */
+  creativesMissingFile: CleanupRow[];
   agreementTemplatesCount: number;
 }
 
@@ -75,6 +83,27 @@ function contactScope(requester: AuthPayload) {
   return requester.businessId
     ? sql`client_id IN (SELECT id FROM clients WHERE business_id = ${requester.businessId})`
     : sql`TRUE`;
+}
+
+/** Creatives whose file is not in storage. Needs real storage to judge, so [] when it is not configured. */
+async function findCreativesMissingFile(requester: AuthPayload): Promise<CleanupRow[]> {
+  if (!requester.businessId || !isR2Configured()) return [];
+  const rows = await db.select().from(creatives)
+    .where(and(eq(creatives.isDeleted, false), creativeInBusiness(requester.businessId)))
+    .limit(1000);
+  const out: CleanupRow[] = [];
+  for (let i = 0; i < rows.length; i += 10) {
+    const batch = rows.slice(i, i + 10);
+    const missing = await Promise.all(batch.map(async (r) => {
+      const loc = resolveR2Location(r.fileUrl, r.r2Key);
+      if (!loc) return false;
+      return !(await objectExists(loc.folder, loc.key).catch(() => true));
+    }));
+    batch.forEach((r, j) => {
+      if (missing[j]) out.push({ id: r.id, label: r.name, detail: r.r2Key ?? r.fileUrl, reason: 'file is not in storage — it cannot be previewed or downloaded', preselect: true });
+    });
+  }
+  return out;
 }
 
 export async function getCleanupReport(requester: AuthPayload): Promise<CleanupReport> {
@@ -156,6 +185,7 @@ export async function getCleanupReport(requester: AuthPayload): Promise<CleanupR
       ...contacts.map((c) => ({ id: c.id, kind: 'contact' as const, label: JSON.stringify(c.name), detail: c.email })),
       ...clientRows.map((c) => ({ id: c.id, kind: 'client' as const, label: JSON.stringify(c.company_name), detail: c.contact_name ? JSON.stringify(c.contact_name) : null })),
     ],
+    creativesMissingFile: await findCreativesMissingFile(requester),
     agreementTemplatesCount: tpl?.n ?? 0,
   };
 }
@@ -166,6 +196,7 @@ export interface CleanupApplyInput {
   archiveSosIds?: string[];
   archiveSopIds?: string[];
   archiveStaffIds?: string[];
+  hideCreativeIds?: string[];
   trimContacts?: boolean;
 }
 export interface CleanupApplyResult {
@@ -174,6 +205,7 @@ export interface CleanupApplyResult {
   archivedSos: number;
   archivedSops: number;
   archivedStaff: number;
+  hiddenCreatives: number;
   trimmedContacts: number;
   trimmedClients: number;
 }
@@ -187,6 +219,7 @@ export async function applyCleanup(requester: AuthPayload, input: CleanupApplyIn
   const sosIds = [...new Set(input.archiveSosIds ?? [])];
   const sopIds = [...new Set(input.archiveSopIds ?? [])];
   const staffIds = [...new Set(input.archiveStaffIds ?? [])];
+  const creativeIds = [...new Set(input.hideCreativeIds ?? [])];
 
   // Only rows the report currently flags can be changed from this screen.
   const flagged = (ids: string[], list: Array<{ id: string }>, what: string) => {
@@ -199,6 +232,7 @@ export async function applyCleanup(requester: AuthPayload, input: CleanupApplyIn
   flagged(sosIds, report.testSos, 'SOS entries');
   flagged(sopIds, report.testSops, 'SOPs');
   flagged(staffIds, report.placeholderStaff, 'staff records');
+  flagged(creativeIds, report.creativesMissingFile, 'creatives');
   if (new Set(demote.map((d) => d.id)).size !== demote.length) throw refuse('Each Owner can only be given one new role.');
   if (demote.some((d) => deactivate.includes(d.id))) throw refuse('Choose either "deactivate" or "change role" for a login, not both.');
 
@@ -214,7 +248,7 @@ export async function applyCleanup(requester: AuthPayload, input: CleanupApplyIn
   const result: CleanupApplyResult = {
     deactivated: deactivate.map((id) => ({ id, email: emailOf.get(id) ?? '' })),
     demoted: demote.map((d) => ({ id: d.id, email: emailOf.get(d.id) ?? '', role: d.role })),
-    archivedSos: 0, archivedSops: 0, archivedStaff: 0, trimmedContacts: 0, trimmedClients: 0,
+    archivedSos: 0, archivedSops: 0, archivedStaff: 0, hiddenCreatives: 0, trimmedContacts: 0, trimmedClients: 0,
   };
   const uuidList = (ids: string[]) => sql`ARRAY[${sql.join(ids.map((id) => sql`${id}`), sql`, `)}]::uuid[]`;
 
@@ -236,6 +270,10 @@ export async function applyCleanup(requester: AuthPayload, input: CleanupApplyIn
     if (staffIds.length) {
       const r = await tx.execute(sql`UPDATE staff SET archived_at = now(), updated_at = now() WHERE id = ANY(${uuidList(staffIds)}) AND archived_at IS NULL`);
       result.archivedStaff = (r as unknown as { count: number }).count ?? staffIds.length;
+    }
+    if (creativeIds.length) {
+      const r = await tx.execute(sql`UPDATE creatives SET is_deleted = true, updated_at = now() WHERE id = ANY(${uuidList(creativeIds)}) AND is_deleted = false`);
+      result.hiddenCreatives = (r as unknown as { count: number }).count ?? creativeIds.length;
     }
     if (input.trimContacts) {
       const a = await tx.execute(sql`
