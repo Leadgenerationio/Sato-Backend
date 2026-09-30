@@ -26,7 +26,8 @@ import type { AuthPayload } from '../types/index.js';
 // Emails/names that look like fixtures. Matched case-insensitively.
 export const TEST_EMAIL_PATTERNS = ['%@test.com', '%@example.com', 'demo@%', 'test@%', '%+test@%'];
 export const TEST_USER_NAMES = ['demo', 'test', 'john', 'test user'];
-export const TEST_TEXT = ['test', 'testing', 'msg', 'asdf', 'demo', 'do not save', 'ux test'];
+// 'help' is on the list because Sam's live queue has a one-word SOS "help" that is test data (retest R2, N6).
+export const TEST_TEXT = ['test', 'testing', 'msg', 'help', 'asdf', 'demo', 'do not save', 'ux test'];
 export const TEST_SOP_TITLES = [...TEST_TEXT, 'onbording'];
 export const PLACEHOLDER_STAFF_NAMES = ['john', 'test', 'demo'];
 /** Roles an extra Owner may be moved to. */

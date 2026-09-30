@@ -617,7 +617,7 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
       businessId,
       createdBy: requester.userId,
       companyName: data.companyName?.trim() || '',
-      companyNumber: trimOrKeep(data.companyNumber),
+      companyNumber: trimOrKeep(data.companyNumber) || null,
       contactName: effectiveContactName,
       contactEmail: effectiveContactEmail,
       contactPhone: effectiveContactPhone,
@@ -811,7 +811,7 @@ export async function updateClient(id: string, data: UpdateClientInput, requeste
 
   const patch: Partial<ClientRow> = { updatedAt: new Date() };
   if (data.companyName !== undefined) patch.companyName = data.companyName.trim();
-  if (data.companyNumber !== undefined) patch.companyNumber = trimOrKeep(data.companyNumber);
+  if (data.companyNumber !== undefined) patch.companyNumber = trimOrKeep(data.companyNumber) || null;
   if (data.contactName !== undefined) patch.contactName = trimOrKeep(data.contactName);
   if (data.contactEmail !== undefined) patch.contactEmail = trimOrKeep(data.contactEmail);
   if (data.contactPhone !== undefined) patch.contactPhone = trimOrKeep(data.contactPhone);
