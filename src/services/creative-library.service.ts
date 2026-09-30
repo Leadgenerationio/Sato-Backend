@@ -11,7 +11,7 @@ import { logger } from '../utils/logger.js';
 import { canonicalizePlatform } from '../utils/catchr-platform.js';
 import { normaliseLandingUrl } from '../utils/landing-url.js';
 import { fetchRemoteMedia, mediaTypeOf, MAX_MEDIA_BYTES, type RemoteMediaDeps } from '../utils/remote-media.js';
-import { uploadFile, getSignedDownloadUrl } from '../integrations/r2/r2-client.js';
+import { uploadFile, getSignedDownloadUrl, objectExists } from '../integrations/r2/r2-client.js';
 import { resolveR2Location } from './creative.service.js';
 import { domainEvents } from './events.js';
 import { mediaQueue } from '../jobs/queue.js';
@@ -681,13 +681,25 @@ export async function bulkUpdate(
   return out;
 }
 
-/** Signed URL for a library creative's file (image/video) — 1 hour. */
-export async function signedFileUrl(businessId: string, id: string): Promise<string | null> {
+/**
+ * Signed URL for a library creative's file (image/video) — 1 hour.
+ *
+ * `missing` is true when the row points at a stored file that is not in
+ * storage any more (retest R2-1: 3 rows signed fine but every open returned
+ * R2's NoSuchKey XML). Signing is local and never notices, so HEAD first and
+ * let the caller say "file missing" instead of handing out a dead link.
+ */
+export async function signedFile(businessId: string, id: string): Promise<{ url: string | null; missing: boolean }> {
   const row = await loadCreative(businessId, id).catch(() => null);
-  if (!row) return null;
+  if (!row) return { url: null, missing: false };
   const loc = resolveR2Location(row.fileUrl, row.r2Key);
-  if (!loc) return null;
-  return getSignedDownloadUrl({ folder: loc.folder, key: loc.key, expiresInSeconds: 3600 });
+  if (!loc) return { url: null, missing: false };
+  if (!(await objectExists(loc.folder, loc.key))) return { url: null, missing: true };
+  return { url: await getSignedDownloadUrl({ folder: loc.folder, key: loc.key, expiresInSeconds: 3600 }), missing: false };
+}
+
+export async function signedFileUrl(businessId: string, id: string): Promise<string | null> {
+  return (await signedFile(businessId, id)).url;
 }
 
 export async function creativesByIds(ids: string[]): Promise<CreativeRow[]> {

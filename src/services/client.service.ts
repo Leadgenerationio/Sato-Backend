@@ -123,7 +123,8 @@ function toContact(row: ClientContactRow): ClientContact {
   return {
     id: row.id,
     contactType: (row.contactType ?? 'other') as ContactType,
-    name: row.name,
+    // N7: rows saved before writes were trimmed still end in a space.
+    name: row.name.trim(),
     email: row.email ?? '',
     phone: row.phone ?? '',
     role: row.role ?? '',
@@ -162,7 +163,7 @@ function toSummary(
   return {
     id: row.id,
     companyName: row.companyName,
-    contactName: row.contactName ?? '',
+    contactName: (row.contactName ?? '').trim(),
     contactEmail: row.contactEmail ?? '',
     // Sam Loom #31 — legacy rows in 'prospect' / 'paused' have been migrated
     // by 0022, but the column is technically nullable. Fall back to 'onboarding'
