@@ -16,6 +16,7 @@ const applySchema = z.object({
     archiveSosIds: idList,
     archiveSopIds: idList,
     archiveStaffIds: idList,
+    hideCreativeIds: idList,
     trimContacts: z.boolean().optional(),
   }),
 });

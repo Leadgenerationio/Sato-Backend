@@ -19,7 +19,7 @@ let businessId = '';
 let ownerId = '';
 const ids = {
   demo: '', test: '', john: '', extraOwner: '', primary: '',
-  sosTesting: '', sosMsg: '', sopOnbording: '', staffJohn: '', contact: '', client: '',
+  sosTesting: '', sosMsg: '', sosHelp: '', sopOnbording: '', staffJohn: '', contact: '', client: '',
 };
 
 async function login(email: string, password: string) {
@@ -51,7 +51,8 @@ describe('Settings → Clean up (S8 + N6)', () => {
 
     const [s1] = await db.insert(sosHelpRequests).values({ userId: ownerId, message: 'testing', pagePath: '/x' }).returning();
     const [s2] = await db.insert(sosHelpRequests).values({ userId: ownerId, message: 'msg' }).returning();
-    ids.sosTesting = s1.id; ids.sosMsg = s2.id;
+    const [s3] = await db.insert(sosHelpRequests).values({ userId: ownerId, message: 'help' }).returning();
+    ids.sosTesting = s1.id; ids.sosMsg = s2.id; ids.sosHelp = s3.id;
     const [sop] = await db.insert(sops).values({ title: 'onbording', content: 'x', author: 'Yash', businessId }).returning();
     ids.sopOnbording = sop.id;
     const [st] = await db.insert(staff).values({ name: 'John', email: `john.staff.${TAG}@example.org`, businessId }).returning();
@@ -65,7 +66,7 @@ describe('Settings → Clean up (S8 + N6)', () => {
   afterAll(async () => {
     await db.delete(clientContacts).where(eq(clientContacts.id, ids.contact));
     await db.delete(clients).where(eq(clients.id, ids.client));
-    await db.delete(sosHelpRequests).where(inArray(sosHelpRequests.id, [ids.sosTesting, ids.sosMsg]));
+    await db.delete(sosHelpRequests).where(inArray(sosHelpRequests.id, [ids.sosTesting, ids.sosMsg, ids.sosHelp]));
     await db.delete(sops).where(eq(sops.id, ids.sopOnbording));
     await db.delete(staff).where(eq(staff.id, ids.staffJohn));
     await db.delete(adminCleanupLog).where(eq(adminCleanupLog.actorUserId, ownerId));
@@ -93,7 +94,7 @@ describe('Settings → Clean up (S8 + N6)', () => {
     const owner = r.owners.find((u: { id: string }) => u.id === ids.extraOwner);
     expect(owner).toMatchObject({ preselect: false });
     expect(r.owners.find((u: { id: string }) => u.id === ownerId)).toMatchObject({ isYou: true });
-    expect(r.testSos.map((s: { id: string }) => s.id)).toEqual(expect.arrayContaining([ids.sosTesting, ids.sosMsg]));
+    expect(r.testSos.map((s: { id: string }) => s.id)).toEqual(expect.arrayContaining([ids.sosTesting, ids.sosMsg, ids.sosHelp]));
     expect(r.testSops.find((s: { id: string }) => s.id === ids.sopOnbording)).toMatchObject({ reason: 'misspelt title ("onbording")' });
     expect(r.placeholderStaff.find((s: { id: string }) => s.id === ids.staffJohn)).toMatchObject({ preselect: true });
     expect(r.untrimmedContacts.map((c: { id: string }) => c.id)).toEqual(expect.arrayContaining([ids.contact, ids.client]));

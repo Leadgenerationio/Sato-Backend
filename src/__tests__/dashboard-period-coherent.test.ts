@@ -7,7 +7,7 @@ import { adSpend } from '../db/schema/ad-spend.js';
 import { invoices } from '../db/schema/invoices.js';
 import { clients } from '../db/schema/clients.js';
 
-// Regression test: Profit/Margin must always come from rolling-365d revenue
+// Regression test: Profit/Margin must always come from rolling-90d revenue
 // and rolling-90d cost, regardless of which time-range filter the user
 // picks. Before this fix the math used the selected window for both sides,
 // which produced -2,047% margin on `this_month` because one week of cost
@@ -68,8 +68,8 @@ describe('Dashboard — period-coherent Profit/Margin', () => {
       ])
       .onConflictDoNothing();
 
-    // Revenue: £10,000 paid invoice inside the 365d rolling window;
-    // £50,000 paid invoice outside it. Rolling-365d revenue = £10,000.
+    // Revenue: £10,000 paid invoice inside the 90d rolling window;
+    // £50,000 paid invoice outside it. Rolling-90d revenue = £10,000.
     await db
       .insert(invoices)
       .values([
@@ -99,12 +99,12 @@ describe('Dashboard — period-coherent Profit/Margin', () => {
     await db.delete(clients).where(eq(clients.id, SEED_CLIENT_ID));
   });
 
-  it('returns rollingRevenue365d + rollingCost90d alongside windowed totals', async () => {
+  it('returns rollingRevenue90d + rollingCost90d alongside windowed totals', async () => {
     const res = await request(app)
       .get('/api/v1/dashboard/stats?window=last_year')
       .set('Authorization', `Bearer ${ownerToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.data.rollingRevenue365d).toBeGreaterThanOrEqual(10000);
+    expect(res.body.data.rollingRevenue90d).toBeGreaterThanOrEqual(10000);
     expect(res.body.data.rollingCost90d).toBeGreaterThanOrEqual(1000);
   });
 
@@ -129,13 +129,36 @@ describe('Dashboard — period-coherent Profit/Margin', () => {
     expect(mo.profitMargin).toBe(yr.profitMargin);
   });
 
-  it('netProfit equals rollingRevenue365d minus rollingCost90d', async () => {
+  it('netProfit equals rollingRevenue90d minus rollingCost90d', async () => {
     const res = await request(app)
       .get('/api/v1/dashboard/stats?window=last_year')
       .set('Authorization', `Bearer ${ownerToken}`);
-    const { netProfit, rollingRevenue365d, rollingCost90d } = res.body.data;
+    const { netProfit, rollingRevenue90d, rollingCost90d } = res.body.data;
     // Round both sides to 2dp before comparing — backend rounds the same.
-    const expected = Math.round((rollingRevenue365d - rollingCost90d) * 100) / 100;
+    const expected = Math.round((rollingRevenue90d - rollingCost90d) * 100) / 100;
     expect(netProfit).toBe(expected);
+  });
+
+  // Retest R2-2 / S12: 12 months of revenue minus 90 days of spend read -£1.1m.
+  // An invoice 200 days old sits inside 365d but outside 90d — it must not
+  // move Net Profit, and the tile's stated basis must be one period.
+  it('Net Profit uses the SAME 90 days on both sides (an older invoice does not count)', async () => {
+    const auth = { Authorization: `Bearer ${ownerToken}` };
+    const before = await request(app).get('/api/v1/dashboard/stats?window=last_year').set(auth);
+    await db.insert(invoices).values({
+      clientId: SEED_CLIENT_ID,
+      invoiceNumber: 'COHER-MID',
+      status: 'paid',
+      total: '20000.00',
+      dueDate: new Date(isoOffset(200)),
+      paidDate: new Date(isoOffset(198)),
+    }).onConflictDoNothing();
+    const after = await request(app).get('/api/v1/dashboard/stats?window=last_year').set(auth);
+    expect(after.body.data.rollingRevenue90d).toBe(before.body.data.rollingRevenue90d);
+    expect(after.body.data.netProfit).toBe(before.body.data.netProfit);
+    // The yearly Revenue tile still sees it — only Profit/Margin are pinned to 90d.
+    expect(after.body.data.totalRevenue).toBeGreaterThan(before.body.data.totalRevenue);
+    const { revenueDays, costDays } = after.body.data.profitBasis;
+    expect(revenueDays).toBe(costDays);
   });
 });

@@ -68,7 +68,10 @@ const clientCoreFields = {
   companyName: z.string().min(1).max(200),
   // DB column is varchar(20) — anything longer used to 500 on insert. 20
   // fits every local format we support (CHE-123.456.789, KRS 0000123456…).
-  companyNumber: z.string().min(1).max(20).optional(),
+  // Blank is allowed: the field is optional on the form, which sends "" when
+  // it is left empty (and when someone clears it on Edit). It used to 400 with
+  // "Too small: expected string to have >=1 characters" (retest R2, M5).
+  companyNumber: z.string().trim().max(20).optional(),
   contactName: z.string().min(1).max(200).optional(),
   contactEmail: z.string().trim().email().optional(),
   contactPhone: phoneField.optional(),

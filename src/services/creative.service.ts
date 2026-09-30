@@ -8,7 +8,8 @@ import { logger } from '../utils/logger.js';
 import { uuidOrNull } from '../utils/zod-helpers.js';
 import { resolveSatoCampaignId } from '../utils/resolve-campaign-id.js';
 import { notifyBuyersOfNewCreative } from './creative-review-email.service.js';
-import { getSignedDownloadUrl, parseR2LocationFromFileUrl, stripPresignedQuery } from '../integrations/r2/r2-client.js';
+import { getSignedDownloadUrl, objectExists, parseR2LocationFromFileUrl, stripPresignedQuery } from '../integrations/r2/r2-client.js';
+import { AppError } from '../utils/errors.js';
 import type { R2Folder } from '../integrations/r2/r2-types.js';
 import type { AuthPayload } from '../types/index.js';
 import { domainEvents } from './events.js';
@@ -150,6 +151,19 @@ export async function createCreative(
   if (!satoId) return null;
 
   if (!(await campaignBelongsToBusiness(satoId, businessId))) return null;
+
+  // Retest R2-1: the browser uploads straight to storage and only then tells us.
+  // A PUT that failed or was abandoned still reached this point and left a row
+  // whose file was never there (every open answered NoSuchKey). Refuse it.
+  const loc = resolveR2Location(input.fileUrl, input.r2Key);
+  if (loc) {
+    let there: boolean;
+    try { there = await objectExists(loc.folder, loc.key); } catch {
+      // Storage unreachable: we cannot tell, so say so plainly and save nothing (not a bare 500).
+      throw new AppError(502, "Couldn't check the file in storage, so this creative wasn't saved. Try again in a moment.");
+    }
+    if (!there) throw new AppError(422, "The file didn't finish uploading, so this creative wasn't saved. Upload it again.");
+  }
 
   const [row] = await db
     .insert(creatives)

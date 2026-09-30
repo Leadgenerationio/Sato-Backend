@@ -250,10 +250,10 @@ describe('S14 / N2 / S12 — HTTP', () => {
     expect(stats.status).toBe(200);
     expect(stats.body.data.revenueCurrency).toBe('GBP');
     expect(stats.body.data.totalRevenue).toBe(statsBefore.body.data.totalRevenue);
-    expect(stats.body.data.rollingRevenue365d).toBe(statsBefore.body.data.rollingRevenue365d);
+    expect(stats.body.data.rollingRevenue90d).toBe(statsBefore.body.data.rollingRevenue90d);
     const eurStats = stats.body.data.otherCurrencyRevenue.find((o: { currency: string }) => o.currency === 'EUR');
     expect(eurStats.total).toBeGreaterThanOrEqual(34860);
-    expect(stats.body.data.profitBasis).toEqual({ revenueDays: 365, costDays: 90, costSource: 'catchr_ad_spend' });
+    expect(stats.body.data.profitBasis).toEqual({ revenueDays: 90, costDays: 90, costSource: 'catchr_ad_spend' });
 
     const pnl = await request(app).get('/api/v1/reports/pnl-summary?days=30').set(auth);
     expect(pnl.body.data.revenue).toBe(pnlBefore.body.data.revenue);

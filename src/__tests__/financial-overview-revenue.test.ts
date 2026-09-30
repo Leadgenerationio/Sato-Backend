@@ -129,6 +129,6 @@ describe('Financial Overview — revenue recognition (paid + authorised)', () =>
     expect(res.status).toBe(200);
     // Seeded total: £7,500 paid + £4,200 authorised = £11,700.
     expect(res.body.data.totalRevenue).toBeGreaterThanOrEqual(11700);
-    expect(res.body.data.rollingRevenue365d).toBeGreaterThanOrEqual(11700);
+    expect(res.body.data.rollingRevenue90d).toBeGreaterThanOrEqual(11700);
   });
 });

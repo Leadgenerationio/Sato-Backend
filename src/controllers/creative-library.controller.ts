@@ -117,9 +117,9 @@ export async function get(req: Request, res: Response) {
   const businessId = businessOf(req);
   const creative = await lib.getCreative(businessId, String(req.params.id));
   if (!creative) throw new AppError(404, 'Creative not found');
-  const fileUrl = await lib.signedFileUrl(businessId, creative.id);
+  const { url: fileUrl, missing: fileMissing } = await lib.signedFile(businessId, creative.id);
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ status: 'success', data: { creative: { ...creative, fileUrl } } });
+  res.json({ status: 'success', data: { creative: { ...creative, fileUrl, fileMissing } } });
 }
 
 export const patchSchema = z.object({

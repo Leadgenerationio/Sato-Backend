@@ -123,7 +123,8 @@ function toContact(row: ClientContactRow): ClientContact {
   return {
     id: row.id,
     contactType: (row.contactType ?? 'other') as ContactType,
-    name: row.name,
+    // N7: rows saved before writes were trimmed still end in a space.
+    name: row.name.trim(),
     email: row.email ?? '',
     phone: row.phone ?? '',
     role: row.role ?? '',
@@ -162,7 +163,7 @@ function toSummary(
   return {
     id: row.id,
     companyName: row.companyName,
-    contactName: row.contactName ?? '',
+    contactName: (row.contactName ?? '').trim(),
     contactEmail: row.contactEmail ?? '',
     // Sam Loom #31 — legacy rows in 'prospect' / 'paused' have been migrated
     // by 0022, but the column is technically nullable. Fall back to 'onboarding'
@@ -616,7 +617,7 @@ export async function createClient(data: CreateClientInput, requester: AuthPaylo
       businessId,
       createdBy: requester.userId,
       companyName: data.companyName?.trim() || '',
-      companyNumber: trimOrKeep(data.companyNumber),
+      companyNumber: trimOrKeep(data.companyNumber) || null,
       contactName: effectiveContactName,
       contactEmail: effectiveContactEmail,
       contactPhone: effectiveContactPhone,
@@ -810,7 +811,7 @@ export async function updateClient(id: string, data: UpdateClientInput, requeste
 
   const patch: Partial<ClientRow> = { updatedAt: new Date() };
   if (data.companyName !== undefined) patch.companyName = data.companyName.trim();
-  if (data.companyNumber !== undefined) patch.companyNumber = trimOrKeep(data.companyNumber);
+  if (data.companyNumber !== undefined) patch.companyNumber = trimOrKeep(data.companyNumber) || null;
   if (data.contactName !== undefined) patch.contactName = trimOrKeep(data.contactName);
   if (data.contactEmail !== undefined) patch.contactEmail = trimOrKeep(data.contactEmail);
   if (data.contactPhone !== undefined) patch.contactPhone = trimOrKeep(data.contactPhone);
