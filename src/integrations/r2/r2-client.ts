@@ -174,6 +174,48 @@ export async function objectExists(folder: R2Folder, key: string): Promise<boole
   }
 }
 
+export class ObjectTooLargeError extends Error {
+  constructor(maxBytes: number) { super(`Object exceeds ${maxBytes} bytes`); this.name = 'ObjectTooLargeError'; }
+}
+
+export interface StoredObjectInfo { sha256: string; sizeBytes: number; contentType: string | null }
+
+/**
+ * Real SHA-256 (lowercase hex), byte count and content type of a stored
+ * object, read from R2 so caller-supplied values never have to be trusted.
+ * Returns null in mock mode (no creds) or when the object is missing. Throws
+ * ObjectTooLargeError (before reading any body when ContentLength says so).
+ */
+export async function hashObject(folder: R2Folder, key: string, maxBytes: number): Promise<StoredObjectInfo | null> {
+  if (!isR2Configured()) return null;
+  const { createHash } = await import('node:crypto');
+  const { GetObjectCommand } = await import('@aws-sdk/client-s3');
+  const client = await getS3Client();
+  let res;
+  try {
+    res = await client.send(new GetObjectCommand({ Bucket: env.R2_BUCKET, Key: buildKey(folder, key) }));
+  } catch (err) {
+    const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+    if (e?.name === 'NoSuchKey' || e?.name === 'NotFound' || e?.$metadata?.httpStatusCode === 404) return null;
+    throw err;
+  }
+  const body = res.Body as (AsyncIterable<Uint8Array> & { destroy?: () => void }) | undefined;
+  try {
+    if (!body) throw new Error('R2 returned no body for the object');
+    if (typeof res.ContentLength === 'number' && res.ContentLength > maxBytes) throw new ObjectTooLargeError(maxBytes);
+    const hash = createHash('sha256');
+    let total = 0;
+    for await (const chunk of body) {
+      total += chunk.length;
+      if (total > maxBytes) throw new ObjectTooLargeError(maxBytes);
+      hash.update(chunk);
+    }
+    return { sha256: hash.digest('hex'), sizeBytes: total, contentType: res.ContentType ?? null };
+  } finally {
+    body?.destroy?.();
+  }
+}
+
 export async function getSignedDownloadUrl(opts: R2SignedUrlOptions): Promise<string> {
   const fullKey = buildKey(opts.folder, opts.key);
   const expiresIn = opts.expiresInSeconds ?? 900;

@@ -11,7 +11,7 @@ import { logger } from '../utils/logger.js';
 import { canonicalizePlatform } from '../utils/catchr-platform.js';
 import { normaliseLandingUrl } from '../utils/landing-url.js';
 import { fetchRemoteMedia, mediaTypeOf, MAX_MEDIA_BYTES, type RemoteMediaDeps } from '../utils/remote-media.js';
-import { uploadFile, getSignedDownloadUrl } from '../integrations/r2/r2-client.js';
+import { uploadFile, getSignedDownloadUrl, hashObject, isR2Configured, ObjectTooLargeError, deleteFile } from '../integrations/r2/r2-client.js';
 import { resolveR2Location } from './creative.service.js';
 import { domainEvents } from './events.js';
 import { mediaQueue } from '../jobs/queue.js';
@@ -473,7 +473,9 @@ export async function upsertPlatformCreative(
       throw new AppError(409, 'This platform creative id is already registered to another business');
     }
   }
-  if (!existing && input.sha256 && clientId) {
+  // With an r2Key the server hashes the stored object below and dedupes on
+  // that instead of the client-supplied hash.
+  if (!existing && input.sha256 && clientId && !input.r2Key) {
     [existing] = await db.select().from(creatives)
       .where(and(eq(creatives.sha256, input.sha256.toLowerCase()), eq(creatives.clientId, clientId), eq(creatives.isDeleted, false)));
   }
@@ -497,6 +499,46 @@ export async function upsertPlatformCreative(
     for (const holder of holders) {
       if (!(await creativeBelongsToBusiness(holder, businessId))) {
         throw new AppError(409, 'This file is already registered to another business');
+      }
+    }
+    if (existing?.r2Key === r2Key && existing.sha256) {
+      // Same file re-registered (idempotent retry, metadata edit): already verified.
+      sha256 = existing.sha256;
+      sizeBytes = existing.sizeBytes ?? sizeBytes;
+    } else {
+      // Read the stored object ourselves: the browser's hash, size and type are hints, not proof.
+      let stored: Awaited<ReturnType<typeof hashObject>>;
+      try {
+        stored = await hashObject('creatives', r2Key, MAX_MEDIA_BYTES);
+      } catch (err) {
+        if (err instanceof ObjectTooLargeError) throw new AppError(413, 'File too large: max 50 MB');
+        logger.error({ err, r2Key }, 'Could not read uploaded creative from storage');
+        throw new AppError(502, "Couldn't check the uploaded file right now, so nothing was saved. Please try again in a few minutes.");
+      }
+      if (stored) {
+        if (sha256 && sha256 !== stored.sha256) throw new AppError(422, 'sha256 does not match the uploaded file');
+        sha256 = stored.sha256;
+        sizeBytes = stored.sizeBytes;
+        if (stored.contentType && mediaTypeOf(stored.contentType)) contentType = stored.contentType;
+        if (!existing && clientId) {
+          [existing] = await db.select().from(creatives)
+            .where(and(eq(creatives.sha256, stored.sha256), eq(creatives.clientId, clientId), eq(creatives.isDeleted, false)));
+          // Identical bytes are already on file: keep that file, don't swap in
+          // the duplicate upload (which would orphan the old object).
+          if (existing?.r2Key && existing.r2Key !== r2Key) {
+            // The duplicate object was just uploaded and nothing references it: remove it.
+            if (holders.length === 0) {
+              deleteFile('creatives', r2Key).catch((err: unknown) => logger.warn({ err, r2Key }, 'Could not delete duplicate creative upload'));
+            }
+            r2Key = existing.r2Key;
+          }
+        }
+      } else if (isR2Configured()) {
+        throw new AppError(422, 'That file was not found in storage. Upload it with POST /uploads/presign first.');
+      } else if (!existing && sha256 && clientId) {
+        // Mock storage (dev/test) can't be read back: fall back to the hint.
+        [existing] = await db.select().from(creatives)
+          .where(and(eq(creatives.sha256, sha256.toLowerCase()), eq(creatives.clientId, clientId), eq(creatives.isDeleted, false)));
       }
     }
     fileUrl = r2Ref(r2Key);

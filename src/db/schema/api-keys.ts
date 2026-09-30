@@ -26,7 +26,7 @@ export const apiKeyUsage = pgTable('api_key_usage', {
   path: varchar('path', { length: 300 }).notNull(),
   status: integer('status').notNull(),
   at: timestamp('at', { withTimezone: true }).defaultNow(),
-}, (t) => [index('api_key_usage_key_at_idx').on(t.apiKeyId, t.at)]);
+}, (t) => [index('api_key_usage_key_at_idx').on(t.apiKeyId, t.at), index('api_key_usage_at_idx').on(t.at)]);
 
 // Idempotency-Key replay store (24 h). `owner` is `key:<api key id>` or
 // `user:<user id>` so JWT callers can use the header too.
@@ -37,6 +37,6 @@ export const idempotencyKeys = pgTable('idempotency_keys', {
   status: integer('status').notNull(),
   response: jsonb('response').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-}, (t) => [primaryKey({ columns: [t.owner, t.key] })]);
+}, (t) => [primaryKey({ columns: [t.owner, t.key] }), index('idempotency_keys_created_at_idx').on(t.createdAt)]);
 
 export type ApiKeyRow = typeof apiKeys.$inferSelect;
