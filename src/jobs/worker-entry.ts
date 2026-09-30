@@ -15,6 +15,7 @@ import { syncAll as catchrSyncAll } from '../services/ad-spend.service.js';
 import { recordCatchrSync } from '../controllers/ad-spend.controller.js';
 import { syncAllBusinessesFromXero, recordBankFeedSync } from '../services/bank-feed.service.js';
 import { prewarmLeadByteCache } from '../services/cache-prewarm.service.js';
+import { purgeApiHousekeeping } from '../services/retention.service.js';
 import { processRecurringTasks } from './recurring-tasks.js';
 import { pollOnce as pollAlertSms } from '../services/alert-sms.service.js';
 import { syncAllClientsAcrossBusinesses } from '../services/global-invoice-sync.service.js';
@@ -366,6 +367,9 @@ new Worker('sync', async (job) => {
     case 'fx-rates-daily': {
       // Feedback M3 — daily ECB reference rates for "converted to £" totals.
       return refreshFxRates();
+    }
+    case 'api-housekeeping': {
+      return purgeApiHousekeeping();
     }
     case 'platform-creative-sync': {
       // Plan phase 3 — every PLATFORM_SYNC_EVERY_HOURS (default 3). Pulls ads

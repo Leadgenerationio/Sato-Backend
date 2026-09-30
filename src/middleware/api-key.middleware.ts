@@ -6,6 +6,10 @@ import { authMiddleware } from './auth.middleware.js';
 import { requireRole } from './rbac.middleware.js';
 import { verifyApiKey, logApiKeyUse, type ApiScope } from '../services/api-key.service.js';
 import { db } from '../config/database.js';
+import IORedis from 'ioredis';
+import { env } from '../config/env.js';
+import { logger } from '../utils/logger.js';
+import { RedisRateLimitStore } from './redis-rate-limit-store.js';
 import { idempotencyKeys } from '../db/schema/api-keys.js';
 import { UnauthorizedError, AppError } from '../utils/errors.js';
 import type { UserRole } from '../types/index.js';
@@ -54,12 +58,27 @@ export function allow(roles: UserRole[], scope: ApiScope): RequestHandler {
 
 export const requireScope = (scope: ApiScope): RequestHandler => allow([], scope);
 
+// Dedicated connection for the limiter: no offline queue, so while Redis is
+// down commands fail at once (and passOnStoreError lets the request through)
+// instead of queueing and replaying inflated counts on reconnect.
+const redis = env.REDIS_URL
+  ? new IORedis.default(env.REDIS_URL, { enableOfflineQueue: false, maxRetriesPerRequest: 1, lazyConnect: false })
+  : null;
+redis?.on('error', (err: Error) => logger.warn({ err: err.message }, 'Rate-limit Redis error'));
+
+if (!redis && process.env.NODE_ENV === 'production') {
+  logger.warn('REDIS_URL not set — API-key rate limit is counted per process, so the effective limit multiplies by the number of instances');
+}
+
 /** 120 requests / minute per API key. JWT traffic keeps the global limiter only. */
 export const apiKeyRateLimit = rateLimit({
   windowMs: 60_000,
   max: 120,
   standardHeaders: true,
   legacyHeaders: false,
+  // Shared across instances when Redis is configured; per-process otherwise.
+  ...(redis ? { store: new RedisRateLimitStore(redis) } : {}),
+  passOnStoreError: true,
   skip: (req) => !req.apiKey,
   keyGenerator: (req) => `api-key:${req.apiKey?.id ?? 'none'}`,
   message: { status: 'error', message: 'Rate limit for this API key reached (120 requests a minute). Try again shortly.' },

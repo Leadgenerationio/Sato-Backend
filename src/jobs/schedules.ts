@@ -86,6 +86,14 @@ export async function registerSchedules() {
     data: {},
   });
 
+  // Purge expired Idempotency-Key replays (>24 h) and old API usage rows (>90 d).
+  await syncQueue.upsertJobScheduler('api-housekeeping', {
+    pattern: '30 3 * * *',
+  }, {
+    name: 'api-housekeeping',
+    data: {},
+  });
+
   // SMS alerts to Sam — poll the notifications table every 30s for unsent
   // system_error rows. Hard no-op in mock mode (see alert-sms.service.ts).
   await syncQueue.upsertJobScheduler('sms-alert-poll', {
