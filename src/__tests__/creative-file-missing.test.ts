@@ -4,10 +4,10 @@ import { eq } from 'drizzle-orm';
 
 // Retest R2-1: creatives whose stored file is gone from storage signed a link
 // that answered R2's NoSuchKey XML. The detail endpoint must say so instead.
-const exists = vi.hoisted(() => ({ value: false }));
+const exists = vi.hoisted(() => ({ value: false as boolean | 'throw' }));
 vi.mock('../integrations/r2/r2-client.js', async (orig) => {
   const real = await orig<typeof import('../integrations/r2/r2-client.js')>();
-  return { ...real, objectExists: vi.fn(async () => exists.value), isR2Configured: () => true };
+  return { ...real, objectExists: vi.fn(async () => { if (exists.value === 'throw') throw new Error('connect ECONNREFUSED'); return exists.value; }), isR2Configured: () => true };
 });
 
 import app from '../index.js';
@@ -73,6 +73,22 @@ describe('creative create when the browser upload never landed (R2-1 root cause)
     exists.value = true;
     const res = await request(app).post('/api/v1/creatives').set({ Authorization: `Bearer ${token}` }).send(body());
     expect(res.status).toBe(201);
+  });
+});
+
+describe('when storage cannot be reached', () => {
+  it('create answers 502 with a plain message and saves nothing (not a bare 500)', async () => {
+    exists.value = 'throw';
+    const res = await request(app).post('/api/v1/creatives').set({ Authorization: `Bearer ${token}` })
+      .send({ campaignId, name: 'Yash Outage', type: 'image', fileUrl: 'http://localhost:9000/stato-test/creatives/outage.png', r2Key: 'outage.png', sizeBytes: 10, contentType: 'image/png' });
+    expect(res.status).toBe(502);
+    expect(res.body.message).toMatch(/nothing|wasn't saved/);
+  });
+  it('the creative detail still answers, with a signed link and no false "missing"', async () => {
+    exists.value = 'throw';
+    const res = await request(app).get(`/api/v1/creatives/${creativeId}`).set({ Authorization: `Bearer ${token}` });
+    expect(res.status).toBe(200);
+    expect(res.body.data.creative.fileMissing).toBe(false);
   });
 });
 

@@ -736,7 +736,8 @@ export async function signedFile(businessId: string, id: string): Promise<{ url:
   if (!row) return { url: null, missing: false };
   const loc = resolveR2Location(row.fileUrl, row.r2Key);
   if (!loc) return { url: null, missing: false };
-  if (!(await objectExists(loc.folder, loc.key))) return { url: null, missing: true };
+  // A storage outage must not look like a missing file: if the check itself fails, sign the link as before.
+  if (!(await objectExists(loc.folder, loc.key).catch(() => true))) return { url: null, missing: true };
   return { url: await getSignedDownloadUrl({ folder: loc.folder, key: loc.key, expiresInSeconds: 3600 }), missing: false };
 }
 

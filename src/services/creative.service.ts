@@ -156,8 +156,13 @@ export async function createCreative(
   // A PUT that failed or was abandoned still reached this point and left a row
   // whose file was never there (every open answered NoSuchKey). Refuse it.
   const loc = resolveR2Location(input.fileUrl, input.r2Key);
-  if (loc && !(await objectExists(loc.folder, loc.key))) {
-    throw new AppError(422, "The file didn't finish uploading, so this creative wasn't saved. Upload it again.");
+  if (loc) {
+    let there: boolean;
+    try { there = await objectExists(loc.folder, loc.key); } catch {
+      // Storage unreachable: we cannot tell, so say so plainly and save nothing (not a bare 500).
+      throw new AppError(502, "Couldn't check the file in storage, so this creative wasn't saved. Try again in a moment.");
+    }
+    if (!there) throw new AppError(422, "The file didn't finish uploading, so this creative wasn't saved. Upload it again.");
   }
 
   const [row] = await db
