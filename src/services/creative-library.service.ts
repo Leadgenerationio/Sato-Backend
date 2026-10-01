@@ -303,8 +303,13 @@ async function toLibraryDto(r: JoinedRow): Promise<LibraryCreativeDto> {
   }
   // Fresh signed link per row (never stored — N8) so the library grid can
   // preview images that have no server thumbnail yet. Signing is local.
-  const fileUrl = cr.r2Key
-    ? await getSignedDownloadUrl({ folder: 'creatives', key: cr.r2Key, expiresInSeconds: 3600 }).catch(() => null)
+  // Retest R3 / R2-1: this used to sign folder 'creatives' + r2Key for EVERY row. Uploads from before the
+  // library landed in 'misc/' (the stored file_url says so), so those rows signed a key that does not exist
+  // and answered NoSuchKey — the files were never missing. Resolve the folder from the row, as the detail,
+  // portal and download paths already do.
+  const loc = resolveR2Location(cr.fileUrl, cr.r2Key);
+  const fileUrl = loc
+    ? await getSignedDownloadUrl({ folder: loc.folder, key: loc.key, expiresInSeconds: 3600 }).catch(() => null)
     : null;
   return {
     id: cr.id,
