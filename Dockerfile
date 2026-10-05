@@ -36,4 +36,7 @@ EXPOSE 3001
 #
 # A real migration error causes the container to exit non-zero so Railway
 # shows the failure instead of starting a broken server.
-CMD ["sh", "-c", "pnpm db:auto-migrate && node dist/index.js"]
+# STAGING ONLY: also seed the internal users (idempotent, passwords from SEED_*
+# env) because NODE_ENV=production skips the in-memory dev seed. Do not merge
+# this line to main.
+CMD ["sh", "-c", "pnpm db:auto-migrate && node dist/db/seed.js && node dist/index.js"]
