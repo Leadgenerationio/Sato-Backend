@@ -8,7 +8,7 @@ import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
-import { canonicalizePlatform } from '../utils/catchr-platform.js';
+import { canonicalizePlatform, normaliseAccountId } from '../utils/catchr-platform.js';
 import { normaliseLandingUrl } from '../utils/landing-url.js';
 import { fetchRemoteMedia, mediaTypeOf, MAX_MEDIA_BYTES, type RemoteMediaDeps } from '../utils/remote-media.js';
 import { uploadFile, getSignedDownloadUrl, objectExists, hashObject, isR2Configured, ObjectTooLargeError, deleteFile } from '../integrations/r2/r2-client.js';
@@ -103,7 +103,7 @@ export async function resolveClientForAdAccount(
   const [row] = await db
     .select({ clientId: clientAdAccounts.clientId, campaignId: clientAdAccounts.campaignId })
     .from(clientAdAccounts)
-    .where(and(eq(clientAdAccounts.businessId, businessId), eq(clientAdAccounts.platform, p), eq(clientAdAccounts.accountId, accountId.trim())));
+    .where(and(eq(clientAdAccounts.businessId, businessId), eq(clientAdAccounts.platform, p), eq(clientAdAccounts.accountId, normaliseAccountId(platform, accountId))));
   return row ?? null;
 }
 
@@ -586,7 +586,7 @@ export async function upsertPlatformCreative(
     clientId,
     campaignId,
     platform: input.platform,
-    platformAccountId: input.platformAccountId ?? null,
+    platformAccountId: input.platformAccountId ? normaliseAccountId(input.platform, input.platformAccountId) : null,
     platformAdId: input.platformAdId ?? null,
     platformCreativeId: input.platformCreativeId ?? null,
     platformCampaignId: input.platformCampaignId ?? null,

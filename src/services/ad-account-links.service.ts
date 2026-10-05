@@ -3,7 +3,7 @@ import { db } from '../config/database.js';
 import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { clients } from '../db/schema/clients.js';
 import { campaigns } from '../db/schema/campaigns.js';
-import { canonicalizePlatform, canonicalPlatformSql, sourceLabel } from '../utils/catchr-platform.js';
+import { canonicalizePlatform, canonicalPlatformSql, normaliseAccountId, sourceLabel } from '../utils/catchr-platform.js';
 import { NotFoundError, ValidationError } from '../utils/errors.js';
 import type { AuthPayload } from '../types/index.js';
 
@@ -265,7 +265,7 @@ export async function bulkUpsertLinks(requester: AuthPayload, links: LinkInput[]
   const normalised = links.map((l) => ({
     ...l,
     platform: normalisePlatform(l.platform),
-    accountId: l.accountId.trim(),
+    accountId: normaliseAccountId(l.platform, l.accountId),
     campaignId: l.campaignId ?? null,
   }));
 
@@ -376,12 +376,12 @@ export async function lookupClientByAdAccount(
     .where(and(
       eq(clientAdAccounts.businessId, businessId),
       eq(clientAdAccounts.platform, p),
-      eq(clientAdAccounts.accountId, accountId.trim()),
+      eq(clientAdAccounts.accountId, normaliseAccountId(platform, accountId)),
     ));
   if (!row) throw new NotFoundError('Linked client for this ad account');
   return {
     platform: p,
-    accountId: accountId.trim(),
+    accountId: normaliseAccountId(platform, accountId),
     client: { id: row.clientId, companyName: row.companyName, currency: row.currency ?? null },
     campaign: row.campaignId ? { id: row.campaignId, name: row.campaignName ?? '' } : null,
   };
