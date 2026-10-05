@@ -17,9 +17,9 @@ RUN pnpm build
 FROM base AS production
 ENV NODE_ENV=production
 # Creative library thumbnails: images use sharp (bundled). Video poster
-# frames need ffmpeg — uncomment to enable; without it videos keep no
-# thumbnail and the library shows their player instead.
-# RUN apk add --no-cache ffmpeg
+# frames need ffmpeg; without it videos keep no thumbnail and the library
+# shows their player instead.
+RUN apk add --no-cache ffmpeg
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./
