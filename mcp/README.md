@@ -24,13 +24,13 @@ Ad accounts are matched on **platform + account ID**, never on the account name.
 cd mcp
 npm ci
 npm run build
-STATO_API_URL=https://sato-backend-production.up.railway.app STATO_API_KEY=sk_… node dist/stdio.js
+STATO_API_URL=https://sato-backend-production.up.railway.app STATO_API_KEY=stk_… node dist/stdio.js
 ```
 
 **Claude Code:**
 
 ```bash
-claude mcp add stato --env STATO_API_URL=https://sato-backend-production.up.railway.app --env STATO_API_KEY=sk_… -- node /path/to/Sato-Backend/mcp/dist/stdio.js
+claude mcp add stato --env STATO_API_URL=https://sato-backend-production.up.railway.app --env STATO_API_KEY=stk_… -- node /path/to/Sato-Backend/mcp/dist/stdio.js
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`):
@@ -41,7 +41,7 @@ claude mcp add stato --env STATO_API_URL=https://sato-backend-production.up.rail
     "stato": {
       "command": "node",
       "args": ["/path/to/Sato-Backend/mcp/dist/stdio.js"],
-      "env": { "STATO_API_URL": "https://sato-backend-production.up.railway.app", "STATO_API_KEY": "sk_…" }
+      "env": { "STATO_API_URL": "https://sato-backend-production.up.railway.app", "STATO_API_KEY": "stk_…" }
     }
   }
 }
@@ -61,7 +61,7 @@ STATO_API_URL=https://sato-backend-production.up.railway.app PORT=3010 node dist
 **Claude Code against the hosted server:**
 
 ```bash
-claude mcp add --transport http stato https://mcp.stato.tech/mcp --header "Authorization: Bearer sk_…"
+claude mcp add --transport http stato https://mcp.stato.tech/mcp --header "Authorization: Bearer stk_…"
 ```
 
 ### Deploying next to the backend on Railway

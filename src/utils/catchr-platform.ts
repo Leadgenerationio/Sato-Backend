@@ -97,3 +97,18 @@ export function sourceKey(input: string | null | undefined): string {
 export function sourceLabel(key: string, fallback: string): string {
   return PLATFORM_LABELS[key as CanonicalPlatform] ?? (fallback.trim() || key);
 }
+
+/**
+ * Canonical ad-account ID for storage and matching, in the form Catchr writes to ad_spend.account_id:
+ * Meta without the "act_" prefix, Google customer IDs without dashes, everything else trimmed.
+ * Without this, "act_428353095282383" and "428353095282383" were two different accounts: a bot that
+ * linked one spelling could not find it under the other, and a second link created a duplicate row
+ * instead of moving the account (retest of the MCP tools, 5 Oct 2026).
+ */
+export function normaliseAccountId(platform: string | null | undefined, accountId: string): string {
+  const id = String(accountId ?? '').trim();
+  const p = canonicalizePlatform(platform);
+  if (p === 'facebook-ads') return id.replace(/^act_/i, '');
+  if (p === 'google-ads') return id.replace(/-/g, '');
+  return id;
+}

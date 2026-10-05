@@ -76,6 +76,7 @@ export function createStatoMcpServer(api: StatoApi): McpServer {
       'sourceUrl must be a public https URL of the file; Stato downloads, checks and stores it. Sending the same creative again updates it instead of copying it.',
     inputSchema: {
       platform,
+      mediaType: z.enum(['image', 'video']).optional().describe('image or video. Optional: guessed from the file URL (.mp4, .mov, .webm … = video, anything else = image).'),
       accountId: accountId.optional(),
       clientId: uuid('client').optional(),
       campaignId: uuid('campaign').optional(),

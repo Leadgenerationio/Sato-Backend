@@ -31,6 +31,8 @@ const PLAIN: Record<number, string> = {
 
 export interface UploadCreativeInput {
   platform: string;
+  /** 'image' or 'video'. Inferred from the file URL when omitted. */
+  mediaType?: 'image' | 'video';
   accountId?: string;
   clientId?: string;
   campaignId?: string;
@@ -43,16 +45,40 @@ export interface UploadCreativeInput {
   idempotencyKey?: string;
 }
 
+const VIDEO_URL = /\.(mp4|mov|m4v|webm|mkv|avi)(?:[?#]|$)/i;
+
+/** Stato's create endpoint requires a mediaType; the tool lets the caller omit it and guesses from the URL. */
+export function mediaTypeFor(input: Pick<UploadCreativeInput, 'mediaType' | 'sourceUrl'>): 'image' | 'video' {
+  if (input.mediaType) return input.mediaType;
+  return VIDEO_URL.test(input.sourceUrl) ? 'video' : 'image';
+}
+
 /**
- * Stable key for a creative upload so a retried tool call (an assistant
- * re-sending the same request) can't create a duplicate. Prefers the
- * platform's own creative id; otherwise hashes the request.
+ * The create endpoint only accepts meta | taboola | google | tiktok | manual (the link and lookup endpoints
+ * accept the longer Catchr spellings and normalise them). Map the common aliases so a caller can use either.
+ */
+export function creativePlatform(platform: string): string {
+  const n = platform.toLowerCase().trim();
+  if (n === 'facebook' || n === 'facebook-ads' || n === 'fb' || n === 'instagram' || n.includes('meta')) return 'meta';
+  if (n === 'google-ads' || n.includes('google')) return 'google';
+  if (n === 'tik-tok' || n === 'tik tok' || n.includes('tiktok')) return 'tiktok';
+  return n;
+}
+
+/**
+ * Stable key for a creative upload so a retried tool call (an assistant re-sending the same request) can't
+ * create a duplicate. A caller-supplied key wins. Otherwise it hashes the WHOLE request: the API refuses a
+ * reused key with a different body, so keying on the platform's creative ID alone turned "send the same
+ * creative again with a new headline" into an error. An identical retry still replays; a changed request gets
+ * a new key and the API updates the creative through its own (platform, platformCreativeId) match.
  */
 export function idempotencyKeyFor(input: UploadCreativeInput): string {
   if (input.idempotencyKey) return input.idempotencyKey;
-  const basis = input.platformCreativeId
-    ? `${input.platform}:${input.platformCreativeId}`
-    : JSON.stringify([input.platform, input.accountId ?? '', input.clientId ?? '', input.sourceUrl, input.landingPageUrl ?? '', input.platformAdId ?? '']);
+  const basis = JSON.stringify([
+    input.platform, input.mediaType ?? '', input.accountId ?? '', input.clientId ?? '', input.campaignId ?? '',
+    input.sourceUrl, input.landingPageUrl ?? '', input.headline ?? '', input.bodyText ?? '',
+    input.platformAdId ?? '', input.platformCreativeId ?? '',
+  ]);
   return `mcp-${createHash('sha256').update(basis).digest('hex').slice(0, 40)}`;
 }
 
@@ -109,7 +135,15 @@ export class StatoApi {
   }
 
   uploadCreative(input: UploadCreativeInput) {
-    const { idempotencyKey: _k, ...body } = input;
+    // The API takes platformAccountId (not accountId) and requires mediaType: sending the tool's own field names
+    // made every upload fail with "Validation failed (Invalid input)".
+    const { idempotencyKey: _k, accountId, mediaType: _m, platform, ...rest } = input;
+    const body = {
+      ...rest,
+      platform: creativePlatform(platform),
+      mediaType: mediaTypeFor(input),
+      ...(accountId ? { platformAccountId: accountId } : {}),
+    };
     return this.call<unknown>('POST', '/creatives', { body, headers: { 'Idempotency-Key': idempotencyKeyFor(input) } });
   }
 

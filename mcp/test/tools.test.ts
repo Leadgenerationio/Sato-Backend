@@ -86,11 +86,43 @@ describe('REST calls', () => {
     await client.callTool({ name: 'upload_creative', arguments: args });
     await client.callTool({ name: 'upload_creative', arguments: args });
     expect(fake.seen).toHaveLength(2);
-    expect(fake.seen[0]).toMatchObject({ method: 'POST', path: '/api/v1/creatives', body: args });
+    // The API takes platformAccountId (not accountId) and requires mediaType.
+    const { accountId, ...rest } = args;
+    expect(fake.seen[0]).toMatchObject({ method: 'POST', path: '/api/v1/creatives', body: { ...rest, platformAccountId: accountId, mediaType: 'image' } });
+    expect((fake.seen[0].body as Record<string, unknown>).accountId).toBeUndefined();
     const k1 = fake.seen[0].headers['idempotency-key'];
     expect(k1).toBe(idempotencyKeyFor(args));
     expect(fake.seen[1].headers['idempotency-key']).toBe(k1);
     expect((fake.seen[0].body as Record<string, unknown>).idempotencyKey).toBeUndefined();
+  });
+
+  it('upload_creative sends mediaType: guessed video from the URL, an explicit value wins, images by default', async () => {
+    await client.callTool({ name: 'upload_creative', arguments: { platform: 'meta', clientId: CLIENT, sourceUrl: 'https://cdn.example.com/ad.mp4?token=1' } });
+    await client.callTool({ name: 'upload_creative', arguments: { platform: 'meta', clientId: CLIENT, sourceUrl: 'https://cdn.example.com/stream/12345', mediaType: 'video' } });
+    await client.callTool({ name: 'upload_creative', arguments: { platform: 'meta', clientId: CLIENT, sourceUrl: 'https://cdn.example.com/ad.png' } });
+    expect(fake.seen.map((r) => (r.body as Record<string, unknown>).mediaType)).toEqual(['video', 'video', 'image']);
+  });
+
+  it('upload_creative maps platform aliases to the values the create endpoint accepts', async () => {
+    for (const platform of ['facebook-ads', 'Facebook', 'google-ads', 'tik-tok', 'taboola']) {
+      await client.callTool({ name: 'upload_creative', arguments: { platform, clientId: CLIENT, sourceUrl: 'https://cdn.example.com/a.jpg' } });
+    }
+    expect(fake.seen.map((r) => (r.body as Record<string, unknown>).platform)).toEqual(['meta', 'meta', 'google', 'tiktok', 'taboola']);
+  });
+
+  it('upload_creative without accountId sends no platformAccountId', async () => {
+    await client.callTool({ name: 'upload_creative', arguments: { platform: 'meta', clientId: CLIENT, sourceUrl: 'https://cdn.example.com/a.jpg' } });
+    expect(Object.keys(fake.seen[0].body as object)).not.toContain('platformAccountId');
+  });
+
+  it('the same creative re-sent with a changed headline gets a new key (the API refuses a reused key with a different body)', async () => {
+    const base = { platform: 'meta', clientId: CLIENT, sourceUrl: 'https://cdn.example.com/a.jpg', platformCreativeId: '120210000000001' };
+    await client.callTool({ name: 'upload_creative', arguments: { ...base, headline: 'First' } });
+    await client.callTool({ name: 'upload_creative', arguments: { ...base, headline: 'Second' } });
+    await client.callTool({ name: 'upload_creative', arguments: { ...base, headline: 'Second' } });
+    const keys = fake.seen.map((r) => r.headers['idempotency-key']);
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(keys[1]).toBe(keys[2]);
   });
 
   it('upload_creative uses a caller-supplied Idempotency-Key and differs for a different creative', async () => {
