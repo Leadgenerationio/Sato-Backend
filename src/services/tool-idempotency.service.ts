@@ -63,3 +63,19 @@ export async function withIdempotency<T extends Record<string, unknown>>(
     inFlight.delete(flight);
   }
 }
+
+/**
+ * withIdempotency for the tools that answer { summary, data, audit }: the first answer is kept and a retry with the
+ * same idempotencyKey and arguments gets it back, with the summary saying so.
+ */
+export async function withToolResult<R extends { summary: string; data: unknown; audit?: unknown }>(
+  keyId: string,
+  idempotencyKey: string | undefined,
+  tool: string,
+  request: unknown,
+  run: () => Promise<R>,
+): Promise<R> {
+  const { value, replayed } = await withIdempotency(keyId, idempotencyKey, tool, request, async () => (await run()) as unknown as Record<string, unknown>);
+  const r = value as unknown as R;
+  return replayed ? { ...r, summary: `Same request as before (idempotencyKey): returning the first answer. ${r.summary}` } : r;
+}

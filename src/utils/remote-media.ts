@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { SNIFF_BYTES, sniffMedia } from './sniff-media.js';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { AppError, MediaSourceError } from './errors.js';
@@ -123,11 +124,15 @@ export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps 
     }
   }
   const buffer = Buffer.concat(chunks);
+  // The real type comes from the first bytes, not the Content-Type header or the name
+  // (MCP spec v1.0: an .exe served as video/mp4 must be refused).
+  const sniffed = sniffMedia(buffer.subarray(0, SNIFF_BYTES));
+  if (!sniffed) throw new MediaSourceError(422, 'sourceUrl must be an image or video: the file content is not a jpg, png, webp, gif, mp4 or mov', 'unsupported_type');
   return {
     buffer,
-    contentType: contentType.split(';')[0]!.trim(),
+    contentType: sniffed.mime,
     sizeBytes: buffer.length,
     sha256: createHash('sha256').update(buffer).digest('hex'),
-    mediaType,
+    mediaType: sniffed.mediaType,
   };
 }

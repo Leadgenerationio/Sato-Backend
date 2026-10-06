@@ -11,14 +11,15 @@ export default defineTool({
   name: 'upload_asset',
   title: 'Add an image or video to Stato',
   description:
-    'File an image or video under the right client and campaign, from a public sourceUrl (up to 50 MB; larger files need create_upload). ' +
+    'File an image or video under the right client and campaign. Send either a public sourceUrl (up to 50 MB) or an uploadId: for bigger files (up to 4 GB) call create_upload, send the file to the returned URLs, call complete_upload until status is ready, then call this with the uploadId. ' +
     'Call find_client_by_ad_account first. Send platform and platformAccountId and Stato picks the client from the ad account; clientId is only a cross-check and a mismatch is rejected (account_client_mismatch) with nothing saved. ' +
     'An unlinked account is account_not_linked: stop and ask the owner. If the account feeds several campaigns you must send campaignId. ' +
     'Optionally send adLink to record the ad in the same call (the IDs the platform returned; all strings). ' +
     'Safe to repeat: the same file for the same client returns result "duplicate" with the existing creativeId; the same idempotencyKey replays the first answer for 24 hours.',
   inputSchema: {
-    mediaType: z.enum(['image', 'video']),
-    sourceUrl: z.string().min(1).max(2000).describe('Public http(s) URL of the file. Private and internal addresses are blocked.'),
+    mediaType: z.enum(['image', 'video']).optional().describe('Required with sourceUrl. With uploadId it is read from the file.'),
+    sourceUrl: z.string().min(1).max(2000).optional().describe('Public http(s) URL of a file up to 50 MB. Private and internal addresses are blocked. Send this or uploadId.'),
+    uploadId: uuidShape().optional().describe('From create_upload, after complete_upload reports ready. Send this or sourceUrl.'),
     name: z.string().max(255).optional(),
     platform: z.string().max(50).optional().describe('meta, google, tiktok or taboola. With platformAccountId, the ad account decides the client.'),
     platformAccountId: z.string().max(100).optional().describe('The ad account ID as a string (Meta with or without act_).'),
@@ -73,7 +74,7 @@ export default defineTool({
     return {
       summary: summary + note,
       data: { ...out, replayed },
-      audit: { after: { creativeId: out.creativeId, result: out.result, replayed }, recordsTouched: [{ type: 'creative', id: out.creativeId }] },
+      audit: { after: { creativeId: out.creativeId, result: out.result, replayed }, recordsTouched: [{ type: 'creative', id: out.creativeId }, ...(request.uploadId ? [{ type: 'upload', id: request.uploadId }] : [])] },
     };
   },
 });

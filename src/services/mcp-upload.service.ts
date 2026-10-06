@@ -5,20 +5,25 @@ import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { clients } from '../db/schema/clients.js';
 import { normaliseAccountId } from '../utils/catchr-platform.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
-import { AppError, MediaSourceError } from '../utils/errors.js';
+import { toApiError } from '../utils/to-api-error.js';
 import { ApiError, accountClientMismatch, accountNotLinked } from '../utils/api-error.js';
 import { normalisePlatform } from './ad-account-links.service.js';
 import { upsertPlatformCreative } from './creative-library.service.js';
 import { assertCampaignBelongsToClient, campaignsForAccount, resolveCampaignRef, type Caller } from './ad-account-rules.service.js';
 import { linkAdPlatformIds, toAdLinkDto, type AdLinkDto, type AdLinkInput } from './creative-ad-links.service.js';
+import { claimUploadForFiling, getReadyUpload, linkUploadToCreative, releaseUploadClaim } from './mcp-uploads.service.js';
 
-// MCP spec v1.0 upload_asset for files that arrive as a sourceUrl (up to 50 MB
-// today). The ad account decides the client; clientId is only a cross-check.
+// MCP spec v1.0 upload_asset for a file that arrives as a sourceUrl (up to 50 MB)
+// or as a finished direct upload (uploadId, up to 4 GB). The ad account decides
+// the client; clientId is only a cross-check.
 
 export interface UploadAssetInput {
-  mediaType: 'image' | 'video';
+  /** Optional with uploadId (the real type comes from the file); must match it when sent. */
+  mediaType?: 'image' | 'video';
   name?: string;
-  sourceUrl: string;
+  /** Exactly one of sourceUrl or uploadId. */
+  sourceUrl?: string;
+  uploadId?: string;
   clientId?: string;
   platform?: string;
   platformAccountId?: string;
@@ -45,29 +50,15 @@ export interface UploadAssetResult {
   audit: { before?: unknown; after?: unknown };
 }
 
-/** Existing library code throws plain AppErrors; the spec wants coded errors with a next step. */
-function toApiError(err: unknown): never {
-  if (err instanceof ApiError) throw err;
-  if (err instanceof AppError) {
-    const m = err.message;
-    if (err.statusCode === 413) {
-      throw new ApiError('file_too_large', m, { hint: 'This call takes files up to 50 MB. Larger files need create_upload and complete_upload.' });
-    }
-    if (err instanceof MediaSourceError && err.reason === 'unsupported_type') {
-      throw new ApiError('unsupported_type', m, { hint: 'Send a jpg, png, webp or gif image, or an mp4 or mov video.' });
-    }
-    if (err instanceof MediaSourceError && err.reason === 'source_unreachable') {
-      throw new ApiError('source_unreachable', m, { hint: 'sourceUrl must be a public http(s) address that serves the file. Private and internal addresses are blocked.' });
-    }
-    if (err.statusCode === 502) throw new ApiError('internal_error', m, { retryable: true, hint: 'Nothing was saved. Try again in a few minutes.' });
-    if (err.statusCode === 409) throw new ApiError('duplicate', m);
-    if (err.statusCode === 404) throw new ApiError('not_found', m);
-    throw new ApiError('validation_failed', m);
-  }
-  throw err;
-}
-
 export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput): Promise<UploadAssetResult> {
+  if (Boolean(input.sourceUrl) === Boolean(input.uploadId)) {
+    throw new ApiError('validation_failed', 'Send exactly one of sourceUrl or uploadId.', {
+      fields: [{ field: input.sourceUrl ? 'uploadId' : 'sourceUrl', message: 'Send either sourceUrl (a public file up to 50 MB) or uploadId (from create_upload and complete_upload)' }],
+    });
+  }
+  if (!input.uploadId && !input.mediaType) {
+    throw new ApiError('validation_failed', 'mediaType is required with sourceUrl.', { fields: [{ field: 'mediaType', message: 'image or video' }] });
+  }
   const hasAccount = Boolean(input.platform && input.platformAccountId);
   if (!hasAccount && !input.clientId) {
     throw new ApiError('validation_failed', 'Send platform and platformAccountId (the account decides the client), or clientId.', {
@@ -123,15 +114,47 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
     const [prior] = await db.select({ id: creatives.id }).from(creatives).where(and(eq(creatives.platform, platform), eq(creatives.platformCreativeId, platformCreativeId)));
     hadByPlatformId = Boolean(prior);
   }
+  // A finished direct upload: its real size, type and SHA-256 were checked by complete_upload.
+  let uploadRow: Awaited<ReturnType<typeof getReadyUpload>> | null = null;
+  let replayOf: typeof creatives.$inferSelect | null = null;
+  let verified: NonNullable<Parameters<typeof upsertPlatformCreative>[0]['verified']> | undefined;
+  if (input.uploadId) {
+    uploadRow = await getReadyUpload(caller, input.uploadId);
+    if (uploadRow.creativeId) {
+      // Already used. The same client asking again gets the first asset back; any other use is refused, so the file of
+      // one asset can never be pointed at a second one (or deleted as a duplicate under it).
+      const [first] = await db.select().from(creatives).where(eq(creatives.id, uploadRow.creativeId));
+      if (!first || first.clientId !== client.id) {
+        throw new ApiError('validation_failed', 'This upload was already used for another asset.', {
+          fields: [{ field: 'uploadId', message: 'Already used' }], hint: 'Start again with create_upload for a new file.',
+        });
+      }
+      replayOf = first;
+    }
+    const family = (uploadRow.contentType ?? '').split('/')[0] as 'image' | 'video';
+    if (input.mediaType && input.mediaType !== family) {
+      throw new ApiError('validation_failed', `mediaType is ${input.mediaType} but the uploaded file is a ${family}.`, { fields: [{ field: 'mediaType', message: `The file is a ${family}` }] });
+    }
+    verified = { sha256: uploadRow.sha256!, sizeBytes: Number(uploadRow.sizeBytes), contentType: uploadRow.contentType!, mediaType: family, fileStatus: family === 'video' ? 'processing' : 'ready' };
+  }
   let up: Awaited<ReturnType<typeof upsertPlatformCreative>>;
+  // Claimed in the database, so it holds across API instances too.
+  const lockId = replayOf ? null : uploadRow?.id ?? null;
+  if (lockId && !(await claimUploadForFiling(lockId))) {
+    throw new ApiError('rate_limited', 'This upload is being filed by another call, or was just used.', { retryable: true, details: { retryAfter: 2 }, hint: 'Wait a few seconds, then repeat the same call with the same arguments.' });
+  }
   try {
-    up = await upsertPlatformCreative({
+    if (replayOf) up = { creative: replayOf, created: false } as Awaited<ReturnType<typeof upsertPlatformCreative>>;
+    else up = await upsertPlatformCreative({
       businessId: caller.businessId, clientId: client.id, campaignId, platform: platform as 'meta', platformAccountId: hasAccount ? accountId : undefined,
-      platformCreativeId, mediaType: input.mediaType, sourceUrl: input.sourceUrl, headline: input.headline, bodyText: input.bodyText,
+      platformCreativeId, mediaType: verified?.mediaType ?? input.mediaType!, sourceUrl: input.sourceUrl, r2Key: uploadRow?.r2Key, verified, headline: input.headline, bodyText: input.bodyText,
       landingPageUrl: input.landingPageUrl, name: input.name, uploadedBy: caller.userId,
     });
+    if (uploadRow && !replayOf) await linkUploadToCreative(uploadRow.id, up.creative.id);
   } catch (err) {
     toApiError(err);
+  } finally {
+    if (lockId) await releaseUploadClaim(lockId).catch(() => {});
   }
   const { creative, created } = up;
 

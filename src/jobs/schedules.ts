@@ -95,6 +95,15 @@ export async function registerSchedules() {
     data: {},
   });
 
+  // Direct uploads (create_upload): expire abandoned ones, abort their multipart
+  // parts so storage keeps nothing, and fail jobs stuck on processing.
+  await syncQueue.upsertJobScheduler('upload-sweeper', {
+    pattern: '*/10 * * * *',
+  }, {
+    name: 'upload-sweeper',
+    data: {},
+  });
+
   // SMS alerts to Sam — poll the notifications table every 30s for unsent
   // system_error rows. Hard no-op in mock mode (see alert-sms.service.ts).
   await syncQueue.upsertJobScheduler('sms-alert-poll', {
