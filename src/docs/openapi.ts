@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import * as lib from '../controllers/creative-library.controller.js';
-import { linkOneSchema } from '../routes/ad-account.routes.js';
+import { linkOneSchema, listSchema as adAccountsListSchema } from '../routes/ad-account.routes.js';
 import { API_SCOPES } from '../services/api-key.service.js';
 
 // OpenAPI 3.1 for the public API (plan phase 2). Request schemas come from the
@@ -63,6 +63,23 @@ export function buildOpenApi(serverUrl: string): Json {
       },
     },
     paths: {
+      '/whoami': {
+        get: {
+          summary: 'Which key, business and scopes this connection is using',
+          description: 'Needs no scope: any valid key may ask. The live request count left is in the `RateLimit-Remaining` response header.',
+          security: [{ ApiKey: [] }],
+          responses: { 200: ok('The key (name, prefix, scopes, expiry), its owner, the business and the per-key rate limit.'), 401: { $ref: '#/components/responses/Unauthorized' }, 429: { $ref: '#/components/responses/RateLimited' } },
+        },
+      },
+      '/ad-accounts': {
+        get: {
+          summary: 'Ad accounts with spend and what they are linked to',
+          description: 'Filters are AND-ed. `linked=false` lists accounts with spend but no client. `q` matches the account ID (with or without `act_`) or the name. The summary counts only the filtered accounts.',
+          security: sec('clients:read'),
+          parameters: queryParams(adAccountsListSchema.shape.query),
+          responses: { 200: ok('Accounts with 30-day spend (or `days`), their client and campaign link, and a summary.'), ...errors },
+        },
+      },
       '/clients/lookup': {
         get: {
           summary: 'Which client owns this ad account',

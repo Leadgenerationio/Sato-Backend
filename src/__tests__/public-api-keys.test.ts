@@ -87,7 +87,7 @@ describe('X-API-Key auth and scopes', () => {
 
   it('JWT-only routes refuse an API key', async () => {
     const { key } = await makeKey(['creatives:write', 'creatives:read']);
-    expect((await request(app).get('/api/v1/ad-accounts').set('X-API-Key', key)).status).toBe(401);
+    expect((await request(app).get('/api/v1/ad-accounts/sync-status').set('X-API-Key', key)).status).toBe(401);
     expect((await request(app).post('/api/v1/creatives/bulk').set('X-API-Key', key).send({ action: 'submit_for_approval', ids: [] })).status).toBe(401);
   });
 

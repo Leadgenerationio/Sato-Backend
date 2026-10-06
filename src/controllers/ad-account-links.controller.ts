@@ -6,7 +6,13 @@ import { enqueuePlatformSync } from '../jobs/queue.js';
 
 export async function list(req: Request, res: Response) {
   const days = req.query.days ? parseInt(String(req.query.days), 10) : 30;
-  const data = await service.listAdAccounts(req.user!, Number.isFinite(days) ? days : 30);
+  const data = await service.listAdAccounts(req.user!, Number.isFinite(days) ? days : 30, {
+    platform: req.query.platform ? String(req.query.platform) : undefined,
+    clientId: req.query.clientId ? String(req.query.clientId) : undefined,
+    campaignId: req.query.campaignId ? String(req.query.campaignId) : undefined,
+    linked: req.query.linked === undefined ? undefined : req.query.linked === 'true',
+    q: req.query.q ? String(req.query.q) : undefined,
+  });
   // The bulk-link screen edits this list and re-reads it straight after a
   // save. The global 'private, max-age=5, stale-while-revalidate=30' on API
   // GETs (src/index.ts) made the browser answer that re-read from its HTTP

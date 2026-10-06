@@ -17,6 +17,7 @@ import { agreementRoutes } from './agreement.routes.js';
 import { leadbyteRoutes } from './leadbyte.routes.js';
 import { adSpendRoutes } from './ad-spend.routes.js';
 import { adAccountRoutes, clientLookupRoutes } from './ad-account.routes.js';
+import { whoamiRoutes } from './whoami.routes.js';
 import { uploadRoutes } from './upload.routes.js';
 import { creativeRoutes } from './creative.routes.js';
 import { creativeLibraryRoutes } from './creative-library.routes.js';
@@ -86,6 +87,7 @@ router.use('/ad-accounts', adAccountRoutes);
 // Outbound webhooks (plan phase 4). Before the '/'-mounted creativeRoutes.
 router.use('/webhook-endpoints', webhookEndpointRoutes);
 router.use('/api-keys', apiKeyRoutes);
+router.use('/whoami', whoamiRoutes);
 router.use('/uploads', uploadRoutes);
 // SOS is open to clients too — mount BEFORE creativeRoutes (which has a
 // router-level requireRole('owner','ops_manager') that would otherwise
