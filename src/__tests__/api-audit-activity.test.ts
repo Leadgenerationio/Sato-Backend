@@ -81,6 +81,9 @@ describe('GET /api-keys/activity', () => {
     expect(bad.status).toBe(400);
     expect(bad.body.errors.map((e: { path: string }) => e.path)).toContain('query.cursor');
     expect((await activity({ transport: 'smtp' })).status).toBe(400);
+    // The old ID-only cursor, and an ID past 15 digits (where Number() loses precision), are refused.
+    expect((await activity({ cursor: '123' })).status).toBe(400);
+    expect((await activity({ cursor: `1791280933475123.${'9'.repeat(16)}` })).status).toBe(400);
   });
 
   it('per key: only that key, and a key from nowhere is not found', async () => {
