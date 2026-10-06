@@ -27,8 +27,15 @@ declare global {
  * Bearer <jwt>`. A key acts inside its own business with the role of an
  * ops manager (never owner) and only within its scopes — see requireScope.
  */
+/** `Authorization: Bearer stk_...` is a key too (the MCP spec and Cursor send it
+ *  that way). A real login token never starts with stk_, so this is unambiguous. */
+function bearerApiKey(req: Request): string | undefined {
+  const h = req.get('authorization');
+  return h && /^Bearer\s+stk_/i.test(h) ? h.replace(/^Bearer\s+/i, '').trim() : undefined;
+}
+
 export async function apiKeyOrJwt(req: Request, res: Response, next: NextFunction) {
-  const key = req.get('x-api-key');
+  const key = req.get('x-api-key') ?? bearerApiKey(req);
   if (!key) return authMiddleware(req, res, next);
   const row = await verifyApiKey(key.trim());
   if (!row) throw new UnauthorizedError('Invalid, expired or revoked API key');
