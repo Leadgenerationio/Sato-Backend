@@ -10,6 +10,8 @@ import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { creatives } from '../db/schema/creatives.js';
 import { creativeAdLinks } from '../db/schema/creative-ad-links.js';
 import { adSpend } from '../db/schema/ad-spend.js';
+import { campaigns } from '../db/schema/campaigns.js';
+import { trafficSources } from '../db/schema/traffic-sources.js';
 import { uploads } from '../db/schema/uploads.js';
 import { apiKeys } from '../db/schema/api-keys.js';
 import { hashObject, objectExists, getSignedUploadUrl } from '../integrations/r2/r2-client.js';
@@ -28,6 +30,8 @@ let owner = ''; let key = '';
 let clientA = ''; let clientB = ''; let otherBiz = ''; let otherClient = '';
 const keyIds: string[] = [];
 const spendIds: string[] = [];
+const campIds: string[] = [];
+const tsIds: string[] = [];
 
 const jpeg = (n: number, seed: string) => { const b = Buffer.alloc(n, 0x41); Buffer.from([0xff, 0xd8, 0xff, 0xe0]).copy(b, 0); b.write(`${seed}-${tag}`, 8); return b; };
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
@@ -74,6 +78,8 @@ afterAll(async () => {
   if (ids.length) await db.delete(creativeAdLinks).where(inArray(creativeAdLinks.creativeId, ids));
   await db.delete(uploads).where(inArray(uploads.businessId, [BIZ, otherBiz])).catch(() => {});
   await db.delete(creatives).where(inArray(creatives.clientId, [clientA, clientB]));
+  if (tsIds.length) await db.delete(trafficSources).where(inArray(trafficSources.id, tsIds));
+  if (campIds.length) await db.delete(campaigns).where(inArray(campaigns.id, campIds));
   if (spendIds.length) await db.delete(adSpend).where(inArray(adSpend.id, spendIds));
   await db.delete(clientAdAccounts).where(inArray(clientAdAccounts.clientId, [clientA, clientB, otherClient]));
   await db.delete(clients).where(inArray(clients.id, [clientA, clientB, otherClient]));
@@ -101,6 +107,26 @@ describe('a verified single-PUT file cannot be replaced through its old URL', ()
     await put(up.uploadUrl, Buffer.from('MZ-not-an-image'), { 'Content-Type': 'image/jpeg' });
     expect((await hashObject('creatives', after!.r2Key, 1024 * 1024))!.sha256).toBe(sha(file));
     await r2.deleteFile('creatives', originalKey);
+  });
+});
+
+describe('the original single-PUT key is cleaned once its URL has expired', () => {
+  it('a file written through the old URL after the copy is removed by the sweeper; the verified file stays', async () => {
+    const file = jpeg(8100, 'orig');
+    const up = await upload(file);
+    const [before] = await db.select().from(uploads).where(eq(uploads.id, up.uploadId));
+    const originalKey = before!.r2Key;
+    expect((await call(key, 'complete_upload', { uploadId: up.uploadId })).structuredContent.status).toBe('ready');
+    const [after] = await db.select().from(uploads).where(eq(uploads.id, up.uploadId));
+    expect(after!.r2Key).toBe(`verified-${originalKey}`);
+    await put(up.uploadUrl, Buffer.from('written later through the old URL'), { 'Content-Type': 'image/jpeg' });
+    expect(await objectExists('creatives', originalKey)).toBe(true);
+    await sweepUploads(); // the URL is still valid: nothing to clean yet
+    expect(await objectExists('creatives', originalKey)).toBe(true);
+    await db.update(uploads).set({ expiresAt: new Date(Date.now() - 5 * 60 * 1000) }).where(eq(uploads.id, up.uploadId));
+    await sweepUploads();
+    expect(await objectExists('creatives', originalKey)).toBe(false);
+    expect(await objectExists('creatives', after!.r2Key)).toBe(true);
   });
 });
 
@@ -227,11 +253,19 @@ describe('list_ad_accounts shows only this business', () => {
     const res = await call(key, 'list_ad_accounts', { q: accountId });
     expect(res.isError).toBeUndefined();
     expect(res.structuredContent.items).toEqual([]);
-    // Unlinked spend nobody has claimed is still listed: that is the work to do.
+    // Spend on an account nobody has claimed is not shown either: ad_spend has no business column.
     const free = `66${tag}8`;
     const [sp2] = await db.insert(adSpend).values({ platform: 'facebook-ads', authorizationId: 1, accountId: free, accountName: 'Unclaimed', campaignId: `c${tag}`, date: new Date().toISOString().slice(0, 10), spend: '10' }).returning();
     spendIds.push(sp2!.id);
-    expect((await call(key, 'list_ad_accounts', { q: free })).structuredContent.items).toHaveLength(1);
+    expect((await call(key, 'list_ad_accounts', { q: free })).structuredContent.items).toEqual([]);
+    // ...until a traffic source ties it to a campaign this business can see.
+    const [camp] = await db.insert(campaigns).values({ name: `Yash Test PW camp ${tag}`, leadbyteCampaignId: `PW-${tag}` }).returning();
+    campIds.push(camp!.id);
+    const [ts] = await db.insert(trafficSources).values({ campaignId: camp!.id, name: `Yash Test PW ts ${tag}`, platform: 'facebook-ads', accountId: free }).returning();
+    tsIds.push(ts!.id);
+    const shown = await call(key, 'list_ad_accounts', { q: free });
+    expect(shown.structuredContent.items).toHaveLength(1);
+    expect(shown.structuredContent.items[0].campaigns[0].campaignId).toBe(camp!.id);
   });
 });
 

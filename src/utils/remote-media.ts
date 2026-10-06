@@ -80,9 +80,17 @@ export function mediaTypeOf(contentType: string): 'image' | 'video' | null {
   return null;
 }
 
-export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps = {}): Promise<FetchedMedia> {
+export const MAX_REDIRECTS = 3;
+const USER_AGENT = 'StatoCreativeFetcher/1.0 (+https://leadgenerationio.stato.tech)';
+
+/**
+ * Open a public URL, following up to 3 redirects and checking EVERY hop: http(s) only, and the host must resolve to a
+ * public address (so a redirect to localhost or a cloud metadata address is refused, not followed).
+ */
+export async function openPublicUrl(sourceUrl: string, deps: RemoteMediaDeps = {}, opts: { timeoutMs?: number } = {}): Promise<{ res: Response; finalUrl: URL }> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const lookup = deps.lookup ?? ((host: string) => dnsLookup(host, { all: true }));
+  const signal = AbortSignal.timeout(opts.timeoutMs ?? 30_000);
 
   let url: URL;
   try {
@@ -90,23 +98,32 @@ export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps 
   } catch {
     throw new MediaSourceError(422, 'sourceUrl is not a valid URL', 'source_unreachable');
   }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new MediaSourceError(422, 'sourceUrl must be an http(s) URL', 'source_unreachable');
+  for (let hop = 0; ; hop++) {
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+      throw new MediaSourceError(422, 'sourceUrl must be an http(s) URL', 'source_unreachable');
+    }
+    const host = url.hostname.replace(/^\[|\]$/g, '');
+    const addresses = isIP(host) ? [{ address: host }] : await lookup(host).catch(() => []);
+    if (addresses.length === 0) throw new MediaSourceError(422, `Could not resolve ${host}`, 'source_unreachable');
+    if (addresses.some((a) => isPrivateAddress(a.address))) {
+      throw new MediaSourceError(422, 'sourceUrl must point to a public address', 'source_unreachable');
+    }
+    // Some image hosts (Wikimedia, several CDNs) answer 400/403 to requests without a User-Agent: send an honest one.
+    const res = await fetchImpl(url, { redirect: 'manual', signal, headers: { 'User-Agent': USER_AGENT, Accept: 'image/*,video/*' } }).catch((err: unknown) => {
+      throw new MediaSourceError(422, `Could not download sourceUrl (${err instanceof Error ? err.message : 'network error'})`, 'source_unreachable');
+    });
+    if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+      if (hop >= MAX_REDIRECTS) throw new MediaSourceError(422, `sourceUrl redirects more than ${MAX_REDIRECTS} times`, 'source_unreachable');
+      await res.body?.cancel().catch(() => {});
+      try { url = new URL(res.headers.get('location')!, url); } catch { throw new MediaSourceError(422, 'sourceUrl redirects to an invalid address', 'source_unreachable'); }
+      continue;
+    }
+    return { res, finalUrl: url };
   }
-  const host = url.hostname.replace(/^\[|\]$/g, '');
-  const addresses = isIP(host) ? [{ address: host }] : await lookup(host).catch(() => []);
-  if (addresses.length === 0) throw new MediaSourceError(422, `Could not resolve ${host}`, 'source_unreachable');
-  if (addresses.some((a) => isPrivateAddress(a.address))) {
-    throw new MediaSourceError(422, 'sourceUrl must point to a public address', 'source_unreachable');
-  }
+}
 
-  // Some image hosts (Wikimedia, several CDNs) answer 400/403 to requests
-  // without a User-Agent — send an honest one.
-  const res = await fetchImpl(url, {
-    redirect: 'error',
-    signal: AbortSignal.timeout(30_000),
-    headers: { 'User-Agent': 'StatoCreativeFetcher/1.0 (+https://leadgenerationio.stato.tech)', Accept: 'image/*,video/*' },
-  });
+export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps = {}): Promise<FetchedMedia> {
+  const { res } = await openPublicUrl(sourceUrl, deps);
   if (!res.ok) throw new MediaSourceError(422, `Could not download sourceUrl (HTTP ${res.status})`, 'source_unreachable');
   const contentType = res.headers.get('content-type') ?? '';
   const mediaType = mediaTypeOf(contentType);
