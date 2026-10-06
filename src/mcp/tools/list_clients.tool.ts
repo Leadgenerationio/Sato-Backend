@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { defineTool } from '../types.js';
 import { listClients } from '../../services/mcp-reads.service.js';
+import { clientStatusEnum } from '../../db/schema/clients.js';
 
 export default defineTool({
   name: 'list_clients',
@@ -9,7 +10,7 @@ export default defineTool({
     'List or search the clients in this business. Use it to find a clientId before link_ad_account, get_client or list_campaigns. Results are paged: pass nextCursor back to get the next page. IDs are strings.',
   inputSchema: {
     q: z.string().max(100).optional().describe('Part of the company name.'),
-    status: z.enum(['prospect', 'onboarding', 'active', 'paused', 'churned']).optional().describe('Client status.'),
+    status: z.enum(clientStatusEnum.enumValues).optional().describe('Client status.'),
     limit: z.number().int().min(1).max(100).optional().describe('Page size, default 25, at most 100.'),
     cursor: z.string().max(200).optional().describe('The nextCursor from the previous page.'),
   },

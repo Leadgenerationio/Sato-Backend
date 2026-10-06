@@ -37,7 +37,7 @@ export const activityQuerySchema = z.object({
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
   limit: z.coerce.number().int().min(1).max(ACTIVITY_MAX_LIMIT).optional(),
-  cursor: z.string().regex(/^\d{1,18}$/, 'Use nextCursor from the previous page').optional(),
+  cursor: z.string().regex(/^\d{1,17}\.\d{1,15}$/, 'Use nextCursor from the previous page').optional(),
 });
 
 function activityFilters(q: z.infer<typeof activityQuerySchema>) {

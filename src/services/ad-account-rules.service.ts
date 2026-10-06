@@ -1,4 +1,4 @@
-import { and, eq, ne, sql } from 'drizzle-orm';
+import { and, eq, ne, sql, type SQL } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { clients } from '../db/schema/clients.js';
 import { campaigns } from '../db/schema/campaigns.js';
@@ -30,12 +30,33 @@ export function realUserId(userId: string | null | undefined): string | null {
   return userId && userId !== NIL_UUID ? userId : null;
 }
 
-/** A campaign by its Stato UUID, or by the LeadByte number (Sam's decision 1). Never creates one. */
-export async function resolveCampaignRef(ref: string): Promise<{ id: string; name: string }> {
+/**
+ * Campaigns this business can see: bought by one of its clients, or shared (no
+ * buyer at all). `campaigns` has no business column, so a shared campaign is
+ * visible to every business; fine with one business, revisit before a second
+ * one is onboarded.
+ */
+export function campaignVisible(businessId: string): SQL {
+  return sql`(
+    exists (select 1 from ${clientCampaigns} cc join ${clients} c on c.id = cc.client_id where cc.campaign_id = ${campaigns.id} and c.business_id = ${businessId})
+    or (not exists (select 1 from ${clientCampaigns} cc where cc.campaign_id = ${campaigns.id})
+        and (${campaigns.clientId} is null or exists (select 1 from ${clients} c where c.id = ${campaigns.clientId} and c.business_id = ${businessId})))
+  )`;
+}
+
+/**
+ * A campaign by its Stato UUID, or by the LeadByte number (Sam's decision 1),
+ * among the campaigns this business can see. Never creates one. A campaign
+ * that exists only in another business gets the same not_found as one that
+ * does not exist, so the answer says nothing about other businesses.
+ */
+export async function resolveCampaignRef(ref: string, businessId: string): Promise<{ id: string; name: string }> {
   const r = ref.trim();
-  const [row] = UUID_SHAPE.test(r)
-    ? await db.select({ id: campaigns.id, name: campaigns.name }).from(campaigns).where(eq(campaigns.id, r)).limit(1)
-    : await db.select({ id: campaigns.id, name: campaigns.name }).from(campaigns).where(eq(campaigns.leadbyteCampaignId, r)).limit(1);
+  const match = UUID_SHAPE.test(r) ? eq(campaigns.id, r) : eq(campaigns.leadbyteCampaignId, r);
+  // leadbyte_campaign_id is not unique: filtering by visibility in the same
+  // query picks the row this business can see, not whichever comes first.
+  const [row] = await db.select({ id: campaigns.id, name: campaigns.name }).from(campaigns)
+    .where(and(match, campaignVisible(businessId))).orderBy(campaigns.id).limit(1);
   if (!row) {
     throw new ApiError('not_found', `No campaign matches "${ref}".`, {
       hint: 'Use the Stato campaignId (a UUID) from list_campaigns, or the LeadByte campaign number. Stato does not create campaigns from a lookup.',
@@ -61,13 +82,33 @@ export interface AccountOwner {
  * dashes on Google), keyed on the same canonical platform as the row, so it can
  * be compared with client_ad_accounts.account_id. Same rule as normaliseAccountId.
  */
-export function normAccountSql(col: string) {
-  const plat = canonicalPlatformSql('ts.platform');
+export function normAccountSql(col: string, platformCol: string) {
+  const plat = canonicalPlatformSql(platformCol);
   return sql.raw(
     `case when ${plat} = 'facebook-ads' then regexp_replace(trim(${col}), '^act_', '', 'i')`
     + ` when ${plat} = 'google-ads' then replace(trim(${col}), '-', '')`
     + ` else trim(${col}) end`,
   );
+}
+
+/**
+ * The ad accounts that active campaign-detail traffic sources list, as rows of
+ * (campaign_id, platform, acc_id): platform in the client_ad_accounts form and
+ * the account ID normalised the same way, so both compare directly with a
+ * client_ad_accounts row. `where` filters traffic_sources (aliased ts). The one
+ * place these rules live, so every reader agrees on which accounts feed a campaign.
+ */
+export function trafficSourceAccountsSql(where: SQL): SQL {
+  const platform = sql.raw(`coalesce(${canonicalPlatformSql('ts.platform')}, lower(trim(ts.platform)))`);
+  return sql`
+    select ts.campaign_id, ${platform} as platform, ${normAccountSql('ts.account_id', 'ts.platform')} as acc_id
+    from traffic_sources ts
+    where ts.is_active = true and ts.platform is not null and ts.account_id is not null and ts.account_id <> '' and ${where}
+    union
+    select ts.campaign_id, ${platform} as platform, ${normAccountSql('a.acc', 'ts.platform')} as acc_id
+    from traffic_sources ts, jsonb_array_elements_text(ts.account_ids) as a(acc)
+    where ts.is_active = true and ts.platform is not null and ${where}
+  `;
 }
 
 // creative_ad_links.platform uses the creatives vocabulary, client_ad_accounts the Catchr one.
@@ -79,21 +120,12 @@ const AD_LINK_PLATFORM: Record<string, string> = { 'facebook-ads': 'meta', 'goog
  * (compared on the normalised ID: no act_, no dashes), and the live ad links
  * recorded on it (where one account can feed several campaigns).
  */
-export async function campaignsForAccount(storedPlatform: string, accountId: string): Promise<Array<{ campaignId: string; name: string }>> {
-  const tsPlatform = sql.raw(`coalesce(${canonicalPlatformSql('ts.platform')}, lower(trim(ts.platform)))`);
+export async function campaignsForAccount(storedPlatform: string, accountId: string, businessId: string): Promise<Array<{ campaignId: string; name: string }>> {
   const fromSources = (await db.execute(sql`
-    with accs as (
-      select ts.campaign_id, ${tsPlatform} as platform, ${normAccountSql('ts.account_id')} as acc_id
-      from traffic_sources ts
-      where ts.is_active = true and ts.platform is not null and ts.account_id is not null and ts.account_id <> ''
-      union
-      select ts.campaign_id, ${tsPlatform} as platform, ${normAccountSql('a.acc')} as acc_id
-      from traffic_sources ts, jsonb_array_elements_text(ts.account_ids) as a(acc)
-      where ts.is_active = true and ts.platform is not null
-    )
-    select distinct c.id as campaign_id, c.name as campaign_name
-    from accs a join campaigns c on c.id = a.campaign_id
-    where a.platform = ${storedPlatform} and a.acc_id = ${accountId}
+    with accs as (${trafficSourceAccountsSql(sql`true`)})
+    select distinct ${campaigns.id} as campaign_id, ${campaigns.name} as campaign_name
+    from accs a join ${campaigns} on ${campaigns.id} = a.campaign_id
+    where a.platform = ${storedPlatform} and a.acc_id = ${accountId} and ${campaignVisible(businessId)}
   `)) as unknown as Array<{ campaign_id: string; campaign_name: string }>;
 
   const found = new Map<string, string>(fromSources.map((r) => [r.campaign_id, r.campaign_name]));
@@ -131,7 +163,7 @@ export async function findAccountOwner(businessId: string, platformInput: string
       hint: 'Stop and ask the owner which client it belongs to, then call link_ad_account. Do not guess from names.',
     });
   }
-  const list = await campaignsForAccount(stored, accountId);
+  const list = await campaignsForAccount(stored, accountId, businessId);
   return {
     platform: toSpecPlatform(stored),
     accountId,
@@ -194,7 +226,7 @@ export async function linkAdAccount(caller: Caller, input: LinkInput): Promise<L
 
   let campaign: { id: string; name: string } | null = null;
   if (input.campaignId) {
-    campaign = await resolveCampaignRef(input.campaignId);
+    campaign = await resolveCampaignRef(input.campaignId, caller.businessId);
     await assertCampaignBelongsToClient(client.id, campaign.id);
   }
 

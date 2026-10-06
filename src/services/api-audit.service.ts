@@ -17,8 +17,10 @@ export const REDACTED = '[redacted]';
 
 /** Field names whose values are never stored. */
 const SECRET_FIELD = /pass(word)?|secret|token|api[-_]?key|authori[sz]ation|signature|cookie|credential|private[-_]?key/i;
-/** Query parameters that make a URL a credential (presigned R2/S3 links, signed webhooks). */
-const SIGNED_PARAM = /^(x-amz-.*|sig|signature|token|access_token|key|expires)$/i;
+/** Query parameters that make a URL a credential (presigned R2/S3/GCS links, signed webhooks, key-in-URL APIs). */
+const SIGNED_PARAM = /^(x-amz-.*|x-goog-.*|sig|signature|token|access_token|id_token|key|apikey|api_key|auth|jwt|expires|googleaccessid|client_secret)$/i;
+/** A Stato key anywhere in a string: a pasted note, `Bearer stk_…`, a URL. */
+const KEY_ANYWHERE = new RegExp(`${KEY_MARKER}[A-Za-z0-9_-]{20,}`, 'g');
 const MAX_STRING = 2000;
 const MAX_ARRAY = 50;
 const MAX_DEPTH = 6;
@@ -27,6 +29,7 @@ const MAX_JSON_BYTES = 16 * 1024;
 
 function redactString(s: string): string {
   if (s.startsWith(KEY_MARKER)) return REDACTED;
+  s = s.replace(KEY_ANYWHERE, REDACTED);
   if (/^https?:\/\//i.test(s) && s.includes('?')) {
     try {
       const u = new URL(s);
@@ -148,8 +151,10 @@ export function auditOnFinish(key: KeyForAudit, req: Request, res: Response, sta
     if (typeof code === 'string') res.locals.auditErrorCode = code;
     return json(body);
   }) as Response['json'];
-  res.once('finish', () => {
+  onceDone(res, (finished) => {
     void (async () => {
+      // The client went away before the answer was sent (a long upload, say): still one row.
+      if (!finished && !res.locals.auditErrorCode) res.locals.auditErrorCode = 'client_closed';
       if (!res.locals.audit && !res.locals.auditErrorCode) {
         const code = await unrunToolCode(req);
         if (code) res.locals.auditErrorCode = code;
@@ -157,6 +162,17 @@ export function auditOnFinish(key: KeyForAudit, req: Request, res: Response, sta
       await writeAuditRow(buildAuditRow(key, req, res, startedAt));
     })();
   });
+}
+
+/**
+ * Run fn once when the response ends: on 'finish' (sent), or on 'close'
+ * without 'finish' (the client disconnected first). finished tells which.
+ */
+function onceDone(res: Response, fn: (finished: boolean) => void): void {
+  let done = false;
+  const fire = (finished: boolean) => { if (!done) { done = true; fn(finished); } };
+  res.once('finish', () => fire(true));
+  res.once('close', () => fire(res.writableFinished));
 }
 
 /**
@@ -191,13 +207,14 @@ export async function auditRefusedKey(rawKey: string, req: Request, res: Respons
     const [key] = await db.select({ id: apiKeys.id, businessId: apiKeys.businessId, name: apiKeys.name, createdBy: apiKeys.createdBy, agentLabel: apiKeys.agentLabel })
       .from(apiKeys).where(eq(apiKeys.hash, hashKey(rawKey))).limit(1);
     if (!key) {
-      res.once('finish', () => logger.info({ requestId: res.locals.requestId, path: req.originalUrl.split('?')[0], ip: req.ip }, 'Call with an unknown API key'));
+      // debug, not info: anyone can send random keys, one line each would flood the log.
+      res.once('finish', () => logger.debug({ requestId: res.locals.requestId, path: req.originalUrl.split('?')[0], ip: req.ip }, 'Call with an unknown API key'));
       return;
     }
     if (res.locals.auditArmed) return;
     res.locals.auditArmed = true;
     res.locals.auditErrorCode = 'unauthorized';
-    res.once('finish', () => { void writeAuditRow(buildAuditRow(key, req, res, startedAt)); });
+    onceDone(res, () => { void writeAuditRow(buildAuditRow(key, req, res, startedAt)); });
   } catch (err) {
     logger.warn({ err }, 'API audit lookup for a refused key failed');
   }

@@ -7,7 +7,10 @@ import { ApiError } from '../utils/api-error.js';
 // MCP spec v1.0 section 3, Idempotency: every write tool takes an optional
 // idempotencyKey. The first successful result for (key, caller) is kept 24 h and
 // replayed for a retry with the same request; the same key with a different
-// request is refused. Uses the same table as the REST Idempotency-Key header.
+// request is refused. Uses the same table as the REST Idempotency-Key header,
+// so MCP rows have their own owner (`mcp:key:<id>`, REST uses `key:<id>`): a bot
+// that uses one counter for both never collides with itself. The tool name is in
+// the request hash, so one key reused across tools is refused like any reuse.
 
 const TTL_MS = 24 * 60 * 60 * 1000;
 const inFlight = new Set<string>();
@@ -24,7 +27,7 @@ export async function withIdempotency<T extends Record<string, unknown>>(
   if (key.length > 100) {
     throw new ApiError('validation_failed', 'idempotencyKey must be at most 100 characters.', { fields: [{ field: 'idempotencyKey', message: 'Too long' }] });
   }
-  const owner = `key:${keyId}`;
+  const owner = `mcp:key:${keyId}`;
   const requestHash = createHash('sha256').update(`tool ${tool}\n${JSON.stringify(request ?? null)}`).digest('hex');
   const since = new Date(Date.now() - TTL_MS);
   const [hit] = await db.select().from(idempotencyKeys)
@@ -40,7 +43,14 @@ export async function withIdempotency<T extends Record<string, unknown>>(
   }
   const flight = `${owner}|${key}`;
   if (inFlight.has(flight)) {
-    throw new ApiError('validation_failed', 'A request with this idempotencyKey is still being processed.', { retryable: true, hint: 'Retry in a few seconds.' });
+    // Not invalid input: the first call with this key has not finished yet. The
+    // spec has no conflict code, so this is rate_limited, the code a bot already
+    // answers by waiting and repeating the same call unchanged.
+    throw new ApiError('rate_limited', `The earlier ${tool} call with idempotencyKey "${key}" is still running.`, {
+      retryable: true,
+      hint: `Wait a few seconds, then repeat the same call with the same arguments and idempotencyKey to get its result. Do not change the arguments.`,
+      details: { retryAfter: 2, reason: 'idempotency_key_in_progress' },
+    });
   }
   inFlight.add(flight);
   try {

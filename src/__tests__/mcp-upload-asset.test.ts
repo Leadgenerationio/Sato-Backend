@@ -227,3 +227,10 @@ describe('upload_asset refusals (test 11, the parts that run today)', () => {
     expect((await call(readKey, base('scope'))).structuredContent.code).toBe('insufficient_scope');
   });
 });
+
+describe('review of #78', () => {
+  it('a non-UUID clientId is validation_failed naming clientId, not internal_error', async () => {
+    const r = await call(key, { mediaType: 'image', sourceUrl: url('nouuid'), clientId: 'abc' });
+    expect(r.structuredContent).toMatchObject({ code: 'validation_failed', fields: [{ field: 'clientId' }] });
+  });
+});

@@ -6,10 +6,9 @@ import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { creatives } from '../db/schema/creatives.js';
 import { landingPages } from '../db/schema/landing-pages.js';
-import { canonicalPlatformSql } from '../utils/catchr-platform.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
 import { ApiError } from '../utils/api-error.js';
-import { normAccountSql, resolveCampaignRef } from './ad-account-rules.service.js';
+import { campaignVisible, resolveCampaignRef, trafficSourceAccountsSql } from './ad-account-rules.service.js';
 
 // MCP spec v1.0 discovery tools: list_clients, get_client, list_campaigns,
 // get_campaign. Read only. Campaign IDs are the Stato UUID with the LeadByte
@@ -25,7 +24,8 @@ function pageArgs(limit: number | undefined, cursor: string | undefined): { limi
   if (cursor) {
     try {
       const o = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { o?: unknown };
-      if (typeof o.o !== 'number' || o.o < 0 || !Number.isInteger(o.o)) throw new Error('bad');
+      // isSafeInteger, not isInteger: 1e300 is an integer but no Postgres OFFSET.
+      if (typeof o.o !== 'number' || o.o < 0 || !Number.isSafeInteger(o.o)) throw new Error('bad');
       offset = o.o;
     } catch {
       throw new ApiError('validation_failed', 'cursor is not valid.', { fields: [{ field: 'cursor', message: 'Use the nextCursor from the previous page, unchanged' }] });
@@ -42,24 +42,24 @@ const like = (q: string) => `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
 export interface ClientListItem { clientId: string; name: string; status: string | null; currency: string | null; country: string | null; adAccountCount: number }
 
-export async function listClients(businessId: string, f: { q?: string; status?: string; limit?: number; cursor?: string }): Promise<Page<ClientListItem>> {
+export async function listClients(businessId: string, f: { q?: string; status?: (typeof clientStatusEnum.enumValues)[number]; limit?: number; cursor?: string }): Promise<Page<ClientListItem>> {
   const { limit, offset } = pageArgs(f.limit, f.cursor);
   const where: SQL[] = [eq(clients.businessId, businessId)];
   if (f.q) where.push(ilike(clients.companyName, like(f.q)));
-  if (f.status) {
-    if (!(clientStatusEnum.enumValues as readonly string[]).includes(f.status)) {
-      throw new ApiError('validation_failed', `status must be one of ${clientStatusEnum.enumValues.join(', ')}.`, { fields: [{ field: 'status', message: `One of ${clientStatusEnum.enumValues.join(', ')}` }] });
-    }
-    where.push(eq(clients.status, f.status as (typeof clientStatusEnum.enumValues)[number]));
-  }
+  if (f.status) where.push(eq(clients.status, f.status));
   const rows = await db
-    .select({
-      clientId: clients.id, name: clients.companyName, status: clients.status, currency: clients.currency, country: clients.addressCountry,
-      // Written out by hand: inside a select list Drizzle drops the table name, and a bare "id" would bind to the subquery's own table.
-      adAccountCount: sql<number>`(select count(*)::int from ${clientAdAccounts} a where a.client_id = ${sql.raw('"clients"."id"')})`,
-    })
+    .select({ clientId: clients.id, name: clients.companyName, status: clients.status, currency: clients.currency, country: clients.addressCountry })
     .from(clients).where(and(...where)).orderBy(asc(clients.companyName), asc(clients.id)).limit(limit + 1).offset(offset);
-  return { items: rows.slice(0, limit).map((r) => ({ ...r, status: r.status ?? null, currency: r.currency ?? null, country: r.country ?? null })), nextCursor: nextCursorOf(offset, limit, rows.length) };
+  const page = rows.slice(0, limit);
+  const counts = page.length
+    ? await db.select({ clientId: clientAdAccounts.clientId, n: sql<number>`count(*)::int` }).from(clientAdAccounts)
+        .where(inArray(clientAdAccounts.clientId, page.map((r) => r.clientId))).groupBy(clientAdAccounts.clientId)
+    : [];
+  const countOf = new Map(counts.map((c) => [c.clientId, c.n]));
+  return {
+    items: page.map((r) => ({ ...r, status: r.status ?? null, currency: r.currency ?? null, country: r.country ?? null, adAccountCount: countOf.get(r.clientId) ?? 0 })),
+    nextCursor: nextCursorOf(offset, limit, rows.length),
+  };
 }
 
 export interface CampaignRef { campaignId: string; leadbyteId: string | null; name: string; vertical: string | null; status: string | null }
@@ -82,7 +82,7 @@ export async function getClient(businessId: string, clientId: string): Promise<C
       .from(clientCampaigns).innerJoin(campaigns, eq(campaigns.id, clientCampaigns.campaignId))
       .where(eq(clientCampaigns.clientId, c.id)).orderBy(asc(campaigns.name)),
     db.select({ n: sql<number>`count(*)::int` }).from(creatives).where(and(eq(creatives.clientId, c.id), eq(creatives.isDeleted, false), isNull(creatives.archivedAt))),
-    db.select({ n: sql<number>`count(*)::int` }).from(landingPages).where(and(eq(landingPages.clientId, c.id), sql`${landingPages.status} <> 'archived'`)),
+    db.select({ n: sql<number>`count(*)::int` }).from(landingPages).where(and(eq(landingPages.clientId, c.id), sql`${landingPages.status} is distinct from 'archived'`)),
   ]);
   return {
     client: { clientId: c.id, name: c.companyName, status: c.status ?? null, currency: c.currency ?? null, country: c.addressCountry ?? null },
@@ -95,27 +95,19 @@ export async function getClient(businessId: string, clientId: string): Promise<C
 
 // ─── campaigns ───
 
-/**
- * Campaigns this business can see: bought by one of its clients, or shared (no
- * buyer at all). `campaigns` has no business column, so a shared campaign is
- * visible to every business; fine with one business, revisit before a second
- * one is onboarded.
- */
-function campaignVisible(businessId: string): SQL {
-  return sql`(
-    exists (select 1 from ${clientCampaigns} cc join ${clients} c on c.id = cc.client_id where cc.campaign_id = ${campaigns.id} and c.business_id = ${businessId})
-    or (not exists (select 1 from ${clientCampaigns} cc where cc.campaign_id = ${campaigns.id})
-        and (${campaigns.clientId} is null or exists (select 1 from ${clients} c where c.id = ${campaigns.clientId} and c.business_id = ${businessId})))
-  )`;
-}
-
 export interface CampaignListItem extends CampaignRef { currency: string | null; linkedClientIds: string[] }
 
 export async function listCampaignsForMcp(businessId: string, f: { clientId?: string; status?: string; vertical?: string; q?: string; limit?: number; cursor?: string }): Promise<Page<CampaignListItem>> {
   const { limit, offset } = pageArgs(f.limit, f.cursor);
+  if (f.clientId) {
+    // A wrong ID is not_found, not an empty page that looks like "no campaigns".
+    const [c] = await db.select({ id: clients.id }).from(clients).where(and(eq(clients.id, f.clientId), eq(clients.businessId, businessId))).limit(1);
+    if (!c) throw new ApiError('not_found', 'That client does not exist in this business.', { hint: 'Use list_clients to find the right clientId.' });
+  }
   const where: SQL[] = [campaignVisible(businessId)];
   if (f.clientId) where.push(sql`exists (select 1 from ${clientCampaigns} cc where cc.campaign_id = ${campaigns.id} and cc.client_id = ${f.clientId})`);
-  if (f.status) where.push(eq(campaigns.status, f.status));
+  // status is free-form text from LeadByte: compare without case.
+  if (f.status) where.push(sql`lower(${campaigns.status}) = lower(${f.status})`);
   if (f.vertical) where.push(ilike(campaigns.vertical, like(f.vertical)));
   if (f.q) where.push(or(ilike(campaigns.name, like(f.q)), eq(campaigns.leadbyteCampaignId, f.q))!);
   const rows = await db
@@ -144,26 +136,30 @@ export interface CampaignDetail {
 }
 
 export async function getCampaignForMcp(businessId: string, ref: string): Promise<CampaignDetail> {
-  const found = await resolveCampaignRef(ref);
-  const [c] = await db.select().from(campaigns).where(and(eq(campaigns.id, found.id), campaignVisible(businessId))).limit(1);
-  if (!c) throw new ApiError('not_found', `No campaign matches "${ref}" in this business.`, { hint: 'Use list_campaigns to see the campaigns you can use.' });
-  const tsPlatform = sql.raw(`coalesce(${canonicalPlatformSql('ts.platform')}, lower(trim(ts.platform)))`);
+  // Visibility is applied inside the lookup, so a campaign in another business
+  // gets the same not_found as one that does not exist.
+  const found = await resolveCampaignRef(ref, businessId);
+  const [c] = await db.select().from(campaigns).where(eq(campaigns.id, found.id)).limit(1);
+  // Accounts from the traffic sources are listed when this business owns the
+  // campaign, or when the account is linked to one of its own clients. A shared
+  // campaign (no buyer) is visible to every business, but the accounts another
+  // business runs on it are not.
+  const owned = sql`(
+    exists (select 1 from client_campaigns cc join clients cl on cl.id = cc.client_id where cc.campaign_id = ${c.id} and cl.business_id = ${businessId})
+    or exists (select 1 from campaigns k join clients cl on cl.id = k.client_id where k.id = ${c.id} and cl.business_id = ${businessId})
+  )`;
   const [linked, accountRows, [cr]] = await Promise.all([
     db.select({ clientId: clients.id, name: clients.companyName }).from(clientCampaigns).innerJoin(clients, eq(clients.id, clientCampaigns.clientId))
       .where(and(eq(clientCampaigns.campaignId, c.id), eq(clients.businessId, businessId))).orderBy(asc(clients.companyName)),
     db.execute(sql`
       with accs as (
-        select ${tsPlatform} as platform, ${normAccountSql('ts.account_id')} as acc_id from traffic_sources ts
-        where ts.campaign_id = ${c.id} and ts.is_active = true and ts.platform is not null and ts.account_id is not null and ts.account_id <> ''
-        union
-        select ${tsPlatform} as platform, ${normAccountSql('a.acc')} as acc_id from traffic_sources ts, jsonb_array_elements_text(ts.account_ids) as a(acc)
-        where ts.campaign_id = ${c.id} and ts.is_active = true and ts.platform is not null
+        select s.platform, s.acc_id from (${trafficSourceAccountsSql(sql`ts.campaign_id = ${c.id}`)}) s
         union
         select a.platform, a.account_id from client_ad_accounts a where a.campaign_id = ${c.id} and a.business_id = ${businessId}
       )
       select distinct x.platform, x.acc_id as account_id, l.account_name, l.client_id
       from accs x left join client_ad_accounts l on l.platform = x.platform and l.account_id = x.acc_id and l.business_id = ${businessId}
-      where x.acc_id is not null and x.acc_id <> ''
+      where x.acc_id is not null and x.acc_id <> '' and (l.client_id is not null or ${owned})
       order by x.platform, x.acc_id
     `) as unknown as Promise<Array<{ platform: string; account_id: string; account_name: string | null; client_id: string | null }>>,
     db.select({ n: sql<number>`count(*)::int` }).from(creatives).where(and(eq(creatives.campaignId, c.id), eq(creatives.isDeleted, false), isNull(creatives.archivedAt))),
