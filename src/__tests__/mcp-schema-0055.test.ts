@@ -136,3 +136,54 @@ describe('ad-account ID normalisation in the migration', () => {
     expect(byId.get(rows[3]!.id)).toBe(n);
   });
 });
+
+describe('0055 on a later boot (review of #71)', () => {
+  it('a creative that shares an ad ID with an existing link, under another platform creative ID, does not fail the next boot', async () => {
+    const AD = `b${tag}`;
+    const [a] = await db.insert(creatives).values({ name: `Yash boot A ${tag}`, fileUrl: 'x', clientId, platform: 'meta', platformAdId: AD, platformCreativeId: 'CR-1' }).returning();
+    creativeIds.push(a!.id);
+    for (const stmt of statements) await run(stmt); // first boot: A gets its link
+    const [b] = await db.insert(creatives).values({ name: `Yash boot B ${tag}`, fileUrl: 'x', clientId, platform: 'meta', platformAdId: AD, platformCreativeId: 'CR-2' }).returning();
+    creativeIds.push(b!.id);
+    for (const stmt of statements) await run(stmt); // next boot: used to die on creative_ad_links_ad_uq
+    const links = await db.select().from(creativeAdLinks).where(eq(creativeAdLinks.platformAdId, AD));
+    expect(links.map((l) => l.creativeId)).toEqual([a!.id]);
+  });
+
+  it('the backfill stores the account ID normalised, as new links do', async () => {
+    const [m] = await db.insert(creatives).values({ name: `Yash norm meta ${tag}`, fileUrl: 'x', clientId, platform: 'meta', platformAdId: `nm${tag}`, platformAccountId: `act_42${tag}` }).returning();
+    const [g] = await db.insert(creatives).values({ name: `Yash norm google ${tag}`, fileUrl: 'x', clientId, platform: 'google', platformAdId: `ng${tag}`, platformAccountId: '123-456-7890' }).returning();
+    creativeIds.push(m!.id, g!.id);
+    await run(stmtWith('INSERT INTO creative_ad_links'));
+    const [lm] = await db.select().from(creativeAdLinks).where(eq(creativeAdLinks.creativeId, m!.id));
+    const [lg] = await db.select().from(creativeAdLinks).where(eq(creativeAdLinks.creativeId, g!.id));
+    expect(lm!.platformAccountId).toBe(`42${tag}`);
+    expect(lg!.platformAccountId).toBe('1234567890');
+  });
+
+  it('creatives.source is not rewritten on a later boot', async () => {
+    const [c] = await db.insert(creatives).values({ name: `Yash source ${tag}`, fileUrl: 'x', clientId, platform: 'meta', platformAdId: `s${tag}` }).returning();
+    creativeIds.push(c!.id);
+    for (const stmt of statements) await run(stmt);
+    const [after] = await db.select().from(creatives).where(eq(creatives.id, c!.id));
+    expect(after!.source).toBe('portal');
+  });
+
+  it('two rows that differ only in case (act_ / ACT_) do not collide in one statement', async () => {
+    const n = `88${tag}`;
+    const rows = await db.insert(clientAdAccounts).values([
+      { businessId: BIZ, platform: 'facebook-ads', accountId: `act_${n}`, clientId },
+      { businessId: BIZ, platform: 'facebook-ads', accountId: `ACT_${n}`, clientId: clientB },
+    ]).returning();
+    rows.forEach((r) => accountRows.push(r.id));
+    for (const stmt of statements.filter((x) => x.includes('UPDATE client_ad_accounts c'))) await run(stmt);
+    const after = await db.select().from(clientAdAccounts).where(inArray(clientAdAccounts.id, rows.map((r) => r.id)));
+    expect(after.filter((r) => r.accountId === n)).toHaveLength(1);
+    expect(after).toHaveLength(2);
+  });
+
+  it('the size and file_url ALTERs are skipped when already done', () => {
+    expect(stmtWith('size_bytes')).toContain("data_type <> 'bigint'");
+    expect(stmtWith('DROP NOT NULL')).toContain("is_nullable = 'NO'");
+  });
+});
