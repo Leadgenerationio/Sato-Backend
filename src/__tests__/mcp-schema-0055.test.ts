@@ -48,7 +48,7 @@ describe('0055 column types and defaults', () => {
     const [c] = await db.insert(creatives).values({ name: `Yash copy ${tag}`, type: 'copy', section: 'copy_lp', headline: 'Headline', clientId }).returning();
     creativeIds.push(c!.id);
     expect(c!.fileUrl).toBeNull();
-    expect(c).toMatchObject({ fileStatus: 'ready', source: 'portal', archivedAt: null, createdByKeyId: null, tags: [] });
+    expect(c).toMatchObject({ fileStatus: 'ready', source: 'portal', archivedAt: null, archiveReason: null, createdByKeyId: null, tags: [] });
   });
   it('the new tables exist', async () => {
     const r = await db.execute(sql`select table_name from information_schema.tables where table_name in ('creative_ad_links','uploads','api_audit_log')`);
@@ -76,7 +76,7 @@ describe('creative_ad_links backfill and unique index', () => {
     await run(backfill);
     const links = await db.select().from(creativeAdLinks).where(eq(creativeAdLinks.creativeId, c!.id));
     expect(links).toHaveLength(1);
-    expect(links[0]).toMatchObject({ platform: 'meta', platformAdId: AD, status: 'active', businessId: BIZ });
+    expect(links[0]).toMatchObject({ platform: 'meta', platformAdId: AD, status: 'active', businessId: BIZ, clientId, source: 'sync' });
   });
   it('a second creative with the same ad ID gets no link; the oldest keeps it', async () => {
     const [c2] = await db.insert(creatives).values({ name: `Yash ad dup ${tag}`, fileUrl: 'x', clientId, platform: 'meta', platformAdId: AD }).returning();
@@ -94,20 +94,26 @@ describe('creative_ad_links backfill and unique index', () => {
     await run(stmtWith('INSERT INTO creative_ad_links'));
     expect(await db.select().from(creativeAdLinks).where(inArray(creativeAdLinks.creativeId, rows.map((r) => r.id)))).toHaveLength(0);
   });
-  it('refuses two active links on one ad, accepts it again once the first is unlinked', async () => {
+  it('refuses two active links on one ad, accepts it again once the first is removed', async () => {
     const [a] = await db.insert(creatives).values({ name: `Yash uq A ${tag}`, fileUrl: 'x', clientId }).returning();
     const [b] = await db.insert(creatives).values({ name: `Yash uq B ${tag}`, fileUrl: 'x', clientId }).returning();
     creativeIds.push(a!.id, b!.id);
     const ad = `u${tag}`;
     const [first] = await db.insert(creativeAdLinks).values({ businessId: BIZ, creativeId: a!.id, platform: 'tiktok', platformAdId: ad }).returning();
     await expect(db.insert(creativeAdLinks).values({ businessId: BIZ, creativeId: b!.id, platform: 'tiktok', platformAdId: ad })).rejects.toThrow();
-    await db.update(creativeAdLinks).set({ status: 'unlinked', unlinkedAt: new Date() }).where(eq(creativeAdLinks.id, first!.id));
+    await db.update(creativeAdLinks).set({ status: 'removed', removedAt: new Date() }).where(eq(creativeAdLinks.id, first!.id));
     await db.insert(creativeAdLinks).values({ businessId: BIZ, creativeId: b!.id, platform: 'tiktok', platformAdId: ad });
   });
-  it('a link needs an ad ID or a creative ID', async () => {
+  it('a paused link still holds its ad; a link needs an ad, creative or asset ID', async () => {
     const [a] = await db.insert(creatives).values({ name: `Yash empty ${tag}`, fileUrl: 'x', clientId }).returning();
     creativeIds.push(a!.id);
     await expect(db.insert(creativeAdLinks).values({ businessId: BIZ, creativeId: a!.id, platform: 'meta' })).rejects.toThrow();
+    await db.insert(creativeAdLinks).values({ businessId: BIZ, creativeId: a!.id, platform: 'meta', platformAssetId: `v${tag}` });
+    const [b] = await db.insert(creatives).values({ name: `Yash paused ${tag}`, fileUrl: 'x', clientId }).returning();
+    creativeIds.push(b!.id);
+    const ad = `p${tag}`;
+    await db.insert(creativeAdLinks).values({ businessId: BIZ, creativeId: a!.id, platform: 'google', platformAdId: ad, status: 'paused' });
+    await expect(db.insert(creativeAdLinks).values({ businessId: BIZ, creativeId: b!.id, platform: 'google', platformAdId: ad })).rejects.toThrow();
   });
 });
 

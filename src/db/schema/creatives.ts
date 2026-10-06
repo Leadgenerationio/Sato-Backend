@@ -75,6 +75,7 @@ export const creatives = pgTable('creatives', {
   // processing state, where the row came from, which API key made it, tags.
   archivedAt: timestamp('archived_at', { withTimezone: true }),
   archivedBy: uuid('archived_by').references(() => users.id, { onDelete: 'set null' }),
+  archiveReason: varchar('archive_reason', { length: 255 }),
   /** processing -> ready | failed. */
   fileStatus: varchar('file_status', { length: 16 }).notNull().default('ready'),
   /** portal | api | mcp | sync. */

@@ -14,6 +14,8 @@ ALTER TABLE creatives ADD COLUMN IF NOT EXISTS archived_at timestamptz;
 --> statement-breakpoint
 ALTER TABLE creatives ADD COLUMN IF NOT EXISTS archived_by uuid REFERENCES users(id) ON DELETE SET NULL;
 --> statement-breakpoint
+ALTER TABLE creatives ADD COLUMN IF NOT EXISTS archive_reason varchar(255);
+--> statement-breakpoint
 -- processing -> ready | failed. Existing rows are files already stored.
 ALTER TABLE creatives ADD COLUMN IF NOT EXISTS file_status varchar(16) NOT NULL DEFAULT 'ready';
 --> statement-breakpoint
@@ -40,21 +42,33 @@ CREATE TABLE IF NOT EXISTS creative_ad_links (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   business_id uuid NOT NULL REFERENCES businesses(id),
   creative_id uuid NOT NULL REFERENCES creatives(id) ON DELETE CASCADE,
+  client_id uuid REFERENCES clients(id) ON DELETE SET NULL,
+  campaign_id uuid REFERENCES campaigns(id) ON DELETE SET NULL,
   platform varchar(20) NOT NULL,
   platform_account_id varchar(100),
   platform_campaign_id varchar(100),
+  platform_campaign_name varchar(255),
   platform_adset_id varchar(100),
+  platform_adset_name varchar(255),
   platform_ad_id varchar(100),
+  platform_ad_name varchar(255),
   platform_creative_id varchar(100),
-  campaign_id uuid REFERENCES campaigns(id) ON DELETE SET NULL,
+  -- Meta image hash or video ID, Google asset resource name, TikTok video or image ID.
+  platform_asset_id varchar(255),
+  landing_page_id uuid REFERENCES landing_pages(id) ON DELETE SET NULL,
   status varchar(10) NOT NULL DEFAULT 'active',
+  -- mcp | api | sync | portal.
+  source varchar(10) NOT NULL DEFAULT 'api',
   linked_by uuid REFERENCES users(id) ON DELETE SET NULL,
-  linked_by_key_id uuid REFERENCES api_keys(id) ON DELETE SET NULL,
+  created_by_key_id uuid REFERENCES api_keys(id) ON DELETE SET NULL,
+  first_seen timestamptz NOT NULL DEFAULT now(),
+  last_seen timestamptz NOT NULL DEFAULT now(),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  unlinked_at timestamptz,
-  CONSTRAINT creative_ad_links_status_chk CHECK (status IN ('active', 'unlinked')),
-  CONSTRAINT creative_ad_links_has_id_chk CHECK (platform_ad_id IS NOT NULL OR platform_creative_id IS NOT NULL)
+  -- A wrong link is removed, never deleted (kept in history).
+  removed_at timestamptz,
+  CONSTRAINT creative_ad_links_status_chk CHECK (status IN ('active', 'paused', 'removed', 'unknown')),
+  CONSTRAINT creative_ad_links_has_id_chk CHECK (platform_ad_id IS NOT NULL OR platform_creative_id IS NOT NULL OR platform_asset_id IS NOT NULL)
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS creative_ad_links_creative_idx ON creative_ad_links (creative_id);
@@ -63,15 +77,15 @@ CREATE INDEX IF NOT EXISTS creative_ad_links_business_idx ON creative_ad_links (
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS creative_ad_links_campaign_idx ON creative_ad_links (campaign_id);
 --> statement-breakpoint
--- Backfill: one active link per creative that already has a platform ad or
+-- Backfill: one link per creative that already has a platform ad or
 -- creative ID. Oldest creative wins when two share an ad ID, the rest stay
--- unlinked (the unique index below needs one owner per ad). Creatives with no
+-- without a link (the unique index below needs one owner per ad). Creatives with no
 -- client have no business to file the link under and are skipped. Safe to
 -- re-run: a creative that already has a link is never inserted again.
-INSERT INTO creative_ad_links (business_id, creative_id, platform, platform_account_id, platform_campaign_id, platform_ad_id, platform_creative_id, campaign_id, created_at)
+INSERT INTO creative_ad_links (business_id, creative_id, client_id, campaign_id, platform, platform_account_id, platform_campaign_id, platform_campaign_name, platform_ad_id, platform_creative_id, landing_page_id, source, first_seen, last_seen, created_at)
 SELECT DISTINCT ON (c.platform, COALESCE(c.platform_ad_id, 'creative:' || c.platform_creative_id))
-       cl.business_id, c.id, c.platform, c.platform_account_id, c.platform_campaign_id, c.platform_ad_id, c.platform_creative_id, c.campaign_id,
-       COALESCE(c.created_at, now())
+       cl.business_id, c.id, c.client_id, c.campaign_id, c.platform, c.platform_account_id, c.platform_campaign_id, c.platform_campaign_name, c.platform_ad_id, c.platform_creative_id, c.landing_page_id,
+       'sync', COALESCE(c.first_seen, c.created_at, now()), COALESCE(c.last_seen, c.created_at, now()), COALESCE(c.created_at, now())
 FROM creatives c
 JOIN clients cl ON cl.id = c.client_id
 WHERE c.platform IS NOT NULL AND c.platform <> 'manual'
@@ -79,21 +93,22 @@ WHERE c.platform IS NOT NULL AND c.platform <> 'manual'
   AND NOT EXISTS (SELECT 1 FROM creative_ad_links l WHERE l.creative_id = c.id)
   AND NOT EXISTS (
     SELECT 1 FROM creative_ad_links l
-    WHERE l.status = 'active' AND l.platform = c.platform
+    WHERE l.status <> 'removed' AND l.platform = c.platform
       AND l.platform_ad_id IS NOT DISTINCT FROM c.platform_ad_id
       AND l.platform_creative_id IS NOT DISTINCT FROM c.platform_creative_id
   )
 ORDER BY c.platform, COALESCE(c.platform_ad_id, 'creative:' || c.platform_creative_id), c.created_at NULLS LAST, c.id;
 --> statement-breakpoint
--- One owner per ad. Created after the backfill so the backfill never trips it.
+-- One live link per ad (active, paused or unknown; only a removed link frees the ad).
+-- Created after the backfill so the backfill never trips it.
 -- The table is new, so a plain (non-concurrent) build is safe here.
 CREATE UNIQUE INDEX IF NOT EXISTS creative_ad_links_ad_uq
   ON creative_ad_links (platform, platform_ad_id)
-  WHERE status = 'active' AND platform_ad_id IS NOT NULL;
+  WHERE status <> 'removed' AND platform_ad_id IS NOT NULL;
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS creative_ad_links_creative_uq
   ON creative_ad_links (creative_id, platform, COALESCE(platform_ad_id, ''), COALESCE(platform_creative_id, ''))
-  WHERE status = 'active';
+  WHERE status <> 'removed';
 --> statement-breakpoint
 
 -- ─── uploads ─────────────────────────────────────────────────────────────
@@ -134,6 +149,8 @@ ALTER TABLE client_ad_accounts ADD COLUMN IF NOT EXISTS moved_from_client_id uui
 --> statement-breakpoint
 ALTER TABLE client_ad_accounts ADD COLUMN IF NOT EXISTS moved_at timestamptz;
 --> statement-breakpoint
+ALTER TABLE client_ad_accounts ADD COLUMN IF NOT EXISTS linked_by_key_id uuid REFERENCES api_keys(id) ON DELETE SET NULL;
+--> statement-breakpoint
 -- Store the normalised account ID (no act_ on Meta, no dashes on Google), the
 -- same rule the API now applies on write. Rows that would collide with an
 -- already-normalised row are left alone.
@@ -165,6 +182,9 @@ CREATE TABLE IF NOT EXISTS api_audit_log (
   key_name varchar(100),
   owner_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
   agent varchar(100),
+  mcp_session_id varchar(100),
+  request_id varchar(64),
+  ip varchar(45),
   transport varchar(4) NOT NULL DEFAULT 'rest',
   tool varchar(100),
   method varchar(8),

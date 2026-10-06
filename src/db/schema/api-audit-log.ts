@@ -14,6 +14,9 @@ export const apiAuditLog = pgTable('api_audit_log', {
   ownerUserId: uuid('owner_user_id').references(() => users.id, { onDelete: 'set null' }),
   /** Bot name from the X-Stato-Agent header. */
   agent: varchar('agent', { length: 100 }),
+  mcpSessionId: varchar('mcp_session_id', { length: 100 }),
+  requestId: varchar('request_id', { length: 64 }),
+  ip: varchar('ip', { length: 45 }),
   /** rest | mcp. */
   transport: varchar('transport', { length: 4 }).notNull().default('rest'),
   tool: varchar('tool', { length: 100 }),
