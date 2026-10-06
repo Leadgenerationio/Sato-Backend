@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { defineTool } from '../types.js';
 import { adLinkOut } from '../schemas.js';
+import { ApiError } from '../../utils/api-error.js';
 import { uploadAssetFromUrl } from '../../services/mcp-upload.service.js';
 import { withIdempotency } from '../../services/tool-idempotency.service.js';
 import { realUserId } from '../../services/ad-account-rules.service.js';
@@ -27,13 +28,13 @@ export default defineTool({
     landingPageUrl: z.string().max(2000).optional(),
     tags: z.array(z.string().max(50)).max(20).optional(),
     adLink: z.object({
-      campaignId: z.string().max(100).optional().describe('The PLATFORM campaign ID.'),
-      campaignName: z.string().max(255).optional(),
+      platformCampaignId: z.string().max(100).optional().describe('The ad platform\'s own campaign ID. The Stato campaign is the top-level campaignId.'),
+      platformCampaignName: z.string().max(255).optional(),
       adsetId: z.string().max(100).optional(), adsetName: z.string().max(255).optional(),
       adId: z.string().max(100).optional(), adName: z.string().max(255).optional(),
       platformCreativeId: z.string().max(100).optional(), platformAssetId: z.string().max(255).optional(),
-      status: z.enum(['active', 'paused', 'removed', 'unknown']).optional(),
-    }).optional(),
+      status: z.enum(['active', 'paused', 'unknown']).optional(),
+    }).optional().describe('Needs the ad_links:write scope as well.'),
     idempotencyKey: z.string().max(100).optional(),
   },
   outputSchema: {
@@ -46,23 +47,30 @@ export default defineTool({
     fileStatus: z.string(),
     approvalStatus: z.string(),
     adLink: adLinkOut.nullable(),
+    adLinkResult: z.enum(['created', 'updated', 'unchanged', 'duplicate']).nullable().describe('duplicate: the ad already runs another asset. This asset is saved; nothing was linked.'),
   },
   annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: true },
   scope: 'creatives:write',
   handler: async (args, ctx) => {
+    if (args.adLink && !ctx.apiKey.scopes.includes('ad_links:write')) {
+      throw new ApiError('insufficient_scope', 'This API key does not have the "ad_links:write" scope, which adLink needs.', {
+        hint: 'Ask the owner to add that scope in Settings, API keys, or send the file without adLink. Nothing was saved.',
+      });
+    }
     const { idempotencyKey, ...request } = args;
     const caller = { businessId: ctx.businessId, userId: realUserId(ctx.userId), keyId: ctx.apiKey.id };
     const { value, replayed } = await withIdempotency(ctx.apiKey.id, idempotencyKey, 'upload_asset', request, async () => {
       const { audit: _audit, ...res } = await uploadAssetFromUrl(caller, request as Parameters<typeof uploadAssetFromUrl>[1]);
       return res as unknown as Record<string, unknown>;
     });
-    const out = value as unknown as { creativeId: string; result: 'created' | 'updated' | 'duplicate'; name: string; mediaType: string | null; sizeBytes: number | null; fileStatus: string; approvalStatus: string; adLink: z.infer<typeof adLinkOut> | null };
+    const out = value as unknown as { creativeId: string; result: 'created' | 'updated' | 'duplicate'; name: string; mediaType: string | null; sizeBytes: number | null; fileStatus: string; approvalStatus: string; adLink: z.infer<typeof adLinkOut> | null; adLinkResult: 'created' | 'updated' | 'unchanged' | 'duplicate' | null };
     const summary = replayed ? `Same request as before (idempotencyKey): returning the first answer, asset ${out.creativeId}.`
       : out.result === 'created' ? `Added "${out.name}" as asset ${out.creativeId}.`
       : out.result === 'duplicate' ? `That file is already in Stato for this client: asset ${out.creativeId}. Nothing new was added.`
       : `Updated asset ${out.creativeId}.`;
+    const note = out.adLinkResult === 'duplicate' ? ` That ad already runs another asset (${out.adLink?.creativeId}), so the ad was not linked; unlink it first if it changed asset.` : '';
     return {
-      summary,
+      summary: summary + note,
       data: { ...out, replayed },
       audit: { after: { creativeId: out.creativeId, result: out.result, replayed }, recordsTouched: [{ type: 'creative', id: out.creativeId }] },
     };

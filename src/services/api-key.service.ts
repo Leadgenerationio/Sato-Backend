@@ -7,7 +7,13 @@ import { AppError } from '../utils/errors.js';
 
 // Public API keys (plan phase 2). Keys look like `stk_<43 base64url chars>`;
 // only their SHA-256 is stored. Every key is limited to the scopes below.
-export const API_SCOPES = ['clients:read', 'ad_accounts:write', 'creatives:read', 'creatives:write', 'landing_pages:write'] as const;
+// The first five are the original public API; the rest were added for the MCP
+// connector (spec v1.0 §3). Scopes are only ever added, never renamed, so
+// existing keys keep working.
+export const API_SCOPES = [
+  'clients:read', 'ad_accounts:write', 'creatives:read', 'creatives:write', 'landing_pages:write',
+  'campaigns:read', 'ad_accounts:read', 'uploads:write', 'ad_links:write', 'creatives:archive',
+] as const;
 export type ApiScope = (typeof API_SCOPES)[number];
 
 export const KEY_MARKER = 'stk_';

@@ -65,7 +65,9 @@ export class ApiError extends AppError {
     this.code = code;
     this.hint = extra.hint;
     this.fields = extra.fields;
-    this.retryable = extra.retryable ?? (code === 'rate_limited');
+    // A rate limit and an unreachable source URL are transient. internal_error is
+    // not: repeating a crashing call rarely helps, so the bot reports the requestId.
+    this.retryable = extra.retryable ?? (code === 'rate_limited' || code === 'source_unreachable');
     this.details = extra.details;
   }
 }

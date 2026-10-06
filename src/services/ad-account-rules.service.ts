@@ -1,13 +1,15 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, ne, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { clients } from '../db/schema/clients.js';
 import { campaigns } from '../db/schema/campaigns.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
+import { creativeAdLinks } from '../db/schema/creative-ad-links.js';
 import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { canonicalPlatformSql, normaliseAccountId } from '../utils/catchr-platform.js';
 import { normalisePlatform } from './ad-account-links.service.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
 import { ApiError, moveRequiresConfirm, campaignClientMismatch } from '../utils/api-error.js';
+import { isUniqueViolation } from '../utils/pg-errors.js';
 
 // MCP spec v1.0 section 2.1, ad-account side: the account decides the client,
 // a move needs confirmation, and a campaign must belong to the client.
@@ -45,33 +47,64 @@ export async function resolveCampaignRef(ref: string): Promise<{ id: string; nam
 export interface AccountOwner {
   platform: string;
   accountId: string;
-  client: { id: string; name: string; currency: string | null };
+  client: { clientId: string; name: string; currency: string | null };
   /** The campaign saved on the ad-account link, used only as a default. */
-  campaign: { id: string; name: string } | null;
-  /** Every campaign whose ad-account links include this account. */
+  campaign: { campaignId: string; name: string } | null;
+  /** Every campaign this account feeds: the one on the link, the traffic sources that list it, and the ads recorded on it. */
   campaigns: Array<{ campaignId: string; name: string }>;
   /** True when the account feeds more than one campaign: the caller must send campaignId. */
   campaignRequired: boolean;
 }
 
+// creative_ad_links.platform uses the creatives vocabulary, client_ad_accounts the Catchr one.
+const AD_LINK_PLATFORM: Record<string, string> = { 'facebook-ads': 'meta', 'google-ads': 'google', 'tik-tok': 'tiktok', taboola: 'taboola' };
+
+/**
+ * Every campaign an ad account feeds, from three places: the campaign saved on
+ * the account link, the campaign-detail traffic sources that list the account
+ * (compared on the normalised ID: no act_, no dashes), and the live ad links
+ * recorded on it (where one account can feed several campaigns).
+ */
 export async function campaignsForAccount(storedPlatform: string, accountId: string): Promise<Array<{ campaignId: string; name: string }>> {
   const tsPlatform = sql.raw(`coalesce(${canonicalPlatformSql('ts.platform')}, lower(trim(ts.platform)))`);
-  const rows = (await db.execute(sql`
+  const norm = (col: string) => sql.raw(
+    `case when ${canonicalPlatformSql('ts.platform')} = 'facebook-ads' then regexp_replace(trim(${col}), '^act_', '', 'i')`
+    + ` when ${canonicalPlatformSql('ts.platform')} = 'google-ads' then replace(trim(${col}), '-', '')`
+    + ` else trim(${col}) end`,
+  );
+  const fromSources = (await db.execute(sql`
     with accs as (
-      select ts.campaign_id, ${tsPlatform} as platform, ts.account_id as acc_id
+      select ts.campaign_id, ${tsPlatform} as platform, ${norm('ts.account_id')} as acc_id
       from traffic_sources ts
       where ts.is_active = true and ts.platform is not null and ts.account_id is not null and ts.account_id <> ''
       union
-      select ts.campaign_id, ${tsPlatform} as platform, jsonb_array_elements_text(ts.account_ids) as acc_id
-      from traffic_sources ts
+      select ts.campaign_id, ${tsPlatform} as platform, ${norm('a.acc')} as acc_id
+      from traffic_sources ts, jsonb_array_elements_text(ts.account_ids) as a(acc)
       where ts.is_active = true and ts.platform is not null
     )
     select distinct c.id as campaign_id, c.name as campaign_name
     from accs a join campaigns c on c.id = a.campaign_id
     where a.platform = ${storedPlatform} and a.acc_id = ${accountId}
-    order by c.name
   `)) as unknown as Array<{ campaign_id: string; campaign_name: string }>;
-  return rows.map((r) => ({ campaignId: r.campaign_id, name: r.campaign_name }));
+
+  const found = new Map<string, string>(fromSources.map((r) => [r.campaign_id, r.campaign_name]));
+
+  const [own] = await db.select({ businessId: clientAdAccounts.businessId, campaignId: clientAdAccounts.campaignId, campaignName: campaigns.name })
+    .from(clientAdAccounts).leftJoin(campaigns, eq(campaigns.id, clientAdAccounts.campaignId))
+    .where(and(eq(clientAdAccounts.platform, storedPlatform), eq(clientAdAccounts.accountId, accountId)));
+  if (own?.campaignId) found.set(own.campaignId, own.campaignName ?? '');
+
+  const linkPlatform = AD_LINK_PLATFORM[storedPlatform];
+  if (own && linkPlatform) {
+    const fromLinks = await db.selectDistinct({ campaignId: creativeAdLinks.campaignId, name: campaigns.name })
+      .from(creativeAdLinks).innerJoin(campaigns, eq(campaigns.id, creativeAdLinks.campaignId))
+      .where(and(
+        eq(creativeAdLinks.businessId, own.businessId), eq(creativeAdLinks.platform, linkPlatform),
+        eq(creativeAdLinks.platformAccountId, accountId), ne(creativeAdLinks.status, 'removed'),
+      ));
+    for (const r of fromLinks) if (r.campaignId) found.set(r.campaignId, r.name);
+  }
+  return [...found].map(([campaignId, name]) => ({ campaignId, name })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** find_client_by_ad_account. An account no client owns is account_not_linked, never a guess. */
@@ -93,8 +126,8 @@ export async function findAccountOwner(businessId: string, platformInput: string
   return {
     platform: toSpecPlatform(stored),
     accountId,
-    client: { id: row.clientId, name: row.name, currency: row.currency ?? null },
-    campaign: row.campaignId ? { id: row.campaignId, name: row.campaignName ?? '' } : null,
+    client: { clientId: row.clientId, name: row.name, currency: row.currency ?? null },
+    campaign: row.campaignId ? { campaignId: row.campaignId, name: row.campaignName ?? '' } : null,
     campaigns: list,
     campaignRequired: list.length > 1,
   };
@@ -156,13 +189,14 @@ export async function linkAdAccount(caller: Caller, input: LinkInput): Promise<L
     await assertCampaignBelongsToClient(client.id, campaign.id);
   }
 
-  return db.transaction(async (tx) => {
+  const attempt = () => db.transaction(async (tx) => {
     const [existing] = await tx.select().from(clientAdAccounts)
       .where(and(eq(clientAdAccounts.platform, stored), eq(clientAdAccounts.accountId, accountId)));
     if (existing && existing.businessId !== caller.businessId) {
-      throw new ApiError('account_client_mismatch', 'That ad account is linked by another business.', { hint: 'Nothing was saved.' });
+      // Do not say the account exists elsewhere.
+      throw new ApiError('not_found', 'That ad account is not available to link.', { hint: 'Ask the owner. Nothing was saved.' });
     }
-    const out = (row: { clientId: string; campaignId: string | null; movedFromClientId: string | null; movedAt: Date | null }, kind: LinkResultKind, before: LinkResult['before']): LinkResult => ({
+    const out = async (row: { clientId: string; campaignId: string | null; movedFromClientId: string | null; movedAt: Date | null }, kind: LinkResultKind, before: LinkResult['before']): Promise<LinkResult> => ({
       result: kind,
       before,
       link: {
@@ -171,7 +205,8 @@ export async function linkAdAccount(caller: Caller, input: LinkInput): Promise<L
         clientId: row.clientId,
         clientName: client.name,
         campaignId: row.campaignId,
-        campaignName: campaign && row.campaignId === campaign.id ? campaign.name : null,
+        campaignName: !row.campaignId ? null : campaign && row.campaignId === campaign.id ? campaign.name
+          : (await tx.select({ name: campaigns.name }).from(campaigns).where(eq(campaigns.id, row.campaignId)).limit(1))[0]?.name ?? null,
         movedFromClientId: row.movedFromClientId,
         movedAt: row.movedAt ? row.movedAt.toISOString() : null,
       },
@@ -183,7 +218,7 @@ export async function linkAdAccount(caller: Caller, input: LinkInput): Promise<L
         businessId: caller.businessId, platform: stored, accountId, accountName: input.accountName ?? null,
         clientId: client.id, campaignId: campaign?.id ?? null, currency: input.currency ?? null, ...who,
       }).returning();
-      return out(row!, 'created', null);
+      return await out(row!, 'created', null);
     }
 
     const before = { clientId: existing.clientId, campaignId: existing.campaignId, accountName: existing.accountName, currency: existing.currency };
@@ -196,17 +231,29 @@ export async function linkAdAccount(caller: Caller, input: LinkInput): Promise<L
         clientId: client.id, campaignId: campaign?.id ?? null, movedFromClientId: existing.clientId, movedAt: new Date(),
         accountName: input.accountName ?? existing.accountName, currency: input.currency ?? existing.currency, updatedAt: new Date(), ...who,
       }).where(eq(clientAdAccounts.id, existing.id)).returning();
-      return out(row!, 'moved', before);
+      return await out(row!, 'moved', before);
     }
 
-    const sameCampaign = (existing.campaignId ?? null) === (campaign?.id ?? existing.campaignId ?? null);
+    // undefined keeps the campaign on the link, an explicit null clears it.
+    const nextCampaignId = input.campaignId === null ? null : campaign ? campaign.id : existing.campaignId;
+    const sameCampaign = (existing.campaignId ?? null) === (nextCampaignId ?? null);
     const nameChange = input.accountName != null && input.accountName !== existing.accountName;
     const currencyChange = input.currency != null && input.currency !== existing.currency;
-    if (sameCampaign && !nameChange && !currencyChange) return out(existing, 'unchanged', before);
+    if (sameCampaign && !nameChange && !currencyChange) return await out(existing, 'unchanged', before);
     const [row] = await tx.update(clientAdAccounts).set({
-      campaignId: campaign ? campaign.id : existing.campaignId,
+      campaignId: nextCampaignId,
       accountName: input.accountName ?? existing.accountName, currency: input.currency ?? existing.currency, updatedAt: new Date(), ...who,
     }).where(eq(clientAdAccounts.id, existing.id)).returning();
-    return out(row!, 'updated', before);
+    return await out(row!, 'updated', before);
   });
+
+  try {
+    return await attempt();
+  } catch (err) {
+    // Two calls for a new account at once: the unique index lets one insert win.
+    // The transaction is gone, so read again; the winner's row is now there and
+    // this call settles on it (unchanged, updated, or the move rule).
+    if (!isUniqueViolation(err)) throw err;
+    return attempt();
+  }
 }
