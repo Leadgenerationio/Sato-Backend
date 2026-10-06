@@ -26,7 +26,7 @@ export default defineTool({
       const { page, created } = await createLandingPage(ctx.businessId, args as { clientId: string; url: string; title?: string; campaignId?: string });
       return {
         summary: created ? `Saved the landing page ${page.url}.` : `That landing page is already saved (${page.id}).`,
-        data: { result: created ? 'created' : 'existing', landingPage: { id: page.id, clientId: page.clientId, campaignId: page.campaignId, url: page.url, normalisedUrl: page.normalisedUrl, title: page.title, status: page.status } },
+        data: { result: (created ? 'created' : 'existing') as 'created' | 'existing', landingPage: { id: page.id, clientId: page.clientId, campaignId: page.campaignId, url: page.url, normalisedUrl: page.normalisedUrl, title: page.title, status: page.status } },
         audit: { recordsTouched: [{ type: 'landing_page', id: page.id }] },
       };
     } catch (err) { return toApiError(err); }

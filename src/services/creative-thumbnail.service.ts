@@ -60,15 +60,21 @@ interface RunResult { code: number; stdout: string; stderr: string; timedOut: bo
 
 function runCapture(cmd: string, args: string[], timeoutMs: number): Promise<RunResult> {
   return new Promise((resolve) => {
-    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    // detached = its own process group, so a timeout kills the tool and anything it started.
+    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     let stdout = '';
     let stderr = '';
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; p.kill('SIGKILL'); }, timeoutMs);
+    let done = false;
+    const finish = (r: RunResult) => { if (!done) { done = true; clearTimeout(timer); resolve(r); } };
+    const timer = setTimeout(() => {
+      // Return at once; do not wait for the pipes to close (a hung child can hold them open).
+      try { if (p.pid) process.kill(-p.pid, 'SIGKILL'); } catch { try { p.kill('SIGKILL'); } catch { /* already gone */ } }
+      finish({ code: -1, stdout, stderr, timedOut: true, missing: false });
+    }, timeoutMs);
     p.stdout.on('data', (d) => { stdout += String(d); });
     p.stderr.on('data', (d) => { stderr += String(d).slice(-2000); });
-    p.on('error', () => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: 'spawn failed', timedOut: false, missing: true }); });
-    p.on('close', (code) => { clearTimeout(timer); resolve({ code: code ?? -1, stdout, stderr, timedOut, missing: false }); });
+    p.on('error', () => finish({ code: -1, stdout, stderr: 'spawn failed', timedOut: false, missing: true }));
+    p.on('close', (code) => finish({ code: code ?? -1, stdout, stderr, timedOut: false, missing: false }));
   });
 }
 
