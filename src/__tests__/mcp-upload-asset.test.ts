@@ -48,7 +48,7 @@ const link = (clientId: string, accountId: string, campaignId?: string) =>
 beforeAll(async () => {
   const login = await request(app).post('/api/v1/auth/login').send({ email: 'owner@stato.app', password: 'owner123' });
   owner = login.body.data.tokens.accessToken;
-  ({ key, id: keyId } = await makeKey(['clients:read', 'ad_accounts:write', 'creatives:read', 'creatives:write']));
+  ({ key, id: keyId } = await makeKey(['clients:read', 'ad_accounts:write', 'creatives:read', 'creatives:write', 'ad_links:write']));
   readKey = (await makeKey(['creatives:read'])).key;
   const cs = await db.insert(clients).values([
     { businessId: BIZ, companyName: `Yash Test UP A ${tag}`, status: 'active' },
@@ -169,7 +169,7 @@ describe('upload_asset', () => {
 describe('upload_asset with adLink in the same call', () => {
   it('records the ad; a repeat with the same platform creative ID updates instead of copying', async () => {
     files.set(url('ad1'), { bytes: png('ad1'), type: 'image/png' });
-    const r = await call(key, base('ad1', { adLink: { campaignId: '120200000001', adsetId: '120200000002', adId: `ad${tag}`, platformCreativeId: `pc${tag}` } }));
+    const r = await call(key, base('ad1', { adLink: { platformCampaignId: '120200000001', adsetId: '120200000002', adId: `ad${tag}`, platformCreativeId: `pc${tag}` } }));
     expect(r.structuredContent.result).toBe('created');
     expect(r.structuredContent.adLink).toMatchObject({ adId: `ad${tag}`, platformCreativeId: `pc${tag}`, accountId: `${ACC}1`, platform: 'meta', source: 'mcp' });
     const again = await call(key, base('ad1', { headline: 'New headline', adLink: { adId: `ad${tag}`, platformCreativeId: `pc${tag}` } }));
@@ -179,12 +179,20 @@ describe('upload_asset with adLink in the same call', () => {
   it('keeps the asset when the ad is already linked elsewhere, and says so', async () => {
     files.set(url('ad2'), { bytes: png('ad2'), type: 'image/png' });
     const r = await call(key, base('ad2', { adLink: { adId: `ad${tag}`, platformCreativeId: `pc2${tag}` } }));
-    expect(r.isError).toBe(true);
-    expect(r.structuredContent.code).toBe('duplicate');
-    expect(r.structuredContent.details).toMatchObject({ assetSaved: true });
-    const [saved] = await db.select().from(creatives).where(eq(creatives.id, r.structuredContent.details.creativeId));
+    expect(r.isError).toBeUndefined();
+    expect(r.structuredContent).toMatchObject({ result: 'created', adLinkResult: 'duplicate' });
+    const [saved] = await db.select().from(creatives).where(eq(creatives.id, r.structuredContent.creativeId));
     expect(saved).toBeDefined();
-    expect(r.structuredContent.hint).toContain('link_ad_platform_ids');
+    expect(r.structuredContent.adLink.creativeId).not.toBe(r.structuredContent.creativeId); // the asset that already holds the ad
+    expect(r.content[0]!.text).toContain('unlink it first');
+  });
+  it('adLink also needs the ad_links:write scope, and nothing is saved without it', async () => {
+    const noLinks = (await makeKey(['clients:read', 'creatives:write'])).key;
+    files.set(url('ad4'), { bytes: png('ad4'), type: 'image/png' });
+    const r = await call(noLinks, base('ad4', { adLink: { adId: `ad9${tag}` } }));
+    expect(r.structuredContent.code).toBe('insufficient_scope');
+    expect(r.structuredContent.message).toContain('ad_links:write');
+    expect(await db.select().from(creatives).where(eq(creatives.name, `ad4-${tag}`))).toHaveLength(0);
   });
   it('adLink needs an ad account', async () => {
     files.set(url('ad3'), { bytes: png('ad3'), type: 'image/png' });

@@ -27,7 +27,8 @@ export interface UploadAssetInput {
   bodyText?: string;
   landingPageUrl?: string;
   tags?: string[];
-  adLink?: Omit<AdLinkInput, 'creativeId' | 'platform' | 'accountId' | 'landingPageUrl'>;
+  /** The ad's own IDs. The Stato campaign is the top-level campaignId, not repeated here. */
+  adLink?: Omit<AdLinkInput, 'creativeId' | 'platform' | 'accountId' | 'landingPageUrl' | 'campaignId'>;
 }
 
 export interface UploadAssetResult {
@@ -39,6 +40,8 @@ export interface UploadAssetResult {
   fileStatus: string;
   approvalStatus: string;
   adLink: AdLinkDto | null;
+  /** What happened to the ad link; duplicate = the ad already runs another asset (the asset itself is saved). */
+  adLinkResult: 'created' | 'updated' | 'unchanged' | 'duplicate' | null;
   audit: { before?: unknown; after?: unknown };
 }
 
@@ -144,10 +147,12 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
 
   // 5. Optional ad link in the same call. The asset is kept if the link is refused.
   let adLink: AdLinkDto | null = null;
+  let adLinkResult: UploadAssetResult['adLinkResult'] = null;
   if (input.adLink) {
     try {
-      const linked = await linkAdPlatformIds({ ...caller, source: 'mcp' }, { ...input.adLink, creativeId: creative.id, platform, accountId, landingPageUrl: input.landingPageUrl });
+      const linked = await linkAdPlatformIds({ ...caller, source: 'mcp' }, { ...input.adLink, creativeId: creative.id, platform, accountId, campaignId: campaignId ?? undefined, landingPageUrl: input.landingPageUrl });
       adLink = linked.link;
+      adLinkResult = linked.result;
     } catch (err) {
       if (err instanceof ApiError) {
         throw new ApiError(err.code, err.message, {
@@ -169,6 +174,7 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
     fileStatus: creative.fileStatus,
     approvalStatus: creative.status,
     adLink,
+    adLinkResult,
     audit: { after: { creativeId: creative.id, clientId: client.id, campaignId, result } },
   };
 }
