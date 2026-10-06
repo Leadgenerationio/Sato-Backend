@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ApiError } from '../utils/api-error.js';
 import { buildErrorBody } from '../utils/error-body.js';
@@ -52,4 +53,34 @@ export function createStatoMcpServer(ctx: ToolContext, tools: StatoTool[], onAud
     );
   }
   return server;
+}
+
+/**
+ * Bad tool input must come back in the shared error shape (code, fields,
+ * requestId), not as the SDK's own "MCP error -32602" text. The route calls
+ * this before the SDK sees a tools/call; it answers with a JSON-RPC result
+ * (isError: true, structuredContent) when the arguments do not match the
+ * tool's input schema, and returns null when the call may go on.
+ */
+export function rejectInvalidToolCall(tools: StatoTool[], message: unknown, requestId: string | null) {
+  const m = message as { jsonrpc?: string; id?: string | number | null; method?: string; params?: { name?: string; arguments?: unknown } } | null;
+  if (!m || m.method !== 'tools/call' || typeof m.params?.name !== 'string') return null;
+  const tool = tools.find((t) => t.name === m.params!.name);
+  if (!tool) return null; // unknown tool: the SDK's own error is right
+  const parsed = z.object(tool.inputSchema).safeParse(m.params.arguments ?? {});
+  if (parsed.success) return null;
+  const fields = parsed.error.issues.map((i) => ({ field: i.path.join('.') || '(input)', message: i.message }));
+  const err = new ApiError('validation_failed', `Invalid input for ${tool.name}`, {
+    fields,
+    hint: `${fields[0]!.field}: ${fields[0]!.message}`,
+  });
+  const { body } = buildErrorBody(err, requestId ?? undefined);
+  const hint = typeof body.hint === 'string' ? `\nHint: ${body.hint}` : '';
+  return {
+    jsonrpc: '2.0' as const,
+    id: m.id ?? null,
+    result: { isError: true, content: [{ type: 'text', text: `${String(body.message)}${hint}` }], structuredContent: body },
+    errorCode: 'validation_failed',
+    args: m.params.arguments,
+  };
 }

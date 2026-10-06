@@ -10,7 +10,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import app from '../index.js';
 import { db } from '../config/database.js';
 import { apiKeys } from '../db/schema/api-keys.js';
-import { createStatoMcpServer, type AuditEntry } from '../mcp/server.js';
+import { createStatoMcpServer, rejectInvalidToolCall, type AuditEntry } from '../mcp/server.js';
 import { loadTools } from '../mcp/tools/registry.js';
 import { defineTool, type ToolContext } from '../mcp/types.js';
 import { ApiError } from '../utils/api-error.js';
@@ -178,5 +178,36 @@ describe('tool loader', () => {
   });
   it('the real tools folder loads and includes whoami', async () => {
     expect((await loadTools()).map((t) => t.name)).toContain('whoami');
+  });
+});
+
+describe('bad tool input and batches (review of #73)', () => {
+  const needsId = defineTool({
+    name: 'needs_id', title: 'Needs ID', description: 'x'.repeat(50),
+    inputSchema: { creativeId: z.string().uuid(), note: z.string().optional() }, outputSchema: {},
+    annotations: { readOnlyHint: true }, handler: async () => ({ summary: 'ok', data: {} }),
+  });
+  const call = (args: unknown) => ({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'needs_id', arguments: args } });
+
+  it('a missing or malformed argument is validation_failed with the fields at fault and the requestId', () => {
+    const r = rejectInvalidToolCall([needsId], call({ creativeId: 'not-a-uuid' }), 'req-9');
+    expect(r).not.toBeNull();
+    expect(r!.id).toBe(9);
+    expect(r!.result.isError).toBe(true);
+    expect(r!.result.structuredContent).toMatchObject({ status: 'error', code: 'validation_failed', requestId: 'req-9', fields: [{ field: 'creativeId' }] });
+    expect(r!.result.content[0]!.text).toContain('Invalid input for needs_id');
+    expect(rejectInvalidToolCall([needsId], call({}), 'req-9')!.result.structuredContent).toMatchObject({ fields: [{ field: 'creativeId' }] });
+  });
+
+  it('lets a valid call, an unknown tool and other methods through to the SDK', () => {
+    expect(rejectInvalidToolCall([needsId], call({ creativeId: '6f1c1f0a-8f27-4c43-9d3a-1c9d3a0b2b11' }), 'r')).toBeNull();
+    expect(rejectInvalidToolCall([needsId], { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'nope', arguments: {} } }, 'r')).toBeNull();
+    expect(rejectInvalidToolCall([needsId], { jsonrpc: '2.0', id: 1, method: 'tools/list' }, 'r')).toBeNull();
+  });
+
+  it('refuses a JSON-RPC batch, so one request is one audit entry', async () => {
+    const res = await rpc(readKey, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }, { jsonrpc: '2.0', id: 2, method: 'tools/list' }]);
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toContain('Batch');
   });
 });
