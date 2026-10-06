@@ -5,6 +5,7 @@ import { env } from './config/env.js';
 import { logger } from './utils/logger.js';
 import { generalLimiter } from './middleware/rate-limit.middleware.js';
 import { errorHandler } from './middleware/error.middleware.js';
+import { requestId } from './middleware/request-id.middleware.js';
 import { router } from './routes/index.js';
 import { seedDefaultUsers } from './data/users.js';
 import { registerSchedules } from './jobs/schedules.js';
@@ -63,6 +64,7 @@ app.use(
     credentials: true,
   }),
 );
+app.use(requestId);
 app.use(helmet());
 
 // Body parsing — capture raw body for webhook routes so HMAC signature
