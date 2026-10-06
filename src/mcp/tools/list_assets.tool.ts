@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { defineTool } from '../types.js';
+import { uuidShape } from '../../utils/zod-helpers.js';
 import { listAssets } from '../../services/mcp-assets.service.js';
 
 export default defineTool({
@@ -9,9 +10,9 @@ export default defineTool({
     'Search the assets (images, videos, copy) in Stato. Use it to find an asset to use in an ad (Workflow B), for example by campaign, approvalStatus and hasAdLink = false. ' +
     'Archived assets are hidden unless includeArchived is true. Results are paged: pass nextCursor back. Then call get_asset for a download link. IDs are strings.',
   inputSchema: {
-    clientId: z.string().optional(), campaignId: z.string().optional(),
+    clientId: uuidShape().optional(), campaignId: uuidShape().optional(),
     platform: z.string().max(50).optional().describe('meta, google, tiktok or taboola.'),
-    platformAccountId: z.string().max(100).optional(), platformAdId: z.string().max(100).optional(), landingPageId: z.string().optional(),
+    platformAccountId: z.string().max(100).optional(), platformAdId: z.string().max(100).optional(), landingPageId: uuidShape().optional(),
     mediaType: z.enum(['image', 'video', 'copy']).optional(),
     approvalStatus: z.enum(['draft', 'sent_for_approval', 'approved', 'rejected', 'changes_requested']).optional(),
     hasAdLink: z.boolean().optional().describe('false = not yet linked to any platform ad.'),

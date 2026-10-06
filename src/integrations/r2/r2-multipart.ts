@@ -20,11 +20,12 @@ export async function createMultipart(folder: R2Folder, key: string, contentType
   return res.UploadId;
 }
 
-export async function presignUploadPart(folder: R2Folder, key: string, uploadId: string, partNumber: number, expiresInSeconds: number): Promise<string> {
+/** contentLength is signed into the URL, so the part cannot be any other size than the one create_upload promised. */
+export async function presignUploadPart(folder: R2Folder, key: string, uploadId: string, partNumber: number, expiresInSeconds: number, contentLength?: number): Promise<string> {
   requireR2();
   const { UploadPartCommand } = await import('@aws-sdk/client-s3');
   const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
-  return getSignedUrl(await getS3Client(), new UploadPartCommand({ Bucket: r2Bucket(), Key: buildKey(folder, key), UploadId: uploadId, PartNumber: partNumber }), { expiresIn: expiresInSeconds });
+  return getSignedUrl(await getS3Client(), new UploadPartCommand({ Bucket: r2Bucket(), Key: buildKey(folder, key), UploadId: uploadId, PartNumber: partNumber, ...(contentLength ? { ContentLength: contentLength } : {}) }), { expiresIn: expiresInSeconds });
 }
 
 export async function uploadPart(folder: R2Folder, key: string, uploadId: string, partNumber: number, body: Uint8Array): Promise<string> {
@@ -58,14 +59,14 @@ export async function abortMultipart(folder: R2Folder, key: string, uploadId: st
   }
 }
 
-export interface ObjectHead { sizeBytes: number; contentType: string | null }
+export interface ObjectHead { sizeBytes: number; contentType: string | null; etag: string | null }
 
 export async function headObjectInfo(folder: R2Folder, key: string): Promise<ObjectHead | null> {
   requireR2();
   const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
   try {
     const r = await (await getS3Client()).send(new HeadObjectCommand({ Bucket: r2Bucket(), Key: buildKey(folder, key) }));
-    return { sizeBytes: r.ContentLength ?? 0, contentType: r.ContentType ?? null };
+    return { sizeBytes: r.ContentLength ?? 0, contentType: r.ContentType ?? null, etag: r.ETag ?? null };
   } catch (err) {
     const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
     if (e?.name === 'NotFound' || e?.name === 'NoSuchKey' || e?.$metadata?.httpStatusCode === 404) return null;
@@ -83,6 +84,28 @@ export async function readObjectHead(folder: R2Folder, key: string, bytes: numbe
   } catch (err) {
     const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
     if (e?.name === 'NoSuchKey' || e?.$metadata?.httpStatusCode === 404) return null;
+    throw err;
+  }
+}
+
+/**
+ * Copy an object to a new key, only if the source is still the exact object that
+ * was checked (its ETag). Used to move a single-PUT upload to a key the caller
+ * never had a URL for. Returns false when the source changed or is gone.
+ */
+export async function copyObjectIfUnchanged(folder: R2Folder, fromKey: string, toKey: string, etag: string): Promise<boolean> {
+  requireR2();
+  const { CopyObjectCommand } = await import('@aws-sdk/client-s3');
+  try {
+    await (await getS3Client()).send(new CopyObjectCommand({
+      Bucket: r2Bucket(), Key: buildKey(folder, toKey),
+      CopySource: encodeURIComponent(`${r2Bucket()}/${buildKey(folder, fromKey)}`).replace(/%2F/g, '/'),
+      CopySourceIfMatch: etag,
+    }));
+    return true;
+  } catch (err) {
+    const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+    if (e?.name === 'PreconditionFailed' || e?.name === 'NoSuchKey' || e?.$metadata?.httpStatusCode === 412 || e?.$metadata?.httpStatusCode === 404) return false;
     throw err;
   }
 }

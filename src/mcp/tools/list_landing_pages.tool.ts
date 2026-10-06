@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { defineTool } from '../types.js';
+import { uuidShape } from '../../utils/zod-helpers.js';
 import { listLandingPages } from '../../services/creative-library.service.js';
 
 export default defineTool({
@@ -7,7 +8,7 @@ export default defineTool({
   title: 'Find landing pages',
   description: 'List the saved landing pages for a client, with how many assets use each. Use it before add_landing_page or attach_landing_page. IDs are strings.',
   inputSchema: {
-    clientId: z.string().optional(),
+    clientId: uuidShape().optional(),
     q: z.string().max(100).optional().describe('Part of the URL or title.'),
     includeArchived: z.boolean().optional(),
   },

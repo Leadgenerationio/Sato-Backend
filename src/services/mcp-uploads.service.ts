@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq, inArray, lt } from 'drizzle-orm';
+import { and, count, eq, inArray, isNull, lt } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { uploads, type UploadRow } from '../db/schema/uploads.js';
+import { creatives } from '../db/schema/creatives.js';
 import { getSignedUploadUrl, hashObject, isR2Configured, deleteFile, ObjectTooLargeError } from '../integrations/r2/r2-client.js';
-import { abortMultipart, completeMultipart, createMultipart, headObjectInfo, presignUploadPart, readObjectHead, type CompletedPart } from '../integrations/r2/r2-multipart.js';
+import { abortMultipart, completeMultipart, copyObjectIfUnchanged, createMultipart, headObjectInfo, presignUploadPart, readObjectHead, type CompletedPart } from '../integrations/r2/r2-multipart.js';
 import { ALLOWED_MIME, IMAGE_MAX_BYTES, SNIFF_BYTES, VIDEO_MAX_BYTES, sniffMedia } from '../utils/sniff-media.js';
 import { ApiError } from '../utils/api-error.js';
 import { logger } from '../utils/logger.js';
@@ -19,9 +20,15 @@ const SINGLE_MAX_BYTES = 64 * MiB;
 const PART_BYTES = 64 * MiB;
 const MAX_PARTS = 9000;
 const URL_TTL_SECONDS = 6 * 60 * 60;
-/** Hash inside complete_upload up to this size; larger files hash in the background. */
-const INLINE_HASH_MAX_BYTES = 1024 * MiB;
+/** Hash inside complete_upload up to this size; larger files hash in the background (a 1 GB hash can outlast an MCP client's timeout). */
+const INLINE_HASH_MAX_BYTES = 100 * MiB;
 const PROCESSING_TIMEOUT_MS = 45 * 60 * 1000;
+/** An upload that is ready but never used by upload_asset is removed after this. */
+const READY_UNUSED_TTL_MS = 24 * 60 * 60 * 1000;
+/** Uploads a business can have open (created or uploading) at once. */
+const MAX_OPEN_UPLOADS = 50;
+/** A single-PUT file is copied here once checked: a key the caller never had a URL for. */
+const VERIFIED_PREFIX = 'verified-';
 const SHA256 = /^[0-9a-f]{64}$/i;
 
 const safeName = (n: string) => n.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80) || 'file';
@@ -59,6 +66,12 @@ export async function createUpload(caller: Caller, input: CreateUploadInput): Pr
     throw new ApiError('validation_failed', 'sha256 must be 64 hex characters.', { fields: [{ field: 'sha256', message: '64 hex characters' }] });
   }
   if (!isR2Configured()) throw new ApiError('internal_error', 'File storage is not configured.', { retryable: false });
+  const [open] = await db.select({ n: count() }).from(uploads).where(and(eq(uploads.businessId, caller.businessId), inArray(uploads.status, ['created', 'uploading'])));
+  if ((open?.n ?? 0) >= MAX_OPEN_UPLOADS) {
+    throw new ApiError('rate_limited', `There are already ${MAX_OPEN_UPLOADS} uploads open for this business.`, {
+      retryable: true, hint: 'Finish them with complete_upload, or wait until they expire (6 hours), then start this one again.',
+    });
+  }
 
   const key = `${Date.now()}-${randomUUID().slice(0, 8)}-${safeName(input.filename)}`;
   const mode: 'single' | 'multipart' = input.sizeBytes <= SINGLE_MAX_BYTES ? 'single' : 'multipart';
@@ -67,14 +80,15 @@ export async function createUpload(caller: Caller, input: CreateUploadInput): Pr
   let result: Pick<CreateUploadResult, 'uploadUrl' | 'headers' | 'partSize' | 'parts'>;
 
   if (mode === 'single') {
-    result = { uploadUrl: await getSignedUploadUrl({ folder: 'creatives', key, contentType: input.contentType, expiresInSeconds: URL_TTL_SECONDS }), headers: { 'Content-Type': input.contentType }, partSize: null, parts: null };
+    result = { uploadUrl: await getSignedUploadUrl({ folder: 'creatives', key, contentType: input.contentType, contentLength: input.sizeBytes, expiresInSeconds: URL_TTL_SECONDS }), headers: { 'Content-Type': input.contentType, 'Content-Length': String(input.sizeBytes) }, partSize: null, parts: null };
   } else {
     const partCount = Math.ceil(input.sizeBytes / PART_BYTES);
     if (partCount > MAX_PARTS) throw new ApiError('file_too_large', 'That file needs more parts than storage allows.');
     multipartId = await createMultipart('creatives', key, input.contentType);
     const parts: NonNullable<CreateUploadResult['parts']> = [];
     for (let n = 1; n <= partCount; n++) {
-      parts.push({ partNumber: n, url: await presignUploadPart('creatives', key, multipartId, n, URL_TTL_SECONDS), bytes: n < partCount ? PART_BYTES : input.sizeBytes - PART_BYTES * (partCount - 1) });
+      const bytes = n < partCount ? PART_BYTES : input.sizeBytes - PART_BYTES * (partCount - 1);
+      parts.push({ partNumber: n, url: await presignUploadPart('creatives', key, multipartId, n, URL_TTL_SECONDS, bytes), bytes });
     }
     result = { uploadUrl: null, headers: null, partSize: PART_BYTES, parts };
   }
@@ -131,6 +145,22 @@ export async function completeUpload(caller: Caller, uploadId: string, parts?: C
   const [claimed] = await db.update(uploads).set({ status: 'processing', updatedAt: new Date() }).where(and(eq(uploads.id, row.id), eq(uploads.status, 'uploading'))).returning();
   if (!claimed) return statusOf((await loadUpload(caller, uploadId)));
 
+  try {
+    return await verifyClaimed(caller, row, parts);
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    // Storage or the database failed in a way that says nothing about the file: keep the file and let the caller retry.
+    logger.error({ err, uploadId: row.id }, 'complete_upload failed unexpectedly; upload left retryable');
+    await db.update(uploads).set({ status: 'uploading', updatedAt: new Date() }).where(and(eq(uploads.id, row.id), eq(uploads.status, 'processing')));
+    throw new ApiError('internal_error', 'Storage could not be reached just now. The file was not removed.', {
+      retryable: true, hint: 'Call complete_upload again with the same arguments.',
+    });
+  }
+}
+
+async function verifyClaimed(caller: Caller, start: UploadRow, parts?: CompletedPart[]): Promise<UploadStatus> {
+  let row = start;
+  const uploadId = row.id;
   if (row.mode === 'multipart') {
     try {
       await completeMultipart('creatives', row.r2Key, row.multipartUploadId!, parts!);
@@ -140,6 +170,7 @@ export async function completeUpload(caller: Caller, uploadId: string, parts?: C
         await db.update(uploads).set({ status: 'failed', error: 'The multipart upload no longer exists', updatedAt: new Date() }).where(eq(uploads.id, row.id));
         throw new ApiError('upload_incomplete', 'Storage no longer has this upload.', { hint: 'Start again with create_upload.' });
       }
+      if (!['InvalidPart', 'InvalidPartOrder', 'EntityTooSmall', 'MalformedXML'].includes(name)) throw err; // not about the parts: retry as is
       // Missing or too-small parts: let the caller fix it and try again.
       await db.update(uploads).set({ status: 'uploading', updatedAt: new Date() }).where(eq(uploads.id, row.id));
       throw new ApiError('upload_incomplete', 'Some parts are missing, wrong or too small.', {
@@ -160,6 +191,23 @@ export async function completeUpload(caller: Caller, uploadId: string, parts?: C
       fields: [{ field: 'sizeBytes', message: 'Does not match the uploaded file' }], hint: 'Start again with create_upload and the real size.',
     });
   }
+
+  // A single-PUT URL stays valid for hours and the caller holds it. Copy the checked object (only if it is still the
+  // exact one just measured) to a key nobody has a URL for, and work on that copy. A multipart upload id is consumed
+  // by completing it, so it needs no copy.
+  if (row.mode === 'single' && !row.r2Key.startsWith(VERIFIED_PREFIX)) {
+    const finalKey = `${VERIFIED_PREFIX}${randomUUID()}-${safeName(row.filename)}`;
+    if (!head.etag) throw new Error('Storage did not return an ETag');
+    if (!(await copyObjectIfUnchanged('creatives', row.r2Key, finalKey, head.etag))) {
+      await db.update(uploads).set({ status: 'uploading', updatedAt: new Date() }).where(eq(uploads.id, row.id));
+      throw new ApiError('upload_incomplete', 'The file changed while it was being checked.', { retryable: true, hint: 'Do not send it again. Call complete_upload again.' });
+    }
+    const oldKey = row.r2Key;
+    await db.update(uploads).set({ r2Key: finalKey, updatedAt: new Date() }).where(eq(uploads.id, row.id));
+    row = { ...row, r2Key: finalKey };
+    await deleteFile('creatives', oldKey).catch((err: unknown) => logger.warn({ err, uploadId: row.id }, 'Could not remove the original single-PUT object'));
+  }
+
   const sniffed = sniffMedia((await readObjectHead('creatives', row.r2Key, SNIFF_BYTES)) ?? new Uint8Array(0));
   if (!sniffed || sniffed.mediaType !== (row.contentType ?? '').split('/')[0]) {
     await failUpload(row, 'The file content is not a supported image or video');
@@ -177,14 +225,14 @@ export async function completeUpload(caller: Caller, uploadId: string, parts?: C
     }
     return statusOf(done);
   }
-  // Very large file: the hash is computed by the background worker.
+  // Large file: the hash is computed by the background worker.
   const { mediaQueue } = await import('../jobs/queue.js');
-  mediaQueue?.add('process-upload', { uploadId: row.id }, { attempts: 2, removeOnComplete: 200, removeOnFail: 200 })
+  mediaQueue?.add('process-upload', { uploadId: row.id }, { attempts: 3, backoff: { type: 'exponential', delay: 30_000 }, removeOnComplete: 200, removeOnFail: 200 })
     .catch((err: unknown) => logger.warn({ err, uploadId: row.id }, 'Could not queue upload processing'));
   return statusOf(await loadUpload(caller, uploadId));
 }
 
-/** Real SHA-256 of the stored file. Safe to run again: it only acts on a processing upload. */
+/** Real SHA-256 of the stored file. Safe to run again: it only acts on a processing upload. Only a real verification failure removes the file; any other error is rethrown so the job retries. */
 export async function processUpload(uploadId: string): Promise<'ready' | 'failed' | 'skipped'> {
   const [row] = await db.select().from(uploads).where(eq(uploads.id, uploadId));
   if (!row || row.status !== 'processing') return 'skipped';
@@ -196,9 +244,9 @@ export async function processUpload(uploadId: string): Promise<'ready' | 'failed
     return 'ready';
   } catch (err) {
     if (err instanceof ObjectTooLargeError) { await failUpload(row, 'The stored file is larger than declared'); return 'failed'; }
-    logger.error({ err, uploadId }, 'Upload processing failed');
-    await failUpload(row, 'Processing failed');
-    return 'failed';
+    // A storage or database error says nothing about the file: keep it and let the job retry (or the caller call again).
+    logger.error({ err, uploadId }, 'Upload processing hit an error; the file is kept for a retry');
+    throw err;
   }
 }
 
@@ -215,8 +263,9 @@ export async function getReadyUpload(caller: Caller, uploadId: string): Promise<
   throw new ApiError('upload_incomplete', `This upload is ${row.status}${row.error ? `: ${row.error}` : ''}.`, { hint: 'Start again with create_upload.' });
 }
 
+/** Marks an upload as used. Only the first call counts: a used upload is never pointed at a second creative. */
 export async function linkUploadToCreative(uploadId: string, creativeId: string): Promise<void> {
-  await db.update(uploads).set({ creativeId, updatedAt: new Date() }).where(eq(uploads.id, uploadId));
+  await db.update(uploads).set({ creativeId, updatedAt: new Date() }).where(and(eq(uploads.id, uploadId), isNull(uploads.creativeId)));
 }
 
 /** Run by a repeating job: expire abandoned uploads (aborting any multipart upload so no parts are kept) and fail jobs stuck on processing. */
@@ -228,6 +277,21 @@ export async function sweepUploads(now: Date = new Date()): Promise<{ expired: n
   }
   const stuck = await db.select().from(uploads).where(and(eq(uploads.status, 'processing'), lt(uploads.updatedAt, new Date(now.getTime() - PROCESSING_TIMEOUT_MS))));
   for (const row of stuck) await failUpload(row, 'Processing timed out');
-  return { expired: stale.length, failed: stuck.length };
+  // Verified but never used by upload_asset: do not keep the file forever.
+  const unused = await db.select().from(uploads).where(and(eq(uploads.status, 'ready'), isNull(uploads.creativeId), lt(uploads.updatedAt, new Date(now.getTime() - READY_UNUSED_TTL_MS))));
+  for (const row of unused) {
+    await discardObject(row);
+    await db.update(uploads).set({ status: 'expired', error: 'Never used by upload_asset', updatedAt: now }).where(and(eq(uploads.id, row.id), eq(uploads.status, 'ready'), isNull(uploads.creativeId)));
+  }
+  // A refused upload whose object could not be removed at the time: try once more a day later (removing a missing object is not an error).
+  const leftovers = await db.select().from(uploads).where(and(eq(uploads.status, 'failed'), lt(uploads.updatedAt, new Date(now.getTime() - READY_UNUSED_TTL_MS))));
+  for (const row of leftovers) {
+    await discardObject(row);
+    await db.update(uploads).set({ status: 'aborted', updatedAt: now }).where(and(eq(uploads.id, row.id), eq(uploads.status, 'failed')));
+  }
+  // A verified video whose poster job never ran or ran out of attempts: the file itself is checked, so settle it as ready.
+  await db.update(creatives).set({ fileStatus: 'ready' })
+    .where(and(eq(creatives.fileStatus, 'processing'), eq(creatives.source, 'mcp'), lt(creatives.updatedAt, new Date(now.getTime() - PROCESSING_TIMEOUT_MS))));
+  return { expired: stale.length + unused.length, failed: stuck.length };
 }
 

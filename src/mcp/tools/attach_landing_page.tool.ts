@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { defineTool } from '../types.js';
+import { withToolResult } from '../../services/tool-idempotency.service.js';
+import { uuidShape } from '../../utils/zod-helpers.js';
 import { attachLandingPage } from '../../services/creative-library.service.js';
 import { toApiError } from '../../utils/to-api-error.js';
 
@@ -9,14 +11,18 @@ export default defineTool({
   description:
     'Set the landing page of an asset, by landingPageId or by url (the page is saved for the asset\'s client if it is new). The page must belong to the same client as the asset. Safe to repeat. IDs are strings.',
   inputSchema: {
-    creativeId: z.string().min(1).describe('Stato asset ID (UUID).'),
-    landingPageId: z.string().optional(),
+    idempotencyKey: z.string().max(100).optional().describe('Optional. Repeating the same call with the same key returns the first answer instead of doing it twice.'),
+    creativeId: uuidShape().describe('Stato asset ID (UUID).'),
+    landingPageId: uuidShape().optional(),
     url: z.string().max(500).optional(),
   },
   outputSchema: { creativeId: z.string(), landingPage: z.object({ id: z.string(), url: z.string(), title: z.string().nullable() }).nullable() },
   annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
   scope: 'creatives:write',
-  handler: async ({ creativeId, landingPageId, url }, ctx) => {
+  handler: async (rawArgs, ctx) => {
+    const { idempotencyKey, ...args } = rawArgs;
+    return withToolResult(ctx.apiKey.id, idempotencyKey, 'attach_landing_page', args, async () => {
+    const { creativeId, landingPageId, url } = args;
     try {
       const dto = await attachLandingPage(ctx.businessId, creativeId, { landingPageId, url });
       return {
@@ -25,5 +31,6 @@ export default defineTool({
         audit: { after: { landingPageId: dto.landingPageId }, recordsTouched: [{ type: 'creative', id: dto.id }] },
       };
     } catch (err) { return toApiError(err); }
+    });
   },
 });

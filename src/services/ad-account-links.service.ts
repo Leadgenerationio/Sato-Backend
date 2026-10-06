@@ -6,6 +6,7 @@ import { campaigns } from '../db/schema/campaigns.js';
 import { canonicalizePlatform, canonicalPlatformSql, normaliseAccountId, sourceLabel } from '../utils/catchr-platform.js';
 import { NotFoundError, ValidationError } from '../utils/errors.js';
 import type { AuthPayload } from '../types/index.js';
+import { campaignVisible } from './ad-account-rules.service.js';
 
 /**
  * Sam S13 (feedback round 1, 2026-09-29): one screen to say which client
@@ -100,7 +101,7 @@ export async function listAdAccounts(requester: AuthPayload, windowDays = 30, fi
   const adPlatform = sql.raw(`coalesce(${canonicalPlatformSql('d.platform')}, lower(trim(d.platform)))`);
   const tsPlatform = sql.raw(`coalesce(${canonicalPlatformSql('ts.platform')}, lower(trim(ts.platform)))`);
 
-  const [spendRows, sourceRows, linkRows, clientOptions, campaignOptions] = await Promise.all([
+  const [spendRows, sourceRows, linkRows, clientOptions, campaignOptions, otherLinks] = await Promise.all([
     // Deduped per natural key (Catchr ingests a day once per authorization
     // id), same rule as every other spend figure.
     db.execute(sql`
@@ -133,10 +134,10 @@ export async function listAdAccounts(requester: AuthPayload, windowDays = 30, fi
         from traffic_sources ts
         where ts.is_active = true and ts.platform is not null
       )
-      select distinct a.platform, a.acc_id as account_id, c.id as campaign_id, c.name as campaign_name
+      select distinct a.platform, a.acc_id as account_id, ${campaigns.id} as campaign_id, ${campaigns.name} as campaign_name
       from accs a
-      join campaigns c on c.id = a.campaign_id
-      where a.acc_id is not null and a.acc_id <> ''
+      join ${campaigns} on ${campaigns.id} = a.campaign_id
+      where a.acc_id is not null and a.acc_id <> '' and ${campaignVisible(businessId)}
     `) as unknown as Promise<Array<{ platform: string; account_id: string; campaign_id: string; campaign_name: string }>>,
     db
       .select({
@@ -162,7 +163,11 @@ export async function listAdAccounts(requester: AuthPayload, windowDays = 30, fi
     db
       .select({ id: campaigns.id, name: campaigns.name, status: campaigns.status })
       .from(campaigns)
+      .where(campaignVisible(businessId))
       .orderBy(campaigns.name),
+    // Accounts that another business has linked to its clients: not this business's to list or link.
+    db.select({ platform: clientAdAccounts.platform, accountId: clientAdAccounts.accountId }).from(clientAdAccounts)
+      .where(sql`${clientAdAccounts.businessId} <> ${businessId}`),
   ]);
 
   const byKey = new Map<string, AdAccountRow>();
@@ -211,6 +216,11 @@ export async function listAdAccounts(requester: AuthPayload, windowDays = 30, fi
       updatedAt: l.updatedAt ? l.updatedAt.toISOString() : null,
     };
   }
+
+  // ad_spend and traffic_sources have no business column. An account linked to another business's client is theirs:
+  // leave it out, with its name and spend, unless this business has linked it too.
+  const elsewhere = new Set(otherLinks.map((l) => keyOf(l.platform, l.accountId)));
+  for (const [k, row] of byKey) if (!row.link && elsewhere.has(k)) byKey.delete(k);
 
   // Unlinked spend first (largest first) — that's the work to do — then the
   // linked accounts, also by spend.

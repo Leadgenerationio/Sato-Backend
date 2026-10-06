@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { defineTool } from '../types.js';
+import { uuidShape } from '../../utils/zod-helpers.js';
 import { completeUpload } from '../../services/mcp-uploads.service.js';
 import { realUserId } from '../../services/ad-account-rules.service.js';
 
@@ -10,7 +11,7 @@ export default defineTool({
     'Tell Stato the file is uploaded. For a multipart upload send parts: the partNumber and ETag of every part. Stato checks the real size and the real file type from the first bytes (an .exe renamed .mp4 is refused and removed) and computes the SHA-256. ' +
     'status "ready" means you can call upload_asset with the uploadId. status "processing" (very large files) means call complete_upload again with the same uploadId until it is ready. Safe to repeat.',
   inputSchema: {
-    uploadId: z.string().min(1),
+    uploadId: uuidShape(),
     parts: z.array(z.object({ partNumber: z.number().int().min(1), etag: z.string().min(1).max(200) })).max(10000).optional().describe('Every uploaded part with its ETag. Needed for a multipart upload.'),
   },
   outputSchema: {

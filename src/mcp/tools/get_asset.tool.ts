@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { defineTool } from '../types.js';
+import { uuidShape } from '../../utils/zod-helpers.js';
 import { adLinkOut } from '../schemas.js';
 import { getAsset } from '../../services/mcp-assets.service.js';
 
@@ -8,9 +9,9 @@ export default defineTool({
   title: 'Get one asset',
   description:
     'Full detail of one asset with a signed download link and its ad links. The link lasts 60 minutes by default; ask for up to 1440 (24 hours) with downloadUrlMinutes if a platform needs longer. ' +
-    'Use the downloadUrl as the video_url or image URL in your ad-platform tool. approvalStatus is reported, not enforced. downloadUrl is null for copy-only assets or a file still processing. IDs are strings.',
+    'Use the downloadUrl as the video_url or image URL in your ad-platform tool. approvalStatus is reported, not enforced. downloadUrl is null for copy-only assets or when the file is missing. For a video, fileStatus processing only means the poster and duration are not read yet; the file itself is already checked and the link works. IDs are strings.',
   inputSchema: {
-    creativeId: z.string().min(1).describe('Stato asset ID (UUID), from list_assets.'),
+    creativeId: uuidShape().describe('Stato asset ID (UUID), from list_assets.'),
     downloadUrlMinutes: z.number().int().min(1).max(1440).optional(),
   },
   outputSchema: {

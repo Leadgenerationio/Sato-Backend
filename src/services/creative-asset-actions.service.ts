@@ -55,7 +55,8 @@ export async function updateAsset(caller: Caller, input: UpdateAssetInput): Prom
   if (input.clientId && input.clientId !== row.clientId) {
     const [target] = await db.select({ id: clients.id }).from(clients).where(and(eq(clients.id, input.clientId), eq(clients.businessId, caller.businessId))).limit(1);
     if (!target) throw new ApiError('not_found', 'That client does not exist in this business.', { hint: 'Use list_clients to find the right clientId.' });
-    if (!input.confirmMove) {
+    // An asset with no client yet (copy-only or unfiled) is simply filed: nothing is being taken from anyone.
+    if (row.clientId && !input.confirmMove) {
       const [prev] = row.clientId ? await db.select({ name: clients.companyName }).from(clients).where(eq(clients.id, row.clientId)).limit(1) : [];
       throw moveRequiresConfirm(prev?.name ?? 'its current client');
     }

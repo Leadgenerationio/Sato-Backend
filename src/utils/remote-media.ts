@@ -127,7 +127,7 @@ export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps 
   // The real type comes from the first bytes, not the Content-Type header or the name
   // (MCP spec v1.0: an .exe served as video/mp4 must be refused).
   const sniffed = sniffMedia(buffer.subarray(0, SNIFF_BYTES));
-  if (!sniffed) throw new AppError(422, 'sourceUrl must be an image or video: the file content is not a jpg, png, webp, gif, mp4 or mov');
+  if (!sniffed) throw new MediaSourceError(422, 'sourceUrl must be an image or video: the file content is not a jpg, png, webp, gif, mp4 or mov', 'unsupported_type');
   return {
     buffer,
     contentType: sniffed.mime,

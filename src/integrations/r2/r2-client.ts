@@ -169,7 +169,7 @@ export async function objectExists(folder: R2Folder, key: string): Promise<boole
   const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
   const client = await getS3Client();
   try {
-    await client.send(new HeadObjectCommand({ Bucket: env.R2_BUCKET, Key: fullKey }));
+    await client.send(new HeadObjectCommand({ Bucket: r2Bucket(), Key: fullKey }));
     return true;
   } catch (err) {
     const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
@@ -197,7 +197,7 @@ export async function hashObject(folder: R2Folder, key: string, maxBytes: number
   const client = await getS3Client();
   let res;
   try {
-    res = await client.send(new GetObjectCommand({ Bucket: env.R2_BUCKET, Key: buildKey(folder, key) }));
+    res = await client.send(new GetObjectCommand({ Bucket: r2Bucket(), Key: buildKey(folder, key) }));
   } catch (err) {
     const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
     if (e?.name === 'NoSuchKey' || e?.name === 'NotFound' || e?.$metadata?.httpStatusCode === 404) return null;
@@ -235,7 +235,7 @@ export async function getSignedDownloadUrl(opts: R2SignedUrlOptions): Promise<st
 
   return getSignedUrl(
     client,
-    new GetObjectCommand({ Bucket: env.R2_BUCKET, Key: fullKey }),
+    new GetObjectCommand({ Bucket: r2Bucket(), Key: fullKey }),
     { expiresIn },
   );
 }
@@ -259,6 +259,7 @@ export async function getSignedUploadUrl(opts: R2SignedUrlOptions): Promise<stri
       Bucket: process.env.R2_BUCKET || env.R2_BUCKET,
       Key: fullKey,
       ContentType: opts.contentType,
+      ...(opts.contentLength ? { ContentLength: opts.contentLength } : {}),
     }),
     { expiresIn },
   );
@@ -279,7 +280,7 @@ export async function downloadFile(folder: R2Folder, key: string): Promise<Buffe
   const { GetObjectCommand } = await import('@aws-sdk/client-s3');
   const client = await getS3Client();
   const res = await client.send(
-    new GetObjectCommand({ Bucket: env.R2_BUCKET, Key: fullKey }),
+    new GetObjectCommand({ Bucket: r2Bucket(), Key: fullKey }),
   );
   if (!res.Body) throw new Error(`R2 download returned empty body for ${fullKey}`);
   // AWS SDK v3 returns a stream; collect into a Buffer.
@@ -299,6 +300,6 @@ export async function deleteFile(folder: R2Folder, key: string): Promise<void> {
   const { DeleteObjectCommand } = await import('@aws-sdk/client-s3');
   const client = await getS3Client();
 
-  await client.send(new DeleteObjectCommand({ Bucket: env.R2_BUCKET, Key: fullKey }));
+  await client.send(new DeleteObjectCommand({ Bucket: r2Bucket(), Key: fullKey }));
   logger.info({ fullKey }, 'R2 delete complete');
 }

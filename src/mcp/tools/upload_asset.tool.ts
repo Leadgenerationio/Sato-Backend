@@ -19,7 +19,7 @@ export default defineTool({
   inputSchema: {
     mediaType: z.enum(['image', 'video']).optional().describe('Required with sourceUrl. With uploadId it is read from the file.'),
     sourceUrl: z.string().min(1).max(2000).optional().describe('Public http(s) URL of a file up to 50 MB. Private and internal addresses are blocked. Send this or uploadId.'),
-    uploadId: z.string().min(1).optional().describe('From create_upload, after complete_upload reports ready. Send this or sourceUrl.'),
+    uploadId: uuidShape().optional().describe('From create_upload, after complete_upload reports ready. Send this or sourceUrl.'),
     name: z.string().max(255).optional(),
     platform: z.string().max(50).optional().describe('meta, google, tiktok or taboola. With platformAccountId, the ad account decides the client.'),
     platformAccountId: z.string().max(100).optional().describe('The ad account ID as a string (Meta with or without act_).'),
@@ -74,7 +74,7 @@ export default defineTool({
     return {
       summary: summary + note,
       data: { ...out, replayed },
-      audit: { after: { creativeId: out.creativeId, result: out.result, replayed }, recordsTouched: [{ type: 'creative', id: out.creativeId }] },
+      audit: { after: { creativeId: out.creativeId, result: out.result, replayed }, recordsTouched: [{ type: 'creative', id: out.creativeId }, ...(request.uploadId ? [{ type: 'upload', id: request.uploadId }] : [])] },
     };
   },
 });

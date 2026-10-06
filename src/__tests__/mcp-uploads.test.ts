@@ -177,7 +177,8 @@ describe('refusals before and after upload (test 11)', () => {
   it('a wrong size is refused and removed; a declared sha256 that does not match is refused and removed', async () => {
     const file = jpeg(3000, 'size');
     const wrong = await call(key, 'create_upload', { filename: 'a.jpg', contentType: 'image/jpeg', sizeBytes: 5000 });
-    await put(wrong.structuredContent.uploadUrl, file, wrong.structuredContent.headers);
+    // Sent without the Content-Length the URL is signed for (as a caller that ignores the headers would): complete_upload still checks the real size.
+    await put(wrong.structuredContent.uploadUrl, file, { 'Content-Type': 'image/jpeg' });
     expect((await call(key, 'complete_upload', { uploadId: wrong.structuredContent.uploadId })).structuredContent.code).toBe('validation_failed');
 
     const shaWrong = await call(key, 'create_upload', { filename: 'b.jpg', contentType: 'image/jpeg', sizeBytes: file.length, sha256: 'a'.repeat(64) });

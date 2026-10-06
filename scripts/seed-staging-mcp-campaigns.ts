@@ -3,12 +3,13 @@
  * because LeadByte is in mock mode on staging and list_campaigns would be empty.
  *
  * Usage (inside the staging container, or locally against a test database):
- *   npx tsx scripts/seed-staging-mcp-campaigns.ts --confirm-staging
+ *   npx tsx scripts/seed-staging-mcp-campaigns.ts --confirm-staging --host=<database host>
  *
  * Safe to repeat: campaigns are keyed on their LeadByte number (MCPTEST-1,
  * MCPTEST-2) and the client link on (client, campaign). Changes nothing else.
- * It refuses to run without --confirm-staging and when the client does not
- * exist, and never prints the connection string.
+ * It refuses to run unless --host names the host this DATABASE_URL really points
+ * at (so a production URL cannot be used by mistake: you have to type its host
+ * on purpose), and when the client does not exist. Never prints the connection string.
  */
 
 import 'dotenv/config';
@@ -27,6 +28,12 @@ async function main() {
   }
   const url = process.env.DATABASE_URL;
   if (!url) { console.error('DATABASE_URL is not set.'); process.exit(1); }
+  const host = new URL(url).hostname;
+  const given = process.argv.find((a) => a.startsWith('--host='))?.slice('--host='.length);
+  if (given !== host) {
+    console.error(`Refusing to run: pass --host=<the database host>. This DATABASE_URL points at "${host}"; check it is the staging database, then type that host.`);
+    process.exit(1);
+  }
   const sql = postgres(url, { max: 1 });
   try {
     const [client] = await sql<{ id: string }[]>`select id from clients where company_name = ${CLIENT_NAME} limit 1`;

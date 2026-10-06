@@ -41,4 +41,6 @@ export interface R2SignedUrlOptions {
   key: string;
   expiresInSeconds?: number;
   contentType?: string;
+  /** Upload URLs only: signed into the URL so the body must be exactly this size. */
+  contentLength?: number;
 }
