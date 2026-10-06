@@ -22,6 +22,7 @@ let otherBiz = ''; let cA = ''; let cB = ''; let cC = ''; let cOther = '';
 let k1 = ''; let k2 = ''; let kShared = ''; let kOther = '';
 const lb1 = `lb1${tag}`;
 const keyIds: string[] = [];
+const extraCampaigns: string[] = [];
 
 async function makeKey(scopes: string[]) {
   const res = await request(app).post('/api/v1/api-keys').set('Authorization', `Bearer ${owner}`).send({ name: `Yash Test rd ${tag}`, scopes });
@@ -74,7 +75,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   const ids = [cA, cB, cC, cOther];
-  const cids = [k1, k2, kShared, kOther];
+  const cids = [k1, k2, kShared, kOther, ...extraCampaigns];
   await db.delete(creatives).where(inArray(creatives.clientId, ids));
   await db.delete(landingPages).where(inArray(landingPages.clientId, ids));
   await db.delete(clientAdAccounts).where(inArray(clientAdAccounts.clientId, ids));
@@ -204,5 +205,58 @@ describe('review of #79', () => {
     const onlyClients = await makeKey(['clients:read']);
     expect((await call(onlyClients, 'get_campaign', { campaignId: k1 })).structuredContent.code).toBe('insufficient_scope');
     expect((await call(onlyClients, 'list_campaigns', {})).structuredContent.code).toBe('insufficient_scope');
+  });
+});
+
+describe('second review of #79', () => {
+  it("get_campaign never lists another business's traffic-source account on a shared campaign", async () => {
+    await db.insert(trafficSources).values({ campaignId: kShared, name: `Yash RD other src ${tag}`, platform: 'facebook-ads', accountId: `TSOTHER${tag}` });
+    const d = (await call(key, 'get_campaign', { campaignId: kShared })).structuredContent;
+    expect(JSON.stringify(d)).not.toContain(`TSOTHER${tag}`);
+    // On a campaign this business buys, its traffic-source accounts are still listed, linked or not.
+    await db.insert(trafficSources).values({ campaignId: k1, name: `Yash RD unlinked src ${tag}`, platform: 'facebook-ads', accountId: `UNLINKED${tag}` });
+    const own = (await call(key, 'get_campaign', { campaignId: k1 })).structuredContent;
+    expect(own.adAccounts).toContainEqual({ platform: 'meta', accountId: `UNLINKED${tag}`, accountName: null, clientId: null });
+  });
+
+  it("a campaign in another business gets the same not_found as one that doesn't exist", async () => {
+    const unknown = '22222222-2222-4222-8222-222222222222';
+    const a = (await call(key, 'get_campaign', { campaignId: kOther })).structuredContent;
+    const b = (await call(key, 'get_campaign', { campaignId: unknown })).structuredContent;
+    expect(a.code).toBe('not_found');
+    expect({ ...a, message: a.message.replace(kOther, 'X'), requestId: null }).toEqual({ ...b, message: b.message.replace(unknown, 'X'), requestId: null });
+  });
+
+  it('a LeadByte number shared with another business resolves to the campaign this business can see', async () => {
+    const lb = `lbdup${tag}`;
+    const suffix = String(tag).padStart(12, '0');
+    const [hidden, mine] = await db.insert(campaigns).values([
+      // The hidden one sorts first, so a lookup that ignores visibility would pick it.
+      { id: `00000000-0000-4000-8000-${suffix}`, name: `Yash RD dup hidden ${tag}`, leadbyteCampaignId: lb },
+      { id: `ffffffff-ffff-4fff-8fff-${suffix}`, name: `Yash RD dup mine ${tag}`, leadbyteCampaignId: lb },
+    ]).returning();
+    extraCampaigns.push(hidden!.id, mine!.id);
+    await db.insert(clientCampaigns).values([{ clientId: cOther, campaignId: hidden!.id }, { clientId: cA, campaignId: mine!.id }]);
+    const d = (await call(key, 'get_campaign', { campaignId: lb })).structuredContent;
+    expect(d.campaign.campaignId).toBe(mine!.id);
+  });
+
+  it('a landing page with no status is counted', async () => {
+    await db.insert(landingPages).values({ clientId: cA, url: `https://example.com/null-${tag}`, normalisedUrl: `https://example.com/null-${tag}`, status: null });
+    expect((await call(key, 'get_client', { clientId: cA })).structuredContent.landingPageCount).toBe(2);
+  });
+
+  it('a cursor past the safe integer range is validation_failed, not a server error', async () => {
+    const huge = Buffer.from(JSON.stringify({ o: 1e300 })).toString('base64url');
+    const r = await call(key, 'list_clients', { cursor: huge });
+    expect(r.structuredContent).toMatchObject({ code: 'validation_failed', fields: [{ field: 'cursor' }] });
+  });
+
+  it("list_campaigns: another business's clientId is not_found; status ignores case", async () => {
+    expect((await call(key, 'list_campaigns', { clientId: cOther })).structuredContent.code).toBe('not_found');
+    for (const status of ['active', 'ACTIVE']) {
+      const r = await call(key, 'list_campaigns', { q: `RD Solar ${tag}`, status });
+      expect(r.structuredContent.items.map((c: { campaignId: string }) => c.campaignId)).toEqual([k1]); // stored as 'Active'
+    }
   });
 });

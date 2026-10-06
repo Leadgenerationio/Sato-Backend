@@ -1,8 +1,9 @@
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, vi } from 'vitest';
 import { eq, like } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { idempotencyKeys } from '../db/schema/api-keys.js';
 import { purgeApiHousekeeping } from '../services/retention.service.js';
+import { logger } from '../utils/logger.js';
 
 const owner = `hk-${Date.now()}`;
 const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000);
@@ -25,5 +26,18 @@ describe('purgeApiHousekeeping', () => {
     const res = await purgeApiHousekeeping(new Date(), 2);
     expect(res.idempotencyKeys).toBeGreaterThanOrEqual(5);
     expect(await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.owner, o))).toHaveLength(0);
+  });
+
+  it('warns when a run hits its cap, so a backlog is visible', async () => {
+    const o = `${owner}-cap`;
+    // 200 batches per run: with a batch of 1, 205 old rows leave a backlog.
+    await db.insert(idempotencyKeys).values(Array.from({ length: 205 }, (_, i) => ({ owner: o, key: `c${i}`, requestHash: 'c'.repeat(64), status: 201, response: {}, createdAt: hoursAgo(40) })));
+    const warn = vi.spyOn(logger, 'warn');
+    try {
+      await purgeApiHousekeeping(new Date(), 1);
+      expect(warn).toHaveBeenCalledWith(expect.objectContaining({ table: 'idempotency_keys', cap: 200 }), expect.stringContaining('cap'));
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

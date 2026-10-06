@@ -7,7 +7,8 @@ import { db } from '../config/database.js';
 import { apiKeys } from '../db/schema/api-keys.js';
 import { apiAuditLog, type ApiAuditRow } from '../db/schema/api-audit-log.js';
 import { revokeApiKey } from '../services/api-key.service.js';
-import { redact, auditJson, writeAuditRow, REDACTED } from '../services/api-audit.service.js';
+import { redact, auditJson, writeAuditRow, auditOnFinish, REDACTED } from '../services/api-audit.service.js';
+import { EventEmitter } from 'node:events';
 import { apiKeyOrJwt, idempotency } from '../middleware/api-key.middleware.js';
 import { idempotencyKeys } from '../db/schema/api-keys.js';
 
@@ -83,6 +84,32 @@ describe('redaction', () => {
     expect(JSON.stringify(redact(deep))).toContain('[nested]');
     const big = auditJson(Array.from({ length: 40 }, () => 'x'.repeat(1900))) as Record<string, unknown>;
     expect(big).toMatchObject({ truncated: true });
+  });
+
+  it('masks a Stato key inside a longer string, and other providers\' signed-URL parameters', () => {
+    const k = `stk_${'A'.repeat(43)}`;
+    expect(redact(`Bearer ${k}`)).toBe(`Bearer ${REDACTED}`);
+    expect(redact(`note: the key is ${k}, keep it safe`)).toBe(`note: the key is ${REDACTED}, keep it safe`);
+    const out = redact('https://storage.googleapis.com/b/o.png?X-Goog-Signature=abc&X-Goog-Credential=def&w=1') as string;
+    expect(out).not.toContain('abc');
+    expect(out).not.toContain('def');
+    expect(out).toContain('w=1');
+    for (const p of ['apikey', 'api_key', 'auth', 'jwt']) expect(redact(`https://x.example.com/a?${p}=s3cret`)).not.toContain('s3cret');
+  });
+});
+
+describe('a client that disconnects before the answer', () => {
+  it('still gets one row, marked client_closed', async () => {
+    const { id } = await makeKey(['clients:read']);
+    const [k] = await db.select().from(apiKeys).where(eq(apiKeys.id, id));
+    const res = Object.assign(new EventEmitter(), { locals: {} as Record<string, unknown>, statusCode: 200, writableFinished: false, json: () => res });
+    const req = { originalUrl: '/api/v1/creatives', method: 'POST', body: {}, query: {}, ip: '1.2.3.4', get: () => undefined };
+    auditOnFinish(k!, req as never, res as never);
+    res.emit('close');
+    res.emit('close');
+    const rows = await auditRowsFor(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ errorCode: 'client_closed', result: { outcome: 'error', code: 'client_closed' } });
   });
 });
 

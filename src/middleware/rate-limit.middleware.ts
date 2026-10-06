@@ -31,11 +31,18 @@ export function rateLimitedHandler(message: string, hint: string): Options['hand
       ...(requestId ? { requestId } : {}),
     };
     if (req.originalUrl.startsWith('/mcp')) {
-      res.status(options.statusCode).json({ jsonrpc: '2.0', error: { code: -32000, message, data: body }, id: null });
+      res.status(options.statusCode).json({ jsonrpc: '2.0', error: { code: -32000, message, data: body }, id: jsonRpcId(req.body) });
       return;
     }
     res.status(options.statusCode).json(body);
   };
+}
+
+/** The id of a single JSON-RPC request, so the client can match the error to its call; null for a batch or no body. */
+export function jsonRpcId(body: unknown): string | number | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const id = (body as { id?: unknown }).id;
+  return typeof id === 'string' || typeof id === 'number' ? id : null;
 }
 
 export const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;

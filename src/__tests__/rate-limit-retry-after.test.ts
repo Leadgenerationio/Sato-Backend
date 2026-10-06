@@ -55,7 +55,8 @@ describe('429 in the shared error shape', () => {
     for (let i = 0; i < 120; i++) expect((await rpc()).status).toBe(200);
     const res = await rpc();
     expect(res.status).toBe(429);
-    expect(res.body).toMatchObject({ jsonrpc: '2.0', id: null, error: { code: -32000, data: { code: 'rate_limited', retryable: true } } });
+    // The request's own id, so the MCP client can match the error to its call.
+    expect(res.body).toMatchObject({ jsonrpc: '2.0', id: 1, error: { code: -32000, data: { code: 'rate_limited', retryable: true } } });
     expect(res.body.error.data.retryAfter).toBe(Number(res.headers['retry-after']));
     // The refused call is still audited, as rate_limited.
     await new Promise((r) => setTimeout(r, 200));

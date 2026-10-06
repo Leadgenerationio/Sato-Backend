@@ -6,7 +6,7 @@ import { clients } from '../db/schema/clients.js';
 import { campaigns } from '../db/schema/campaigns.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
-import { AppError } from '../utils/errors.js';
+import { AppError, MediaSourceError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import { canonicalizePlatform, normaliseAccountId } from '../utils/catchr-platform.js';
 import { normaliseLandingUrl } from '../utils/landing-url.js';
@@ -522,7 +522,7 @@ export async function upsertPlatformCreative(
     }
     fileUrl = r2Ref(r2Key);
   } else if (r2Key) {
-    if (contentType && !mediaTypeOf(contentType)) throw new AppError(422, 'Creatives must be images or videos');
+    if (contentType && !mediaTypeOf(contentType)) throw new MediaSourceError(422, 'Creatives must be images or videos', 'unsupported_type');
     if (sizeBytes && sizeBytes > MAX_MEDIA_BYTES) throw new AppError(413, 'File too large: max 50 MB');
     // Presigned keys are not bound to a business, so a key already held by
     // another business's creative must never be registered again here — that

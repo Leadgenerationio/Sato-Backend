@@ -26,8 +26,10 @@ async function purgeBatched(table: 'idempotency_keys' | 'api_key_usage' | 'api_a
     // postgres-js returns the rows array with the affected-row count on `.count`.
     const n = Number((res as unknown as { count?: number }).count ?? 0);
     total += n;
-    if (n < batch) break;
+    if (n < batch) return total;
   }
+  // The cap was hit: rows are left for the next run. Say so, so a backlog is visible.
+  logger.warn({ table, deleted: total, cap: MAX_BATCHES * batch }, 'API housekeeping purge hit its per-run cap; the rest is left for the next run');
   return total;
 }
 

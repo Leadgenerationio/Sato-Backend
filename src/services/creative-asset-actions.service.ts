@@ -78,7 +78,7 @@ export async function updateAsset(caller: Caller, input: UpdateAssetInput): Prom
   // Campaign: a new one must belong to the client; after a move the current one must still fit.
   let campaignId = row.campaignId;
   if (input.campaignId) {
-    const campaign = await resolveCampaignRef(input.campaignId);
+    const campaign = await resolveCampaignRef(input.campaignId, caller.businessId);
     if (clientId) await assertCampaignBelongsToClient(clientId, campaign.id);
     campaignId = campaign.id;
     if (campaign.id !== row.campaignId) mark('campaignId', 'campaignId', campaign.id);

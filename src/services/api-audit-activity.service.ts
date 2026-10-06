@@ -1,11 +1,13 @@
-import { and, desc, eq, gte, isNotNull, isNull, lt, lte, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gte, isNotNull, isNull, lte, sql, type SQL } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { apiAuditLog, type ApiAuditRow } from '../db/schema/api-audit-log.js';
 import { users } from '../db/schema/users.js';
 
 // Settings → API keys → Activity (MCP spec v1.0 §3, spec test 16): every
 // API-key call with the bot name, the tool, the result and the records it
-// touched. Newest first, paged by row ID so new calls never shift a page.
+// touched. Newest first by (at, id), so the (business_id, at) and
+// (api_key_id, at) indexes serve the filters; paged by that pair, so new
+// calls never shift a page.
 
 export const ACTIVITY_MAX_LIMIT = 200;
 
@@ -18,7 +20,7 @@ export interface ActivityFilters {
   from?: Date;
   to?: Date;
   limit?: number;
-  /** nextCursor from the previous page: rows older than this ID. */
+  /** nextCursor from the previous page: `<at in epoch microseconds>.<id>`, rows older than that. */
   cursor?: string;
 }
 
@@ -80,18 +82,23 @@ export async function listApiActivity(businessId: string, f: ActivityFilters = {
   if (f.errorCode) where.push(eq(apiAuditLog.errorCode, f.errorCode));
   if (f.from) where.push(gte(apiAuditLog.at, f.from));
   if (f.to) where.push(lte(apiAuditLog.at, f.to));
-  if (f.cursor) where.push(lt(apiAuditLog.id, Number(f.cursor)));
+  if (f.cursor) {
+    // Microseconds and the ID stay integers end to end (Number keeps 15 digits
+    // exactly, the route allows no more), so no row is skipped or repeated.
+    const [micros, id] = f.cursor.split('.') as [string, string];
+    where.push(sql`(${apiAuditLog.at}, ${apiAuditLog.id}) < (timestamptz 'epoch' + ${micros}::bigint * interval '1 microsecond', ${Number(id)})`);
+  }
 
   const rows = await db
-    .select({ row: apiAuditLog, owner: users.name })
+    .select({ row: apiAuditLog, owner: users.name, atMicros: sql<string>`(extract(epoch from ${apiAuditLog.at}) * 1000000)::bigint::text` })
     .from(apiAuditLog)
     .leftJoin(users, eq(users.id, apiAuditLog.ownerUserId))
     .where(and(...where))
-    .orderBy(desc(apiAuditLog.id))
+    .orderBy(desc(apiAuditLog.at), desc(apiAuditLog.id))
     .limit(limit + 1);
   const page = rows.slice(0, limit);
   return {
     items: page.map((r) => toRow(r.row, r.owner ?? null)),
-    nextCursor: rows.length > limit ? String(page[page.length - 1]!.row.id) : null,
+    nextCursor: rows.length > limit ? `${page[page.length - 1]!.atMicros}.${page[page.length - 1]!.row.id}` : null,
   };
 }

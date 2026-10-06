@@ -1,83 +1,47 @@
-# Branching
+# Branching and review
 
-Two branches, with a clear separation:
+Two developers work on this repo: **Yash** and **Hari**. These rules apply to
+every change, including small ones.
 
-- **`main`** — **production**. Railway auto-deploys from this. Only stable,
-  tested code lands here.
-- **`Development`** — **testing / staging**. Every new commit goes here first.
-  Verify it works, then promote to `main`.
+## The branches
 
-`Development` may temporarily be **ahead** of `main` (changes in flight that
-haven't been promoted yet). That's expected. `main` should **never** be ahead
-of `Development`.
+- **`main` is production.** Never commit, merge, push or change settings on
+  `main`, or on the production services. Going to production is a separate
+  decision, taken after Sam signs off on staging, through one reviewed PR.
+- **`staging` is where all work happens.** The staging Railway service and the
+  staging Vercel preview always run the tip of `staging`.
+- The old `Development` branch is no longer used.
 
-## Workflow for any change
+## Rules
 
-```bash
-# 1. Make sure you're on Development
-git checkout Development
+1. **Start from `staging`.** `git fetch origin && git checkout -b feat/short-name origin/staging`.
+   Never branch from `main`.
+2. **Every change has a PR, and its base is `staging`.** No direct pushes to
+   `staging`, no force-pushes anywhere.
+3. **The other developer approves.** Yash's PRs are approved by Hari. Hari's PRs
+   are approved by Yash. The author never approves or merges their own PR before
+   the other developer has approved it. (`.github/CODEOWNERS` asks the other
+   person for a review automatically.)
+4. **Merging an approved PR into `staging` deploys it.** Then check it on
+   staging with a real call, and update the tracker.
+5. **Say it in the PR.** The description names the tracker target(s) it
+   finishes, what was tested, and what is not in it. Use the PR template.
+6. **The tracker is the record.** Every PR and every deploy is on the plan and
+   tracker page (the shared artifact). A target is done only when it is in
+   `staging`, deployed, and checked there.
+7. **Migrations.** Re-check the migration number against `origin/staging` before
+   every push: two open PRs must not use the same number.
 
-# 2. Commit your work
-git add <files>
-git commit -m "type(scope): subject"
+## Promote to `main` (later, not now)
 
-# 3. Push Development to GitHub (visibility, optional staging deploy, manual test)
-git push origin Development
-```
-
-**Stop here and verify.** Run tests, click through the app, check logs.
-Only when you're confident the change is safe for production do you proceed:
-
-```bash
-# 4. Promote Development → main (production deploy)
-git checkout main
-git merge Development --ff-only
-git push origin main      # triggers Railway prod rebuild
-
-# 5. Return to Development
-git checkout Development
-```
-
-The `--ff-only` flag is the safety net: it refuses to merge if `main` has
-diverged from `Development`. If that ever fails, stop — investigate before
-forcing anything.
-
-## Why two branches?
-
-- **`main`** is what Sam's clients hit. It must always work.
-- **`Development`** is the safety buffer. You can land 5 commits, test them
-  together, then promote them as one atomic step. If something goes wrong
-  on `Development`, prod is unaffected.
-
-## Hotfixes / risky experiments
-
-Branch from `Development`, not `main`:
-
-```bash
-git checkout Development
-git checkout -b fix/some-thing
-# ...work...
-git checkout Development
-git merge fix/some-thing --ff-only
-# then run the promote-to-main sequence above when ready
-```
+Only after Sam signs off on staging, and only on Yash's say-so: one PR from
+`staging` to `main`, approved by Hari, merged by Yash. Nothing else touches `main`.
 
 ## What never to do
 
-- ❌ Commit directly to `main` (skips testing on Development)
-- ❌ Push to `main` without first having the same commits on `Development`
-- ❌ `git push --force` on `main` or `Development` (overwrites history)
-- ❌ `git merge` without `--ff-only` (creates merge commits and divergence)
-- ❌ Let `main` get ahead of `Development` (breaks the invariant — `main` must
-  be a subset of `Development`'s history)
-
-## Quick state check
-
-```bash
-git log main..Development --oneline   # commits on Development not yet in main
-git log Development..main --oneline   # SHOULD ALWAYS BE EMPTY
-```
-
-The second command should always return nothing. If it ever returns commits,
-something is wrong and `main` has been pushed to without going through
-`Development` first.
+- Commit or push to `main`.
+- Branch from `main`, or open a PR whose base is `main`, for this work.
+- Merge your own PR before the other developer approves it.
+- `git push --force` on `staging` or `main`.
+- Run a command that can change production settings (for example `vercel curl`,
+  which creates a deployment-protection bypass secret, or any `--prod` deploy).

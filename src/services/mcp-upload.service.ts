@@ -5,7 +5,7 @@ import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { clients } from '../db/schema/clients.js';
 import { normaliseAccountId } from '../utils/catchr-platform.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
-import { AppError } from '../utils/errors.js';
+import { AppError, MediaSourceError } from '../utils/errors.js';
 import { ApiError, accountClientMismatch, accountNotLinked } from '../utils/api-error.js';
 import { normalisePlatform } from './ad-account-links.service.js';
 import { upsertPlatformCreative } from './creative-library.service.js';
@@ -58,10 +58,10 @@ function toApiError(err: unknown): never {
     if (err.statusCode === 413) {
       throw new ApiError('file_too_large', m, { hint: 'This call takes files up to 50 MB. Larger files need create_upload and complete_upload.' });
     }
-    if (/must be an image or video|images or videos/i.test(m)) {
+    if (err instanceof MediaSourceError && err.reason === 'unsupported_type') {
       throw new ApiError('unsupported_type', m, { hint: 'Send a jpg, png, webp or gif image, or an mp4 or mov video.' });
     }
-    if (err.statusCode === 422 && /(valid URL|http\(s\)|public address|Could not resolve|Could not download)/i.test(m)) {
+    if (err instanceof MediaSourceError && err.reason === 'source_unreachable') {
       throw new ApiError('source_unreachable', m, { hint: 'sourceUrl must be a public http(s) address that serves the file. Private and internal addresses are blocked.' });
     }
     if (err.statusCode === 502) throw new ApiError('internal_error', m, { retryable: true, hint: 'Nothing was saved. Try again in a few minutes.' });
@@ -113,11 +113,11 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
   // 2. The campaign: given and checked, or the account's only one. Several: the caller must choose.
   let campaignId: string | null = null;
   if (input.campaignId) {
-    const campaign = await resolveCampaignRef(input.campaignId);
+    const campaign = await resolveCampaignRef(input.campaignId, caller.businessId);
     await assertCampaignBelongsToClient(client.id, campaign.id);
     campaignId = campaign.id;
   } else if (hasAccount) {
-    const list = await campaignsForAccount(stored, accountId);
+    const list = await campaignsForAccount(stored, accountId, caller.businessId);
     if (list.length > 1) {
       throw new ApiError('validation_failed', `Account ${accountId} feeds ${list.length} campaigns, so campaignId is required.`, {
         fields: [{ field: 'campaignId', message: 'Required when the account feeds more than one campaign' }],
