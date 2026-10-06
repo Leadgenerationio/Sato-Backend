@@ -63,6 +63,8 @@ app.use(
       }
     },
     credentials: true,
+    // The portal can read X-Request-Id off a failed response.
+    exposedHeaders: ['X-Request-Id'],
   }),
 );
 app.use(requestId);
