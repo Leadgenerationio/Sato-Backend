@@ -11,6 +11,7 @@ import IORedis from 'ioredis';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { RedisRateLimitStore } from './redis-rate-limit-store.js';
+import { rateLimitedHandler } from './rate-limit.middleware.js';
 import { idempotencyKeys } from '../db/schema/api-keys.js';
 import { UnauthorizedError, AppError } from '../utils/errors.js';
 import type { UserRole } from '../types/index.js';
@@ -95,7 +96,10 @@ export const apiKeyRateLimit = rateLimit({
   passOnStoreError: true,
   skip: (req) => !req.apiKey,
   keyGenerator: (req) => `api-key:${req.apiKey?.id ?? 'none'}`,
-  message: { status: 'error', message: 'Rate limit for this API key reached (120 requests a minute). Try again shortly.' },
+  handler: rateLimitedHandler(
+    'Rate limit for this API key reached (120 requests a minute).',
+    'Wait retryAfter seconds, then repeat the call. Calls that send file bytes straight to storage do not count.',
+  ),
 });
 
 const inFlightIdempotency = new Set<string>();
