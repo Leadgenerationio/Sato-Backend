@@ -125,15 +125,24 @@ describe('one row per key call', () => {
       .send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'no_such_tool', arguments: { password: 'p' } } });
     const rows = await auditRowsFor(id);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ transport: 'mcp', tool: 'no_such_tool' });
+    // The tool never ran: logged as not_found, not as a success.
+    expect(rows[0]).toMatchObject({ transport: 'mcp', tool: 'no_such_tool', errorCode: 'not_found', result: { outcome: 'error', code: 'not_found' } });
     expect(rows[0]!.args).toMatchObject({ method: 'tools/call', arguments: { password: REDACTED } });
+  });
+
+  it('MCP: a known tool the SDK refuses before it runs is validation_failed', async () => {
+    const { key, id } = await makeKey(['clients:read']);
+    await request(app).post('/mcp').set('Authorization', `Bearer ${key}`).set('Accept', ACCEPT)
+      .send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'whoami', arguments: 'not an object' } });
+    const [row] = await auditRowsFor(id);
+    expect(row).toMatchObject({ tool: 'whoami', errorCode: 'validation_failed' });
   });
 
   it('MCP: tools/list is logged too, with no tool name', async () => {
     const { key, id } = await makeKey(['clients:read']);
     await request(app).post('/mcp').set('Authorization', `Bearer ${key}`).set('Accept', ACCEPT).send({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
     const [row] = await auditRowsFor(id);
-    expect(row).toMatchObject({ transport: 'mcp', tool: null, args: { method: 'tools/list' } });
+    expect(row).toMatchObject({ transport: 'mcp', tool: null, args: { method: 'tools/list' }, errorCode: null });
   });
 
   it('a revoked key is refused and the attempt is logged against it (spec test 10)', async () => {
