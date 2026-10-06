@@ -11,14 +11,19 @@ import { normalisePlatform } from './ad-account-links.service.js';
 import { upsertPlatformCreative } from './creative-library.service.js';
 import { assertCampaignBelongsToClient, campaignsForAccount, resolveCampaignRef, type Caller } from './ad-account-rules.service.js';
 import { linkAdPlatformIds, toAdLinkDto, type AdLinkDto, type AdLinkInput } from './creative-ad-links.service.js';
+import { getReadyUpload, linkUploadToCreative } from './mcp-uploads.service.js';
 
-// MCP spec v1.0 upload_asset for files that arrive as a sourceUrl (up to 50 MB
-// today). The ad account decides the client; clientId is only a cross-check.
+// MCP spec v1.0 upload_asset for a file that arrives as a sourceUrl (up to 50 MB)
+// or as a finished direct upload (uploadId, up to 4 GB). The ad account decides
+// the client; clientId is only a cross-check.
 
 export interface UploadAssetInput {
-  mediaType: 'image' | 'video';
+  /** Optional with uploadId (the real type comes from the file); must match it when sent. */
+  mediaType?: 'image' | 'video';
   name?: string;
-  sourceUrl: string;
+  /** Exactly one of sourceUrl or uploadId. */
+  sourceUrl?: string;
+  uploadId?: string;
   clientId?: string;
   platform?: string;
   platformAccountId?: string;
@@ -68,6 +73,14 @@ function toApiError(err: unknown): never {
 }
 
 export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput): Promise<UploadAssetResult> {
+  if (Boolean(input.sourceUrl) === Boolean(input.uploadId)) {
+    throw new ApiError('validation_failed', 'Send exactly one of sourceUrl or uploadId.', {
+      fields: [{ field: input.sourceUrl ? 'uploadId' : 'sourceUrl', message: 'Send either sourceUrl (a public file up to 50 MB) or uploadId (from create_upload and complete_upload)' }],
+    });
+  }
+  if (!input.uploadId && !input.mediaType) {
+    throw new ApiError('validation_failed', 'mediaType is required with sourceUrl.', { fields: [{ field: 'mediaType', message: 'image or video' }] });
+  }
   const hasAccount = Boolean(input.platform && input.platformAccountId);
   if (!hasAccount && !input.clientId) {
     throw new ApiError('validation_failed', 'Send platform and platformAccountId (the account decides the client), or clientId.', {
@@ -123,17 +136,29 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
     const [prior] = await db.select({ id: creatives.id }).from(creatives).where(and(eq(creatives.platform, platform), eq(creatives.platformCreativeId, platformCreativeId)));
     hadByPlatformId = Boolean(prior);
   }
+  // A finished direct upload: its real size, type and SHA-256 were checked by complete_upload.
+  let uploadRow: Awaited<ReturnType<typeof getReadyUpload>> | null = null;
+  let verified: NonNullable<Parameters<typeof upsertPlatformCreative>[0]['verified']> | undefined;
+  if (input.uploadId) {
+    uploadRow = await getReadyUpload(caller, input.uploadId);
+    const family = (uploadRow.contentType ?? '').split('/')[0] as 'image' | 'video';
+    if (input.mediaType && input.mediaType !== family) {
+      throw new ApiError('validation_failed', `mediaType is ${input.mediaType} but the uploaded file is a ${family}.`, { fields: [{ field: 'mediaType', message: `The file is a ${family}` }] });
+    }
+    verified = { sha256: uploadRow.sha256!, sizeBytes: Number(uploadRow.sizeBytes), contentType: uploadRow.contentType!, mediaType: family, fileStatus: family === 'video' ? 'processing' : 'ready' };
+  }
   let up: Awaited<ReturnType<typeof upsertPlatformCreative>>;
   try {
     up = await upsertPlatformCreative({
       businessId: caller.businessId, clientId: client.id, campaignId, platform: platform as 'meta', platformAccountId: hasAccount ? accountId : undefined,
-      platformCreativeId, mediaType: input.mediaType, sourceUrl: input.sourceUrl, headline: input.headline, bodyText: input.bodyText,
+      platformCreativeId, mediaType: verified?.mediaType ?? input.mediaType!, sourceUrl: input.sourceUrl, r2Key: uploadRow?.r2Key, verified, headline: input.headline, bodyText: input.bodyText,
       landingPageUrl: input.landingPageUrl, name: input.name, uploadedBy: caller.userId,
     });
   } catch (err) {
     toApiError(err);
   }
   const { creative, created } = up;
+  if (uploadRow) await linkUploadToCreative(uploadRow.id, creative.id);
 
   // 4. Mark where it came from, merge tags.
   const patch: Partial<typeof creatives.$inferInsert> = {};

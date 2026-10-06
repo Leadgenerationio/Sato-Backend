@@ -16,6 +16,7 @@ import { recordCatchrSync } from '../controllers/ad-spend.controller.js';
 import { syncAllBusinessesFromXero, recordBankFeedSync } from '../services/bank-feed.service.js';
 import { prewarmLeadByteCache } from '../services/cache-prewarm.service.js';
 import { purgeApiHousekeeping } from '../services/retention.service.js';
+import { processUpload, sweepUploads } from '../services/mcp-uploads.service.js';
 import { processRecurringTasks } from './recurring-tasks.js';
 import { pollOnce as pollAlertSms } from '../services/alert-sms.service.js';
 import { syncAllClientsAcrossBusinesses } from '../services/global-invoice-sync.service.js';
@@ -102,6 +103,8 @@ new Worker('email', async (job) => {
 // Invoice worker — dispatches on job.name
 // Creative library thumbnails (migration 0045).
 new Worker('media', async (job) => {
+  // A very large direct upload: hash it in the background (complete_upload reports processing until done).
+  if (job.name === 'process-upload') return processUpload(String((job.data as { uploadId: string }).uploadId));
   if (job.name !== 'thumbnail') return { skipped: true };
   return generateThumbnail(String((job.data as { creativeId: string }).creativeId));
 }, { connection, concurrency: 2 });
@@ -370,6 +373,9 @@ new Worker('sync', async (job) => {
     }
     case 'api-housekeeping': {
       return purgeApiHousekeeping();
+    }
+    case 'upload-sweeper': {
+      return sweepUploads();
     }
     case 'platform-creative-sync': {
       // Plan phase 3 — every PLATFORM_SYNC_EVERY_HOURS (default 3). Pulls ads
