@@ -93,6 +93,12 @@ export interface AdAccountFilters {
   linked?: boolean;
   /** Matches the account ID or the account name, case-insensitive. */
   q?: string;
+  /**
+   * For callers that are not the single-tenant portal (MCP): an account nobody has linked is listed only when a
+   * traffic source ties it to a campaign this business can see. ad_spend has no business column, so without this an
+   * unclaimed account's name and spend would show to every business.
+   */
+  businessOnly?: boolean;
 }
 
 export async function listAdAccounts(requester: AuthPayload, windowDays = 30, filters: AdAccountFilters = {}): Promise<AdAccountList> {
@@ -221,6 +227,8 @@ export async function listAdAccounts(requester: AuthPayload, windowDays = 30, fi
   // leave it out, with its name and spend, unless this business has linked it too.
   const elsewhere = new Set(otherLinks.map((l) => keyOf(l.platform, l.accountId)));
   for (const [k, row] of byKey) if (!row.link && elsewhere.has(k)) byKey.delete(k);
+
+  if (filters.businessOnly) for (const [k, row] of byKey) if (!row.link && row.campaigns.length === 0) byKey.delete(k);
 
   // Unlinked spend first (largest first) — that's the work to do — then the
   // linked accounts, also by spend.

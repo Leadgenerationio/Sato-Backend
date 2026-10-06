@@ -37,7 +37,7 @@ export default defineTool({
       catch { throw new ApiError('validation_failed', 'cursor is not valid.', { fields: [{ field: 'cursor', message: 'Use the nextCursor from the previous page, unchanged' }] }); }
     }
     const size = limit ?? 100;
-    const all = await listAdAccounts(ctx.auth, 30, filters);
+    const all = await listAdAccounts(ctx.auth, 30, { ...filters, businessOnly: true });
     const page = all.accounts.slice(offset, offset + size);
     return {
       summary: `${all.summary.total} ad accounts (${all.summary.linked} linked, ${all.summary.unlinked} not linked); showing ${page.length}.`,

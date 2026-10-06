@@ -215,12 +215,19 @@ describe('upload_asset refusals (test 11, the parts that run today)', () => {
       expect(fetchSpy.mock.calls.filter(([i]) => String(i) === bad)).toHaveLength(0);
     }
   });
-  it('a file declared over 50 MB is file_too_large before anything is stored', async () => {
-    files.set(url('big'), { bytes: png('big'), type: 'image/png', length: String(60 * 1024 * 1024) });
+  it('a file declared over 1 GB is file_too_large before anything is stored', async () => {
+    files.set(url('big'), { bytes: png('big'), type: 'image/png', length: String(2 * 1024 * 1024 * 1024) });
     const r = await call(key, base('big'));
     expect(r.structuredContent.code).toBe('file_too_large');
     expect(r.structuredContent.hint).toContain('create_upload');
     expect(await db.select().from(creatives).where(eq(creatives.name, `Yash UP big ${tag}`))).toHaveLength(0);
+  });
+  it('a file declared between 50 MB and 1 GB is copied in the background: upload_incomplete with an uploadId, nothing filed yet', async () => {
+    files.set(url('mid'), { bytes: png('mid'), type: 'image/png', length: String(60 * 1024 * 1024) });
+    const r = await call(key, base('mid'));
+    expect(r.structuredContent).toMatchObject({ code: 'upload_incomplete', retryable: true });
+    expect(r.structuredContent.details.uploadId).toBeTruthy();
+    expect(await db.select().from(creatives).where(eq(creatives.name, `Yash UP mid ${tag}`))).toHaveLength(0);
   });
   it('needs the creatives:write scope', async () => {
     files.set(url('scope'), { bytes: png('scope'), type: 'image/png' });

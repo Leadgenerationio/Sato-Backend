@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, count, eq, inArray, isNull, lt, or } from 'drizzle-orm';
+import { and, count, eq, gt, inArray, isNull, lt, or } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { uploads, type UploadRow } from '../db/schema/uploads.js';
 import { creatives } from '../db/schema/creatives.js';
@@ -29,6 +29,8 @@ const READY_UNUSED_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_OPEN_UPLOADS = 50;
 /** A single-PUT file is copied here once checked: a key the caller never had a URL for. */
 const VERIFIED_PREFIX = 'verified-';
+/** After its URL expired, an upload's original key is cleaned for this long (several sweeper runs). */
+const ORIGINAL_SWEEP_WINDOW_MS = 60 * 60 * 1000;
 const SHA256 = /^[0-9a-f]{64}$/i;
 
 const safeName = (n: string) => n.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80) || 'file';
@@ -111,7 +113,7 @@ async function loadUpload(caller: Caller, uploadId: string): Promise<UploadRow> 
 
 async function discardObject(row: UploadRow): Promise<void> {
   try {
-    if (row.mode === 'multipart' && row.multipartUploadId) await abortMultipart('creatives', row.r2Key, row.multipartUploadId);
+    if (row.multipartUploadId) await abortMultipart('creatives', row.r2Key, row.multipartUploadId);
     await deleteFile('creatives', row.r2Key);
   } catch (err) {
     logger.warn({ err, uploadId: row.id }, 'Could not remove a refused upload from storage');
@@ -204,7 +206,7 @@ async function verifyClaimed(caller: Caller, start: UploadRow, parts?: Completed
   // exact one just measured) to a key nobody has a URL for, and work on that copy. A multipart upload id is consumed
   // by completing it, so it needs no copy.
   if (row.mode === 'single' && !row.r2Key.startsWith(VERIFIED_PREFIX)) {
-    const finalKey = `${VERIFIED_PREFIX}${randomUUID()}-${safeName(row.filename)}`;
+    const finalKey = `${VERIFIED_PREFIX}${row.r2Key}`; // the original key stays recoverable from it, for the sweeper
     if (!head.etag) throw new Error('Storage did not return an ETag');
     if (!(await copyObjectIfUnchanged('creatives', row.r2Key, finalKey, head.etag))) {
       await db.update(uploads).set({ status: 'uploading', updatedAt: new Date() }).where(eq(uploads.id, row.id));
@@ -322,6 +324,15 @@ export async function sweepUploads(now: Date = new Date()): Promise<{ expired: n
   for (const row of leftovers) {
     await discardObject(row);
     await db.update(uploads).set({ status: 'aborted', updatedAt: now }).where(and(eq(uploads.id, row.id), eq(uploads.status, 'failed')));
+  }
+  // (Only the hour after expiry is covered: if the worker is down for that whole hour, the leftover object stays. At most one
+  // object per upload, capped at its signed size.)
+  // The single-PUT URL can write to the original key until it expires, even after the copy. Remove whatever was
+  // written there once the URL is dead (the window is wider than the sweep interval, so no run is missed).
+  const copied = await db.select().from(uploads).where(and(eq(uploads.mode, 'single'), lt(uploads.expiresAt, now), gt(uploads.expiresAt, new Date(now.getTime() - ORIGINAL_SWEEP_WINDOW_MS))));
+  for (const row of copied) {
+    if (!row.r2Key.startsWith(VERIFIED_PREFIX)) continue;
+    await deleteFile('creatives', row.r2Key.slice(VERIFIED_PREFIX.length)).catch((err: unknown) => logger.warn({ err, uploadId: row.id }, 'Could not remove an original single-PUT object'));
   }
   // A verified video whose poster job never ran or ran out of attempts: the file itself is checked, so settle it as ready.
   await db.update(creatives).set({ fileStatus: 'ready' })

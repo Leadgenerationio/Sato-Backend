@@ -6,6 +6,8 @@ import { clients } from '../db/schema/clients.js';
 import { normaliseAccountId } from '../utils/catchr-platform.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
 import { toApiError } from '../utils/to-api-error.js';
+import { AppError } from '../utils/errors.js';
+import { startUrlUpload } from './mcp-url-uploads.service.js';
 import { ApiError, accountClientMismatch, accountNotLinked } from '../utils/api-error.js';
 import { normalisePlatform } from './ad-account-links.service.js';
 import { upsertPlatformCreative } from './creative-library.service.js';
@@ -152,6 +154,15 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
     });
     if (uploadRow && !replayOf) await linkUploadToCreative(uploadRow.id, up.creative.id);
   } catch (err) {
+    // A sourceUrl bigger than the 50 MB direct limit: copy it in the background (up to 1 GB) and tell the caller to poll.
+    if (input.sourceUrl && err instanceof AppError && err.statusCode === 413) {
+      const started = await startUrlUpload(caller, input.sourceUrl);
+      throw new ApiError('upload_incomplete', 'This file is bigger than 50 MB, so Stato is copying it from the URL in the background.', {
+        retryable: true,
+        hint: 'Call complete_upload with details.uploadId until status is ready, then call upload_asset again with that uploadId (instead of sourceUrl) and the same platform, account and name.',
+        details: { uploadId: started.uploadId, reused: started.reused, retryAfter: 10 },
+      });
+    }
     toApiError(err);
   } finally {
     if (lockId) await releaseUploadClaim(lockId).catch(() => {});

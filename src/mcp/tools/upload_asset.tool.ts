@@ -11,7 +11,7 @@ export default defineTool({
   name: 'upload_asset',
   title: 'Add an image or video to Stato',
   description:
-    'File an image or video under the right client and campaign. Send either a public sourceUrl (up to 50 MB) or an uploadId: for bigger files (up to 4 GB) call create_upload, send the file to the returned URLs, call complete_upload until status is ready, then call this with the uploadId. ' +
+    'File an image or video under the right client and campaign. Send either a public sourceUrl (up to 50 MB at once; a bigger file up to 1 GB is copied in the background, and this call answers upload_incomplete with an uploadId to poll with complete_upload) or an uploadId: for bigger files (up to 4 GB) call create_upload, send the file to the returned URLs, call complete_upload until status is ready, then call this with the uploadId. ' +
     'Call find_client_by_ad_account first. Send platform and platformAccountId and Stato picks the client from the ad account; clientId is only a cross-check and a mismatch is rejected (account_client_mismatch) with nothing saved. ' +
     'An unlinked account is account_not_linked: stop and ask the owner. If the account feeds several campaigns you must send campaignId. ' +
     'Optionally send adLink to record the ad in the same call (the IDs the platform returned; all strings). ' +

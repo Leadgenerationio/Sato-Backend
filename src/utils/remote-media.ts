@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { SNIFF_BYTES, sniffMedia } from './sniff-media.js';
 import { lookup as dnsLookup } from 'node:dns/promises';
+import { lookup as dnsLookupCb } from 'node:dns';
+import { Agent, fetch as undiciFetch } from 'undici';
 import { isIP } from 'node:net';
 import { AppError, MediaSourceError } from './errors.js';
 
@@ -80,9 +82,43 @@ export function mediaTypeOf(contentType: string): 'image' | 'video' | null {
   return null;
 }
 
-export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps = {}): Promise<FetchedMedia> {
-  const fetchImpl = deps.fetchImpl ?? fetch;
+export const MAX_REDIRECTS = 3;
+
+/** A content type that says nothing about the file; the first bytes decide. */
+export const isGenericBinary = (contentType: string) => /^(application|binary)\/octet-stream/i.test(contentType.trim());
+
+/**
+ * The address check above resolves the name once; a plain fetch resolves it again to connect, so a name that answers
+ * public first and private second (DNS rebinding) would get through. This agent checks the address it is about to
+ * connect to, at connect time, and refuses a private one.
+ */
+const guardedAgent = new Agent({
+  connect: {
+    lookup: (hostname: string, options: any, cb: (err: Error | null, address?: any, family?: number) => void) => {
+      dnsLookupCb(hostname, options, (err, address, family) => {
+        if (err) return cb(err, address, family);
+        const list = Array.isArray(address) ? address : [{ address, family }];
+        if (list.some((a: { address: string }) => isPrivateAddress(a.address))) return cb(new Error('PRIVATE_ADDRESS'));
+        return cb(null, address, family);
+      });
+    },
+  },
+});
+const nativeFetch = globalThis.fetch;
+/** undici's own fetch with the guarded agent. If the global fetch was replaced (tests), that replacement is used. */
+const guardedFetch = ((input: any, init?: any) => (globalThis.fetch !== nativeFetch
+  ? globalThis.fetch(input, init)
+  : undiciFetch(input, { ...init, dispatcher: guardedAgent }))) as unknown as typeof fetch;
+const USER_AGENT = 'StatoCreativeFetcher/1.0 (+https://leadgenerationio.stato.tech)';
+
+/**
+ * Open a public URL, following up to 3 redirects and checking EVERY hop: http(s) only, and the host must resolve to a
+ * public address (so a redirect to localhost or a cloud metadata address is refused, not followed).
+ */
+export async function openPublicUrl(sourceUrl: string, deps: RemoteMediaDeps = {}, opts: { timeoutMs?: number } = {}): Promise<{ res: Response; finalUrl: URL }> {
+  const fetchImpl = deps.fetchImpl ?? guardedFetch;
   const lookup = deps.lookup ?? ((host: string) => dnsLookup(host, { all: true }));
+  const signal = AbortSignal.timeout(opts.timeoutMs ?? 30_000);
 
   let url: URL;
   try {
@@ -90,27 +126,40 @@ export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps 
   } catch {
     throw new MediaSourceError(422, 'sourceUrl is not a valid URL', 'source_unreachable');
   }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new MediaSourceError(422, 'sourceUrl must be an http(s) URL', 'source_unreachable');
+  for (let hop = 0; ; hop++) {
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+      throw new MediaSourceError(422, 'sourceUrl must be an http(s) URL', 'source_unreachable');
+    }
+    const host = url.hostname.replace(/^\[|\]$/g, '');
+    const addresses = isIP(host) ? [{ address: host }] : await lookup(host).catch(() => []);
+    if (addresses.length === 0) throw new MediaSourceError(422, `Could not resolve ${host}`, 'source_unreachable');
+    if (addresses.some((a) => isPrivateAddress(a.address))) {
+      throw new MediaSourceError(422, 'sourceUrl must point to a public address', 'source_unreachable');
+    }
+    // Some image hosts (Wikimedia, several CDNs) answer 400/403 to requests without a User-Agent: send an honest one.
+    const res = await fetchImpl(url, { redirect: 'manual', signal, headers: { 'User-Agent': USER_AGENT, Accept: 'image/*,video/*' } }).catch((err: unknown) => {
+      if (String((err as { cause?: { message?: string } })?.cause?.message ?? '').includes('PRIVATE_ADDRESS')) {
+        throw new MediaSourceError(422, 'sourceUrl must point to a public address', 'source_unreachable');
+      }
+      throw new MediaSourceError(422, `Could not download sourceUrl (${err instanceof Error ? err.message : 'network error'})`, 'source_unreachable');
+    });
+    if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+      if (hop >= MAX_REDIRECTS) throw new MediaSourceError(422, `sourceUrl redirects more than ${MAX_REDIRECTS} times`, 'source_unreachable');
+      await res.body?.cancel().catch(() => {});
+      try { url = new URL(res.headers.get('location')!, url); } catch { throw new MediaSourceError(422, 'sourceUrl redirects to an invalid address', 'source_unreachable'); }
+      continue;
+    }
+    return { res, finalUrl: url };
   }
-  const host = url.hostname.replace(/^\[|\]$/g, '');
-  const addresses = isIP(host) ? [{ address: host }] : await lookup(host).catch(() => []);
-  if (addresses.length === 0) throw new MediaSourceError(422, `Could not resolve ${host}`, 'source_unreachable');
-  if (addresses.some((a) => isPrivateAddress(a.address))) {
-    throw new MediaSourceError(422, 'sourceUrl must point to a public address', 'source_unreachable');
-  }
+}
 
-  // Some image hosts (Wikimedia, several CDNs) answer 400/403 to requests
-  // without a User-Agent — send an honest one.
-  const res = await fetchImpl(url, {
-    redirect: 'error',
-    signal: AbortSignal.timeout(30_000),
-    headers: { 'User-Agent': 'StatoCreativeFetcher/1.0 (+https://leadgenerationio.stato.tech)', Accept: 'image/*,video/*' },
-  });
+export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps = {}): Promise<FetchedMedia> {
+  const { res } = await openPublicUrl(sourceUrl, deps);
   if (!res.ok) throw new MediaSourceError(422, `Could not download sourceUrl (HTTP ${res.status})`, 'source_unreachable');
   const contentType = res.headers.get('content-type') ?? '';
   const mediaType = mediaTypeOf(contentType);
-  if (!mediaType) throw new MediaSourceError(422, `sourceUrl must be an image or video, got "${contentType || 'unknown'}"`, 'unsupported_type');
+  // Many S3 and CDN links serve media as octet-stream: the first-bytes check below decides the real type.
+  if (!mediaType && !isGenericBinary(contentType)) throw new MediaSourceError(422, `sourceUrl must be an image or video, got "${contentType || 'unknown'}"`, 'unsupported_type');
   const declared = Number(res.headers.get('content-length') ?? 0);
   if (declared > MAX_MEDIA_BYTES) throw new AppError(413, 'File too large: max 50 MB');
 

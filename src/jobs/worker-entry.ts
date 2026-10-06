@@ -17,6 +17,7 @@ import { syncAllBusinessesFromXero, recordBankFeedSync } from '../services/bank-
 import { prewarmLeadByteCache } from '../services/cache-prewarm.service.js';
 import { purgeApiHousekeeping } from '../services/retention.service.js';
 import { failUploadById, processUpload, sweepUploads } from '../services/mcp-uploads.service.js';
+import { runUrlUpload } from '../services/mcp-url-uploads.service.js';
 import { processRecurringTasks } from './recurring-tasks.js';
 import { pollOnce as pollAlertSms } from '../services/alert-sms.service.js';
 import { syncAllClientsAcrossBusinesses } from '../services/global-invoice-sync.service.js';
@@ -113,6 +114,11 @@ new Worker('media', async (job) => {
       if (job.attemptsMade + 1 >= (job.opts.attempts ?? 1)) await failUploadById(uploadId, 'Storage could not be read after several tries');
       throw err;
     }
+  }
+  // A file of 50 MB to 1 GB from a public URL: stream it into storage (upload_asset with a big sourceUrl starts this).
+  if (job.name === 'fetch-url-upload') {
+    const d = job.data as { uploadId: string; sourceUrl: string };
+    return runUrlUpload(String(d.uploadId), String(d.sourceUrl));
   }
   if (job.name !== 'thumbnail') return { skipped: true };
   return generateThumbnail(String((job.data as { creativeId: string }).creativeId));
