@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { defineTool } from '../types.js';
 import { linkAdAccount, realUserId } from '../../services/ad-account-rules.service.js';
+import { uuidShape } from '../../utils/zod-helpers.js';
 
 export default defineTool({
   name: 'link_ad_account',
@@ -10,7 +11,7 @@ export default defineTool({
     'If the account is already linked to a different client the call fails with move_requires_confirm; ask the owner, then repeat with confirmMove = true. ' +
     'campaignId must be a campaign this client buys (the Stato UUID, or the LeadByte number). Safe to repeat: the same link returns unchanged. IDs are strings.',
   inputSchema: {
-    clientId: z.string().min(1).describe('Stato client ID (UUID), from list_clients.'),
+    clientId: uuidShape().describe('Stato client ID (UUID), from list_clients.'),
     platform: z.string().min(1).max(50).describe('meta, google, tiktok or taboola. Aliases are accepted.'),
     accountId: z.string().min(1).max(100).describe('The platform ad account ID as a string (Meta with or without act_, Google with or without dashes).'),
     campaignId: z.string().min(1).max(100).optional().describe('Stato campaign UUID, or the LeadByte campaign number.'),
