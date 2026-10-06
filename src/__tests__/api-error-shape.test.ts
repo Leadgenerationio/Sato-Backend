@@ -5,6 +5,8 @@ import { errorHandler } from '../middleware/error.middleware.js';
 import { requestId } from '../middleware/request-id.middleware.js';
 import { ApiError, API_ERROR_CODES, API_ERROR_STATUS, accountNotLinked, moveRequiresConfirm } from '../utils/api-error.js';
 import { AppError, NotFoundError, UnauthorizedError, ValidationError } from '../utils/errors.js';
+import { validate } from '../middleware/validate.middleware.js';
+import { z } from 'zod';
 
 // MCP spec v1.0 section 3: one error shape for REST and MCP.
 function app() {
@@ -20,6 +22,9 @@ function app() {
   a.get('/plain-403', () => { throw new AppError(403, 'Forbidden thing'); });
   a.get('/coded', () => { const e = new AppError(409, 'taken') as AppError & { code: string }; e.code = 'custom_code'; throw e; });
   a.get('/boom', () => { throw new Error('secret internals'); });
+  a.get('/unreachable', () => { throw new ApiError('source_unreachable', 'Could not fetch'); });
+  a.use(express.json());
+  a.post('/validated', validate(z.object({ body: z.object({ accountId: z.string(), n: z.number() }) })), (_req, res) => { res.json({ ok: true }); });
   a.use(errorHandler);
   return a;
 }
@@ -75,5 +80,22 @@ describe('error shape', () => {
     const unsafe = await request(app()).get('/boom').set('X-Request-Id', 'bad id with spaces');
     expect(unsafe.headers['x-request-id']).not.toBe('bad id with spaces');
     expect(unsafe.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+  });
+  it('source_unreachable is retryable, internal_error is not', async () => {
+    expect((await request(app()).get('/unreachable')).body).toMatchObject({ code: 'source_unreachable', retryable: true });
+  });
+  it('REST validation errors use the shared shape and keep `errors` for the portal', async () => {
+    const res = await request(app()).post('/validated').set('X-Request-Id', 'bot-77').send({ n: 'x' });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ status: 'error', code: 'validation_failed', message: 'Validation failed', retryable: false, requestId: 'bot-77' });
+    expect(res.body.fields).toEqual([
+      { field: 'accountId', message: expect.any(String) },
+      { field: 'n', message: expect.any(String) },
+    ]);
+    expect(res.body.errors).toEqual([
+      { path: 'body.accountId', message: expect.any(String) },
+      { path: 'body.n', message: expect.any(String) },
+    ]);
+    expect(res.body.hint).toContain('accountId');
   });
 });
