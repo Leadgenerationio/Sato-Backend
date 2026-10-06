@@ -45,7 +45,7 @@ export function errorHandler(err: Error, _req: Request, res: Response, _next: Ne
     return;
   }
 
-  logger.error({ err }, 'Unhandled error');
+  logger.error({ err, requestId }, 'Unhandled error');
 
   res.status(500).json({
     status: 'error',
