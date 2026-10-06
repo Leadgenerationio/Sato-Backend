@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { defineTool } from '../types.js';
 import { adLinkOut } from '../schemas.js';
 import { ApiError } from '../../utils/api-error.js';
+import { uuidShape } from '../../utils/zod-helpers.js';
 import { uploadAssetFromUrl } from '../../services/mcp-upload.service.js';
 import { withIdempotency } from '../../services/tool-idempotency.service.js';
 import { realUserId } from '../../services/ad-account-rules.service.js';
@@ -21,7 +22,7 @@ export default defineTool({
     name: z.string().max(255).optional(),
     platform: z.string().max(50).optional().describe('meta, google, tiktok or taboola. With platformAccountId, the ad account decides the client.'),
     platformAccountId: z.string().max(100).optional().describe('The ad account ID as a string (Meta with or without act_).'),
-    clientId: z.string().optional().describe('Stato client ID. Only needed when there is no ad account; otherwise a cross-check.'),
+    clientId: uuidShape().optional().describe('Stato client ID. Only needed when there is no ad account; otherwise a cross-check.'),
     campaignId: z.string().max(100).optional().describe('Stato campaign UUID or the LeadByte number. Required when the account feeds more than one campaign.'),
     headline: z.string().max(2000).optional(),
     bodyText: z.string().max(10000).optional(),

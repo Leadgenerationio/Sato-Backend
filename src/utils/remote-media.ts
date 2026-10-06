@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
-import { AppError } from './errors.js';
+import { AppError, MediaSourceError } from './errors.js';
 
 // Fetches an ad's image/video from a URL the caller supplies (POST /creatives
 // with `sourceUrl`, and the Meta/Taboola sync). Guards:
@@ -87,16 +87,16 @@ export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps 
   try {
     url = new URL(sourceUrl);
   } catch {
-    throw new AppError(422, 'sourceUrl is not a valid URL');
+    throw new MediaSourceError(422, 'sourceUrl is not a valid URL', 'source_unreachable');
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new AppError(422, 'sourceUrl must be an http(s) URL');
+    throw new MediaSourceError(422, 'sourceUrl must be an http(s) URL', 'source_unreachable');
   }
   const host = url.hostname.replace(/^\[|\]$/g, '');
   const addresses = isIP(host) ? [{ address: host }] : await lookup(host).catch(() => []);
-  if (addresses.length === 0) throw new AppError(422, `Could not resolve ${host}`);
+  if (addresses.length === 0) throw new MediaSourceError(422, `Could not resolve ${host}`, 'source_unreachable');
   if (addresses.some((a) => isPrivateAddress(a.address))) {
-    throw new AppError(422, 'sourceUrl must point to a public address');
+    throw new MediaSourceError(422, 'sourceUrl must point to a public address', 'source_unreachable');
   }
 
   // Some image hosts (Wikimedia, several CDNs) answer 400/403 to requests
@@ -106,10 +106,10 @@ export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps 
     signal: AbortSignal.timeout(30_000),
     headers: { 'User-Agent': 'StatoCreativeFetcher/1.0 (+https://leadgenerationio.stato.tech)', Accept: 'image/*,video/*' },
   });
-  if (!res.ok) throw new AppError(422, `Could not download sourceUrl (HTTP ${res.status})`);
+  if (!res.ok) throw new MediaSourceError(422, `Could not download sourceUrl (HTTP ${res.status})`, 'source_unreachable');
   const contentType = res.headers.get('content-type') ?? '';
   const mediaType = mediaTypeOf(contentType);
-  if (!mediaType) throw new AppError(422, `sourceUrl must be an image or video, got "${contentType || 'unknown'}"`);
+  if (!mediaType) throw new MediaSourceError(422, `sourceUrl must be an image or video, got "${contentType || 'unknown'}"`, 'unsupported_type');
   const declared = Number(res.headers.get('content-length') ?? 0);
   if (declared > MAX_MEDIA_BYTES) throw new AppError(413, 'File too large: max 50 MB');
 

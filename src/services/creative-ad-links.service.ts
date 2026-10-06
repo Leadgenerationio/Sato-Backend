@@ -163,13 +163,13 @@ export async function linkAdPlatformIds(caller: Caller & { source: 'mcp' | 'api'
   // account that feeds several campaigns makes the caller choose (never a guess).
   let campaignId: string | null = null;
   if (input.campaignId) {
-    const campaign = await resolveCampaignRef(input.campaignId);
+    const campaign = await resolveCampaignRef(input.campaignId, caller.businessId);
     await assertCampaignBelongsToClient(clientId, campaign.id);
     campaignId = campaign.id;
   } else if (creative.campaignId) {
     campaignId = creative.campaignId;
   } else {
-    const choices = await campaignsForAccount(stored, accountId);
+    const choices = await campaignsForAccount(stored, accountId, caller.businessId);
     if (choices.length > 1) {
       throw new ApiError('validation_failed', `Ad account ${accountId} feeds ${choices.length} campaigns: send campaignId.`, {
         fields: [{ field: 'campaignId', message: 'Required when the account feeds several campaigns' }],

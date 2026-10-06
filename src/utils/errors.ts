@@ -9,6 +9,17 @@ export class AppError extends Error {
   }
 }
 
+/**
+ * A problem with a file the caller pointed us at. `reason` lets the MCP layer
+ * map it to a spec code without matching on the message text.
+ */
+export class MediaSourceError extends AppError {
+  constructor(statusCode: number, message: string, public readonly reason: 'source_unreachable' | 'unsupported_type') {
+    super(statusCode, message);
+    Object.setPrototypeOf(this, MediaSourceError.prototype);
+  }
+}
+
 export class NotFoundError extends AppError {
   constructor(resource: string) {
     super(404, `${resource} not found`);
