@@ -1288,7 +1288,8 @@ export async function getCompliance(requester: AuthPayload): Promise<PortalCompl
           name: cr.name,
           type: cr.type ?? 'unknown',
           uploadedAt: (cr.createdAt ?? new Date()).toISOString(),
-          fileUrl: cr.fileUrl,
+          // Copy-only creatives (migration 0055) have no file: keep the field a string for the portal.
+          fileUrl: cr.fileUrl ?? '',
           signedUrl: signedUrlByCreativeId.get(cr.id) ?? null,
           approval: {
             status: state?.status ?? 'pending',
@@ -1427,7 +1428,7 @@ export async function getCreativesBySection(requester: AuthPayload): Promise<Por
       campaignName: r.campaignName,
       name: r.name,
       type: r.type ?? 'unknown',
-      fileUrl: r.fileUrl,
+      fileUrl: r.fileUrl ?? '',
       r2Key: r.r2Key,
       signedUrl: signedUrlByCreativeId.get(r.id) ?? null,
       uploadedAt: (r.createdAt ?? new Date()).toISOString(),

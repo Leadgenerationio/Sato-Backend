@@ -68,7 +68,7 @@ export interface CreativeDto {
   campaignId: string | null;
   name: string;
   type: 'image' | 'video' | 'text' | string;
-  fileUrl: string;
+  fileUrl: string | null;
   r2Key: string | null;
   sizeBytes: number | null;
   contentType: string | null;

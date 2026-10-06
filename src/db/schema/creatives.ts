@@ -1,4 +1,6 @@
-import { pgTable, uuid, varchar, integer, timestamp, boolean, index, pgEnum, text, decimal, char } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, varchar, integer, bigint, timestamp, boolean, index, pgEnum, text, decimal, char } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
+import { apiKeys } from './api-keys.js';
 import { clients } from './clients.js';
 import { landingPages } from './landing-pages.js';
 import { campaigns } from './campaigns.js';
@@ -30,12 +32,14 @@ export const creatives = pgTable('creatives', {
   // Meta/Taboola may belong to a client with no campaign yet.
   campaignId: uuid('campaign_id').references(() => campaigns.id),
   name: varchar('name', { length: 255 }).notNull(),
-  fileUrl: varchar('file_url', { length: 500 }).notNull(),
+  // Nullable since migration 0055: copy-only assets (type = 'copy') have no file.
+  fileUrl: varchar('file_url', { length: 500 }),
   type: varchar('type', { length: 50 }),
   version: integer('version').default(1),
   // Added in migration 0006: R2 storage details + soft-delete.
   r2Key: varchar('r2_key', { length: 500 }),
-  sizeBytes: integer('size_bytes'),
+  // bigint since migration 0055 (a 4 GB video overflows a 32-bit integer).
+  sizeBytes: bigint('size_bytes', { mode: 'number' }),
   contentType: varchar('content_type', { length: 120 }),
   uploadedBy: uuid('uploaded_by').references(() => users.id),
   isDeleted: boolean('is_deleted').notNull().default(false),
@@ -67,6 +71,16 @@ export const creatives = pgTable('creatives', {
   thumbnailKey: varchar('thumbnail_key', { length: 500 }),
   firstSeen: timestamp('first_seen', { withTimezone: true }),
   lastSeen: timestamp('last_seen', { withTimezone: true }),
+  // Migration 0055 (MCP connector): archive without deleting the file, upload
+  // processing state, where the row came from, which API key made it, tags.
+  archivedAt: timestamp('archived_at', { withTimezone: true }),
+  archivedBy: uuid('archived_by').references(() => users.id, { onDelete: 'set null' }),
+  /** processing -> ready | failed. */
+  fileStatus: varchar('file_status', { length: 16 }).notNull().default('ready'),
+  /** portal | api | mcp | sync. */
+  source: varchar('source', { length: 16 }).notNull().default('portal'),
+  createdByKeyId: uuid('created_by_key_id').references(() => apiKeys.id, { onDelete: 'set null' }),
+  tags: text('tags').array().notNull().default(sql`'{}'::text[]`),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 }, (table) => [
@@ -76,6 +90,7 @@ export const creatives = pgTable('creatives', {
   index('creatives_is_deleted_idx').on(table.isDeleted),
   index('creatives_section_idx').on(table.section),
   index('creatives_status_idx').on(table.status),
+  index('creatives_archived_at_idx').on(table.archivedAt),
 ]);
 
 export type CreativeSection = 'media' | 'copy_lp';

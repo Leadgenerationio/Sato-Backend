@@ -17,6 +17,9 @@ export const clientAdAccounts = pgTable('client_ad_accounts', {
   campaignId: uuid('campaign_id').references(() => campaigns.id, { onDelete: 'set null' }),
   currency: varchar('currency', { length: 3 }),
   linkedBy: uuid('linked_by').references(() => users.id, { onDelete: 'set null' }),
+  // Migration 0055: a confirmed move from another client is recorded here.
+  movedFromClientId: uuid('moved_from_client_id').references(() => clients.id, { onDelete: 'set null' }),
+  movedAt: timestamp('moved_at', { withTimezone: true }),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 }, (t) => [

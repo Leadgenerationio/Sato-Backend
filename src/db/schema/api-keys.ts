@@ -16,6 +16,9 @@ export const apiKeys = pgTable('api_keys', {
   lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
   expiresAt: timestamp('expires_at', { withTimezone: true }),
   revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  // Migration 0055. NULL allowed_client_ids = every client in the business.
+  allowedClientIds: uuid('allowed_client_ids').array(),
+  agentLabel: varchar('agent_label', { length: 100 }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 }, (t) => [index('api_keys_business_idx').on(t.businessId)]);
 
