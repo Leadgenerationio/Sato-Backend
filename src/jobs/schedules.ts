@@ -86,7 +86,8 @@ export async function registerSchedules() {
     data: {},
   });
 
-  // Purge expired Idempotency-Key replays (>24 h) and old API usage rows (>90 d).
+  // Purge expired Idempotency-Key replays (>24 h), old API usage rows (>90 d) and
+  // API audit rows older than 12 months.
   await syncQueue.upsertJobScheduler('api-housekeeping', {
     pattern: '30 3 * * *',
   }, {
