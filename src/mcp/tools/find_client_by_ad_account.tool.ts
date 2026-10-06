@@ -16,8 +16,8 @@ export default defineTool({
   outputSchema: {
     platform: z.string(),
     accountId: z.string(),
-    client: z.object({ id: z.string(), name: z.string(), currency: z.string().nullable() }),
-    campaign: z.object({ id: z.string(), name: z.string() }).nullable(),
+    client: z.object({ clientId: z.string(), name: z.string(), currency: z.string().nullable() }),
+    campaign: z.object({ campaignId: z.string(), name: z.string() }).nullable(),
     campaigns: z.array(z.object({ campaignId: z.string(), name: z.string() })),
     campaignRequired: z.boolean(),
   },

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import { eq, inArray } from 'drizzle-orm';
 import app from '../index.js';
@@ -9,6 +9,10 @@ import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { trafficSources } from '../db/schema/traffic-sources.js';
 import { apiKeys } from '../db/schema/api-keys.js';
+import { businesses } from '../db/schema/businesses.js';
+import { creatives } from '../db/schema/creatives.js';
+import { creativeAdLinks } from '../db/schema/creative-ad-links.js';
+import { linkAdAccount } from '../services/ad-account-rules.service.js';
 
 // MCP spec v1.0 tests 5, 6, 7, 14 (ad-account side) and the several-campaigns rule.
 const BIZ = '26d6b2b4-c867-460e-8473-eca2b1ffd232';
@@ -82,7 +86,7 @@ describe('link_ad_account', () => {
     expect(r.isError).toBeUndefined();
     expect(r.structuredContent).toMatchObject({ result: 'created', link: { platform: 'meta', accountId: `${ACC}1`, clientId: clientA } });
     const f = await call(readKey, 'find_client_by_ad_account', { platform: 'meta', accountId: `${ACC}1` });
-    expect(f.structuredContent).toMatchObject({ platform: 'meta', accountId: `${ACC}1`, client: { id: clientA }, campaignRequired: false });
+    expect(f.structuredContent).toMatchObject({ platform: 'meta', accountId: `${ACC}1`, client: { clientId: clientA }, campaignRequired: false });
     const [row] = await db.select().from(clientAdAccounts).where(eq(clientAdAccounts.accountId, `${ACC}1`));
     expect(row).toMatchObject({ platform: 'facebook-ads', linkedByKeyId: fullKeyId });
   });
@@ -163,5 +167,86 @@ describe('POST /clients/:id/ad-accounts (REST) uses the same rules', () => {
     const moved = await post(clientB, { platform: 'meta', accountId: acc, confirmMove: true });
     expect(moved.status).toBe(200);
     expect(moved.body.data.link).toMatchObject({ action: 'moved', platform: 'meta', movedFromClientId: clientA });
+  });
+});
+
+describe('review of #74', () => {
+  const caller = { businessId: BIZ, userId: null, keyId: null };
+  const post = (id: string, body: Record<string, unknown>) =>
+    request(app).post(`/api/v1/clients/${id}/ad-accounts`).set('X-API-Key', fullKey).send(body);
+  const ids = (r: { structuredContent: Record<string, any> }) => (r.structuredContent.campaigns as Array<{ campaignId: string }>).map((c) => c.campaignId).sort();
+
+  it('a non-UUID clientId is validation_failed naming clientId, not internal_error', async () => {
+    const r = await call(fullKey, 'link_ad_account', { clientId: 'abc', platform: 'meta', accountId: `${ACC}9` });
+    expect(r.isError).toBe(true);
+    expect(r.structuredContent).toMatchObject({ code: 'validation_failed', fields: [{ field: 'clientId' }] });
+  });
+
+  it('REST: campaignId null clears the campaign, leaving it out keeps it', async () => {
+    const acc = `${ACC}10`;
+    expect((await post(clientA, { platform: 'meta', accountId: acc, campaignId: c1 })).status).toBe(201);
+    const keep = await post(clientA, { platform: 'meta', accountId: acc });
+    expect(keep.body.data.link).toMatchObject({ action: 'unchanged', campaignName: expect.any(String) });
+    const cleared = await post(clientA, { platform: 'meta', accountId: acc, campaignId: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.data.link).toMatchObject({ action: 'updated', campaignName: null });
+    const [row] = await db.select().from(clientAdAccounts).where(eq(clientAdAccounts.accountId, acc));
+    expect(row!.campaignId).toBeNull();
+  });
+
+  it('campaigns include the account link, a traffic source written with act_, and the ads recorded on it', async () => {
+    const acc = `${ACC}11`;
+    await call(fullKey, 'link_ad_account', { clientId: clientA, platform: 'meta', accountId: acc, campaignId: c1 });
+    // Own campaign only: one campaign, not required, and `campaigns` is not empty.
+    let f = await call(readKey, 'find_client_by_ad_account', { platform: 'meta', accountId: acc });
+    expect(f.structuredContent).toMatchObject({ campaignRequired: false, campaign: { campaignId: c1 } });
+    expect(ids(f)).toEqual([c1]);
+    // A traffic source that stores the ID as act_… still matches.
+    await db.insert(trafficSources).values({ campaignId: c3, name: `Yash WFA act ${tag}`, platform: 'facebook-ads', accountId: `act_${acc}` });
+    f = await call(readKey, 'find_client_by_ad_account', { platform: 'meta', accountId: acc });
+    expect(ids(f)).toEqual([c1, c3].sort());
+    expect(f.structuredContent.campaignRequired).toBe(true);
+    expect(f.structuredContent.client).toMatchObject({ clientId: clientA });
+    // An ad recorded on the account for a third campaign joins the list.
+    const [cr] = await db.insert(creatives).values({ name: `Yash WFA cr ${tag}`, fileUrl: 'x', clientId: clientA }).returning();
+    await db.insert(creativeAdLinks).values({ businessId: BIZ, creativeId: cr!.id, platform: 'meta', platformAccountId: acc, platformAdId: `w${tag}`, campaignId: c2 });
+    f = await call(readKey, 'find_client_by_ad_account', { platform: 'meta', accountId: acc });
+    expect(ids(f)).toEqual([c1, c2, c3].sort());
+    await db.delete(creativeAdLinks).where(eq(creativeAdLinks.creativeId, cr!.id));
+    await db.delete(creatives).where(eq(creatives.id, cr!.id));
+  });
+
+  it('two calls for a new account at once both settle (created + unchanged), no internal_error', async () => {
+    const acc = `${ACC}12`;
+    const [a, b] = await Promise.all([
+      linkAdAccount(caller, { clientId: clientA, platform: 'meta', accountId: acc }),
+      linkAdAccount(caller, { clientId: clientA, platform: 'meta', accountId: acc }),
+    ]);
+    expect([a.result, b.result].sort()).toEqual(['created', 'unchanged']);
+  });
+
+  it('a lost race on the unique index (wrapped 23505) is retried once and settles on the winner', async () => {
+    const acc = `${ACC}13`;
+    await linkAdAccount(caller, { clientId: clientA, platform: 'meta', accountId: acc });
+    const spy = vi.spyOn(db, 'transaction').mockImplementationOnce((async () => {
+      throw Object.assign(new Error('Failed query'), { cause: { code: '23505' } });
+    }) as unknown as typeof db.transaction);
+    const out = await linkAdAccount(caller, { clientId: clientA, platform: 'meta', accountId: acc });
+    spy.mockRestore();
+    expect(out.result).toBe('unchanged');
+  });
+
+  it('an account linked by another business is not_found, and does not say it exists', async () => {
+    const [other] = await db.insert(businesses).values({ name: `Yash Test Biz ${tag}`, slug: `yash-test-${tag}` }).returning();
+    const [oc] = await db.insert(clients).values({ businessId: other!.id, companyName: `Yash Test Other ${tag}`, status: 'active' }).returning();
+    const acc = `${ACC}14`;
+    await db.insert(clientAdAccounts).values({ businessId: other!.id, platform: 'facebook-ads', accountId: acc, clientId: oc!.id });
+    const r = await call(fullKey, 'link_ad_account', { clientId: clientA, platform: 'meta', accountId: acc });
+    expect(r.isError).toBe(true);
+    expect(r.structuredContent.code).toBe('not_found');
+    expect(JSON.stringify(r.structuredContent)).not.toMatch(/another business|mismatch/i);
+    await db.delete(clientAdAccounts).where(eq(clientAdAccounts.clientId, oc!.id));
+    await db.delete(clients).where(eq(clients.id, oc!.id));
+    await db.delete(businesses).where(eq(businesses.id, other!.id));
   });
 });

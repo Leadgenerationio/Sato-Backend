@@ -6,10 +6,11 @@ import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { normaliseAccountId } from '../utils/catchr-platform.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
 import { ApiError, accountClientMismatch } from '../utils/api-error.js';
+import { isUniqueViolation } from '../utils/pg-errors.js';
 import { normalisePlatform } from './ad-account-links.service.js';
 import { creativeBelongsToBusiness, ensureLandingPage, type CreativeRow } from './creative-library.service.js';
 import { domainEvents } from './events.js';
-import type { Caller } from './ad-account-rules.service.js';
+import { assertCampaignBelongsToClient, campaignsForAccount, resolveCampaignRef, type Caller } from './ad-account-rules.service.js';
 
 // MCP spec v1.0 section 2: link_ad_platform_ids, unlink_ad_platform_ids and
 // find_asset_by_platform_id. One asset is often used in several ads, accounts
@@ -21,8 +22,11 @@ export interface AdLinkInput {
   creativeId: string;
   platform: string;
   accountId: string;
+  /** The Stato campaign (UUID or LeadByte number). Left out: the asset's campaign, then the account's. */
   campaignId?: string;
-  campaignName?: string;
+  /** The ad platform's own campaign ID and name. */
+  platformCampaignId?: string;
+  platformCampaignName?: string;
   adsetId?: string;
   adsetName?: string;
   adId?: string;
@@ -30,7 +34,8 @@ export interface AdLinkInput {
   platformCreativeId?: string;
   platformAssetId?: string;
   landingPageUrl?: string;
-  status?: CreativeAdLinkStatus;
+  /** A link is never created as removed; unlink_ad_platform_ids does that. */
+  status?: Exclude<CreativeAdLinkStatus, 'removed'>;
 }
 
 export interface AdLinkDto {
@@ -98,16 +103,44 @@ async function loadCreativeForCaller(caller: Caller, creativeId: string): Promis
 }
 
 export interface LinkAdResult {
-  result: 'created' | 'unchanged' | 'updated';
+  result: 'created' | 'unchanged' | 'updated' | 'duplicate';
+  /** For duplicate: the link that already holds this ad (another asset's). Nothing was saved. */
   link: AdLinkDto;
   before: AdLinkDto | null;
 }
+
+/** The live link for an ad (or, with no ad ID, for this creative's own ad-less link). */
+async function findLiveLink(businessId: string | null, platform: string, creativeId: string, input: AdLinkInput) {
+  const live = ne(creativeAdLinks.status, 'removed');
+  if (input.adId) {
+    // The unique index on (platform, ad ID) is global, so look across businesses when asked.
+    const [row] = await db.select().from(creativeAdLinks).where(and(
+      eq(creativeAdLinks.platform, platform), eq(creativeAdLinks.platformAdId, input.adId), live,
+      ...(businessId ? [eq(creativeAdLinks.businessId, businessId)] : []),
+    ));
+    return row;
+  }
+  const [row] = await db.select().from(creativeAdLinks).where(and(
+    eq(creativeAdLinks.creativeId, creativeId), eq(creativeAdLinks.platform, platform), live,
+    sql`${creativeAdLinks.platformAdId} is null`,
+    sql`coalesce(${creativeAdLinks.platformCreativeId}, '') = ${input.platformCreativeId ?? ''}`,
+    sql`coalesce(${creativeAdLinks.platformAssetId}, '') = ${input.platformAssetId ?? ''}`,
+  ));
+  return row;
+}
+
+const duplicateOf = (existing: CreativeAdLinkRow): LinkAdResult => ({ result: 'duplicate', link: toAdLinkDto(existing), before: toAdLinkDto(existing) });
 
 export async function linkAdPlatformIds(caller: Caller & { source: 'mcp' | 'api' }, input: AdLinkInput): Promise<LinkAdResult> {
   if (!input.adId && !input.platformCreativeId && !input.platformAssetId) {
     throw new ApiError('validation_failed', 'Send at least one of adId, platformCreativeId or platformAssetId.', {
       fields: [{ field: 'adId', message: 'adId, platformCreativeId or platformAssetId is required' }],
       hint: 'Use the IDs the ad platform returned when you created the ad. They are strings.',
+    });
+  }
+  if ((input.status as string | undefined) === 'removed') {
+    throw new ApiError('validation_failed', 'A link cannot be created as removed.', {
+      fields: [{ field: 'status', message: 'Use active, paused or unknown' }], hint: 'Use unlink_ad_platform_ids to remove a link.',
     });
   }
   const { stored, platform } = libraryPlatform(input.platform);
@@ -124,32 +157,40 @@ export async function linkAdPlatformIds(caller: Caller & { source: 'mcp' | 'api'
     });
   }
   if (creative.clientId && owner.clientId !== creative.clientId) throw accountClientMismatch(accountId);
-
   const clientId = creative.clientId ?? owner.clientId;
-  let landingPageId: string | null = null;
-  if (input.landingPageUrl) landingPageId = (await ensureLandingPage(clientId, input.landingPageUrl, { campaignId: creative.campaignId ?? owner.campaignId })).page.id;
 
-  const live = ne(creativeAdLinks.status, 'removed');
-  const [existing] = input.adId
-    ? await db.select().from(creativeAdLinks).where(and(eq(creativeAdLinks.platform, platform), eq(creativeAdLinks.platformAdId, input.adId), live))
-    : await db.select().from(creativeAdLinks).where(and(
-        eq(creativeAdLinks.creativeId, creative.id), eq(creativeAdLinks.platform, platform), live,
-        sql`${creativeAdLinks.platformAdId} is null`,
-        sql`coalesce(${creativeAdLinks.platformCreativeId}, '') = ${input.platformCreativeId ?? ''}`,
-        sql`coalesce(${creativeAdLinks.platformAssetId}, '') = ${input.platformAssetId ?? ''}`,
-      ));
-
-  if (existing && existing.creativeId !== creative.id) {
-    throw new ApiError('duplicate', `That ${platform} ad is already linked to another asset.`, {
-      hint: 'Use find_asset_by_platform_id to see it. If it is wrong, unlink it first with unlink_ad_platform_ids.',
-      details: { adLinkId: existing.id, creativeId: existing.creativeId },
-    });
+  // The Stato campaign: what the caller sent, else the asset's. With neither, an
+  // account that feeds several campaigns makes the caller choose (never a guess).
+  let campaignId: string | null = null;
+  if (input.campaignId) {
+    const campaign = await resolveCampaignRef(input.campaignId);
+    await assertCampaignBelongsToClient(clientId, campaign.id);
+    campaignId = campaign.id;
+  } else if (creative.campaignId) {
+    campaignId = creative.campaignId;
+  } else {
+    const choices = await campaignsForAccount(stored, accountId);
+    if (choices.length > 1) {
+      throw new ApiError('validation_failed', `Ad account ${accountId} feeds ${choices.length} campaigns: send campaignId.`, {
+        fields: [{ field: 'campaignId', message: 'Required when the account feeds several campaigns' }],
+        hint: `Choose one: ${choices.map((c) => `${c.name} (${c.campaignId})`).join(', ')}. Nothing was saved.`,
+        details: { campaigns: choices },
+      });
+    }
+    campaignId = choices[0]?.campaignId ?? owner.campaignId ?? null;
   }
+
+  // The ad already runs another asset: answer with it and save nothing (not even a landing page).
+  const existing = await findLiveLink(caller.businessId, platform, creative.id, input);
+  if (existing && existing.creativeId !== creative.id) return duplicateOf(existing);
+
+  let landingPageId: string | null = null;
+  if (input.landingPageUrl) landingPageId = (await ensureLandingPage(clientId, input.landingPageUrl, { campaignId })).page.id;
 
   const fields = {
     platformAccountId: accountId,
-    platformCampaignId: input.campaignId ?? null,
-    platformCampaignName: input.campaignName ?? null,
+    platformCampaignId: input.platformCampaignId ?? null,
+    platformCampaignName: input.platformCampaignName ?? null,
     platformAdsetId: input.adsetId ?? null,
     platformAdsetName: input.adsetName ?? null,
     platformAdId: input.adId ?? null,
@@ -160,55 +201,73 @@ export async function linkAdPlatformIds(caller: Caller & { source: 'mcp' | 'api'
     status: input.status ?? 'active',
   };
 
-  let result: LinkAdResult['result'];
-  let row: CreativeAdLinkRow;
-  let before: AdLinkDto | null = null;
-  const now = new Date();
-  if (existing) {
-    before = toAdLinkDto(existing);
+  const settle = async (link: CreativeAdLinkRow): Promise<LinkAdResult> => {
+    const before = toAdLinkDto(link);
+    const now = new Date();
     // Only change what the caller sent; a call that omits a name must not blank one.
     const patch: Partial<typeof creativeAdLinks.$inferInsert> = {};
     for (const [k, v] of Object.entries(fields)) {
       if (v === null || v === undefined) continue;
-      if ((existing as Record<string, unknown>)[k] !== v) (patch as Record<string, unknown>)[k] = v;
+      // A repeat call that omits status keeps the stored one.
+      if (k === 'status' && !input.status) continue;
+      if ((link as Record<string, unknown>)[k] !== v) (patch as Record<string, unknown>)[k] = v;
     }
+    if (input.campaignId && link.campaignId !== campaignId) patch.campaignId = campaignId;
     if (Object.keys(patch).length === 0) {
-      await db.update(creativeAdLinks).set({ lastSeen: now }).where(eq(creativeAdLinks.id, existing.id));
-      return { result: 'unchanged', link: toAdLinkDto(existing), before };
+      await db.update(creativeAdLinks).set({ lastSeen: now }).where(eq(creativeAdLinks.id, link.id));
+      return { result: 'unchanged', link: before, before };
     }
-    [row] = await db.update(creativeAdLinks).set({ ...patch, lastSeen: now, updatedAt: now }).where(eq(creativeAdLinks.id, existing.id)).returning();
+    const [row] = await db.update(creativeAdLinks).set({ ...patch, lastSeen: now, updatedAt: now }).where(eq(creativeAdLinks.id, link.id)).returning();
+    return { result: 'updated', link: toAdLinkDto(row!), before };
+  };
+
+  let result: LinkAdResult['result'];
+  let linkDto: AdLinkDto;
+  let before: AdLinkDto | null = null;
+  const now = new Date();
+  if (existing) {
+    const settled = await settle(existing);
+    if (settled.result === 'unchanged') return settled;
     result = 'updated';
+    before = settled.before;
+    linkDto = settled.link;
   } else {
     try {
-      [row] = await db.insert(creativeAdLinks).values({
-        businessId: caller.businessId, creativeId: creative.id, clientId, campaignId: creative.campaignId ?? owner.campaignId, platform,
+      const [inserted] = await db.insert(creativeAdLinks).values({
+        businessId: caller.businessId, creativeId: creative.id, clientId, campaignId, platform,
         ...fields, source: caller.source, linkedBy: caller.userId, createdByKeyId: caller.keyId,
       }).returning();
+      linkDto = toAdLinkDto(inserted!);
       result = 'created';
     } catch (err) {
-      // Two calls at once for the same ad: the unique index let one through; return that one.
-      if ((err as { code?: string }).code === '23505') {
-        const [again] = await db.select().from(creativeAdLinks).where(and(eq(creativeAdLinks.platform, platform), eq(creativeAdLinks.platformAdId, input.adId ?? ''), live));
-        if (again && again.creativeId === creative.id) return { result: 'unchanged', link: toAdLinkDto(again), before: null };
-        throw new ApiError('duplicate', `That ${platform} ad is already linked to another asset.`, { details: { adLinkId: again?.id, creativeId: again?.creativeId } });
+      // Two calls at once for the same ad: the unique index let one through. Drizzle wraps the
+      // Postgres error, so the code is on err.cause. Settle on the winner.
+      if (!isUniqueViolation(err)) throw err;
+      const winner = await findLiveLink(null, platform, creative.id, input);
+      if (!winner) throw err;
+      if (winner.creativeId !== creative.id || winner.businessId !== caller.businessId) {
+        // Another asset holds it; another business's IDs are not shown.
+        if (winner.businessId !== caller.businessId) throw new ApiError('duplicate', `That ${platform} ad is already linked to another asset.`, { hint: 'Nothing was saved.' });
+        return duplicateOf(winner);
       }
-      throw err;
+      return settle(winner);
     }
   }
 
   // The first link also fills the old single platform columns (kept for the portal and the pull).
+  // Portal uploads carry platform 'manual', which counts as empty.
   const legacy: Partial<typeof creatives.$inferInsert> = {};
-  if (!creative.platform) legacy.platform = platform;
+  if (!creative.platform || creative.platform === 'manual') legacy.platform = platform;
   if (!creative.platformAccountId) legacy.platformAccountId = accountId;
   if (!creative.platformAdId && input.adId) legacy.platformAdId = input.adId;
   if (!creative.platformCreativeId && input.platformCreativeId) legacy.platformCreativeId = input.platformCreativeId;
-  if (!creative.platformCampaignId && input.campaignId) legacy.platformCampaignId = input.campaignId;
-  if (!creative.platformCampaignName && input.campaignName) legacy.platformCampaignName = input.campaignName;
+  if (!creative.platformCampaignId && input.platformCampaignId) legacy.platformCampaignId = input.platformCampaignId;
+  if (!creative.platformCampaignName && input.platformCampaignName) legacy.platformCampaignName = input.platformCampaignName;
   if (!creative.landingPageId && landingPageId) legacy.landingPageId = landingPageId;
   if (Object.keys(legacy).length) await db.update(creatives).set({ ...legacy, updatedAt: now }).where(eq(creatives.id, creative.id));
 
   domainEvents.emit('creative.changed', { businessId: caller.businessId, data: { creativeId: creative.id, clientId, platform } });
-  return { result, link: toAdLinkDto(row!), before };
+  return { result, link: linkDto, before };
 }
 
 export interface UnlinkResult { result: 'removed' | 'unchanged'; link: AdLinkDto; before: AdLinkDto }

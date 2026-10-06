@@ -3,12 +3,23 @@
 -- EXISTS / a no-op when already done. DDL plus one backfill, no data deleted.
 
 -- ─── creatives ───────────────────────────────────────────────────────────
--- A 4 GB video does not fit a 32-bit integer (max ~2.1 GB). Same type again
--- is a no-op on later boots.
-ALTER TABLE creatives ALTER COLUMN size_bytes TYPE bigint;
+-- A 4 GB video does not fit a 32-bit integer (max ~2.1 GB). Checked first:
+-- even a same-type ALTER takes an ACCESS EXCLUSIVE lock on creatives, and this
+-- file runs on every boot.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'creatives' AND column_name = 'size_bytes' AND data_type <> 'bigint') THEN
+    ALTER TABLE creatives ALTER COLUMN size_bytes TYPE bigint;
+  END IF;
+END $$;
 --> statement-breakpoint
--- Copy-only assets (type = 'copy', headline/body text, no file).
-ALTER TABLE creatives ALTER COLUMN file_url DROP NOT NULL;
+-- Copy-only assets (type = 'copy', headline/body text, no file). Same check.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'creatives' AND column_name = 'file_url' AND is_nullable = 'NO') THEN
+    ALTER TABLE creatives ALTER COLUMN file_url DROP NOT NULL;
+  END IF;
+END $$;
 --> statement-breakpoint
 ALTER TABLE creatives ADD COLUMN IF NOT EXISTS archived_at timestamptz;
 --> statement-breakpoint
@@ -19,8 +30,16 @@ ALTER TABLE creatives ADD COLUMN IF NOT EXISTS archive_reason varchar(255);
 -- processing -> ready | failed. Existing rows are files already stored.
 ALTER TABLE creatives ADD COLUMN IF NOT EXISTS file_status varchar(16) NOT NULL DEFAULT 'ready';
 --> statement-breakpoint
--- Where the row came from: portal | api | mcp | sync.
-ALTER TABLE creatives ADD COLUMN IF NOT EXISTS source varchar(16) NOT NULL DEFAULT 'portal';
+-- Where the row came from: portal | api | mcp | sync. Rows that already exist
+-- and carry a platform other than 'manual' were written by the pull or the API,
+-- so they start as 'sync'. Done once, when the column is added, never on a later boot.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'creatives' AND column_name = 'source') THEN
+    ALTER TABLE creatives ADD COLUMN source varchar(16) NOT NULL DEFAULT 'portal';
+    UPDATE creatives SET source = 'sync' WHERE platform IS NOT NULL AND platform <> 'manual';
+  END IF;
+END $$;
 --> statement-breakpoint
 ALTER TABLE creatives ADD COLUMN IF NOT EXISTS created_by_key_id uuid REFERENCES api_keys(id) ON DELETE SET NULL;
 --> statement-breakpoint
@@ -81,10 +100,19 @@ CREATE INDEX IF NOT EXISTS creative_ad_links_campaign_idx ON creative_ad_links (
 -- creative ID. Oldest creative wins when two share an ad ID, the rest stay
 -- without a link (the unique index below needs one owner per ad). Creatives with no
 -- client have no business to file the link under and are skipped. Safe to
--- re-run: a creative that already has a link is never inserted again.
+-- re-run: a creative that already has a link is never inserted again, and ON
+-- CONFLICT DO NOTHING covers an ad that a later creative (the pull, or POST
+-- /creatives with platformAdId) shares with an existing link: without it the
+-- unique index below fails this statement on the next boot and the API never
+-- starts. Each boot therefore also gives a new pull/API creative that carries an
+-- ad ID a 'sync' link, so the links stay in step with the legacy platform_* columns.
+-- The account ID is stored normalised (no act_ on Meta, no dashes on Google), as
+-- new links are, so lookups by account find these rows too.
 INSERT INTO creative_ad_links (business_id, creative_id, client_id, campaign_id, platform, platform_account_id, platform_campaign_id, platform_campaign_name, platform_ad_id, platform_creative_id, landing_page_id, source, first_seen, last_seen, created_at)
 SELECT DISTINCT ON (c.platform, COALESCE(c.platform_ad_id, 'creative:' || c.platform_creative_id))
-       cl.business_id, c.id, c.client_id, c.campaign_id, c.platform, c.platform_account_id, c.platform_campaign_id, c.platform_campaign_name, c.platform_ad_id, c.platform_creative_id, c.landing_page_id,
+       cl.business_id, c.id, c.client_id, c.campaign_id, c.platform,
+       CASE c.platform WHEN 'meta' THEN regexp_replace(c.platform_account_id, '^act_', '', 'i') WHEN 'google' THEN replace(c.platform_account_id, '-', '') ELSE c.platform_account_id END,
+       c.platform_campaign_id, c.platform_campaign_name, c.platform_ad_id, c.platform_creative_id, c.landing_page_id,
        'sync', COALESCE(c.first_seen, c.created_at, now()), COALESCE(c.last_seen, c.created_at, now()), COALESCE(c.created_at, now())
 FROM creatives c
 JOIN clients cl ON cl.id = c.client_id
@@ -97,7 +125,8 @@ WHERE c.platform IS NOT NULL AND c.platform <> 'manual'
       AND l.platform_ad_id IS NOT DISTINCT FROM c.platform_ad_id
       AND l.platform_creative_id IS NOT DISTINCT FROM c.platform_creative_id
   )
-ORDER BY c.platform, COALESCE(c.platform_ad_id, 'creative:' || c.platform_creative_id), c.created_at NULLS LAST, c.id;
+ORDER BY c.platform, COALESCE(c.platform_ad_id, 'creative:' || c.platform_creative_id), c.created_at NULLS LAST, c.id
+ON CONFLICT DO NOTHING;
 --> statement-breakpoint
 -- One live link per ad (active, paused or unknown; only a removed link frees the ad).
 -- Created after the backfill so the backfill never trips it.
@@ -153,16 +182,29 @@ ALTER TABLE client_ad_accounts ADD COLUMN IF NOT EXISTS linked_by_key_id uuid RE
 --> statement-breakpoint
 -- Store the normalised account ID (no act_ on Meta, no dashes on Google), the
 -- same rule the API now applies on write. Rows that would collide with an
--- already-normalised row are left alone.
+-- already-normalised row are left alone; of several rows that normalise to the
+-- same ID (act_1 and ACT_1) only the lowest id is rewritten, so one statement
+-- never collides with itself.
 UPDATE client_ad_accounts c
 SET account_id = regexp_replace(c.account_id, '^act_', '', 'i')
 WHERE c.platform = 'facebook-ads' AND c.account_id ~* '^act_'
-  AND NOT EXISTS (SELECT 1 FROM client_ad_accounts o WHERE o.platform = c.platform AND o.account_id = regexp_replace(c.account_id, '^act_', '', 'i'));
+  AND NOT EXISTS (SELECT 1 FROM client_ad_accounts o WHERE o.platform = c.platform AND o.account_id = regexp_replace(c.account_id, '^act_', '', 'i'))
+  AND NOT EXISTS (SELECT 1 FROM client_ad_accounts o WHERE o.id < c.id AND o.platform = c.platform AND regexp_replace(o.account_id, '^act_', '', 'i') = regexp_replace(c.account_id, '^act_', '', 'i'));
 --> statement-breakpoint
 UPDATE client_ad_accounts c
 SET account_id = replace(c.account_id, '-', '')
 WHERE c.platform = 'google-ads' AND c.account_id LIKE '%-%'
-  AND NOT EXISTS (SELECT 1 FROM client_ad_accounts o WHERE o.platform = c.platform AND o.account_id = replace(c.account_id, '-', ''));
+  AND NOT EXISTS (SELECT 1 FROM client_ad_accounts o WHERE o.platform = c.platform AND o.account_id = replace(c.account_id, '-', ''))
+  AND NOT EXISTS (SELECT 1 FROM client_ad_accounts o WHERE o.id < c.id AND o.platform = c.platform AND replace(o.account_id, '-', '') = replace(c.account_id, '-', ''));
+--> statement-breakpoint
+-- Rows skipped above (a collision) keep their old spelling; say how many, so they can be cleaned up.
+DO $$
+DECLARE n integer;
+BEGIN
+  SELECT count(*) INTO n FROM client_ad_accounts
+   WHERE (platform = 'facebook-ads' AND account_id ~* '^act_') OR (platform = 'google-ads' AND account_id LIKE '%-%');
+  IF n > 0 THEN RAISE NOTICE '[0055] % ad account row(s) keep a non-normalised ID because a normalised duplicate exists', n; END IF;
+END $$;
 --> statement-breakpoint
 
 -- ─── api_keys ────────────────────────────────────────────────────────────
