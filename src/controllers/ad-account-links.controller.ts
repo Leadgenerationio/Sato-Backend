@@ -51,7 +51,7 @@ export async function linkOne(req: Request, res: Response) {
   };
   const out = await rules.linkAdAccount(
     { businessId: req.user!.businessId!, userId: rules.realUserId(req.user!.userId), keyId: req.apiKey?.id ?? null },
-    { clientId: String(req.params.id), platform, accountId, campaignId: campaignId ?? undefined, accountName: accountName ?? undefined, currency: currency ?? undefined, confirmMove },
+    { clientId: String(req.params.id), platform, accountId, campaignId, accountName: accountName ?? undefined, currency: currency ?? undefined, confirmMove },
   );
   // `action` keeps the old field name; "moved" is new (a confirmed move).
   res.status(out.result === 'created' ? 201 : 200).json({
