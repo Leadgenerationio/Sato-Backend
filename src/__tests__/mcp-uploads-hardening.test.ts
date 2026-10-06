@@ -15,7 +15,7 @@ import { apiKeys } from '../db/schema/api-keys.js';
 import { hashObject, objectExists, getSignedUploadUrl } from '../integrations/r2/r2-client.js';
 import * as r2 from '../integrations/r2/r2-client.js';
 import * as multipart from '../integrations/r2/r2-multipart.js';
-import { createUpload, sweepUploads } from '../services/mcp-uploads.service.js';
+import { claimUploadForFiling, createUpload, releaseUploadClaim, sweepUploads } from '../services/mcp-uploads.service.js';
 import { fetchRemoteMedia } from '../utils/remote-media.js';
 import { MediaSourceError } from '../utils/errors.js';
 
@@ -153,6 +153,68 @@ describe('a storage error does not delete the file', () => {
     spy.mockRestore();
     expect(failed.structuredContent).toMatchObject({ code: 'internal_error', retryable: true });
     expect((await call(key, 'complete_upload', { uploadId: up.uploadId })).structuredContent.status).toBe('ready');
+  });
+});
+
+describe('a storage error after multipart assembly does not lose the file', () => {
+  it('complete (assembles) -> storage error -> retry without parts is ready, not failed', async () => {
+    const big = Buffer.alloc(70 * 1024 * 1024, 0x00); big.writeUInt32BE(24, 0); big.write('ftyp', 4, 'ascii'); big.write('isom', 8, 'ascii'); big.write('mp41', 16, 'ascii'); big.write(`mpr-${tag}`, 32);
+    const c = await call(key, 'create_upload', { filename: 'multi.mp4', contentType: 'video/mp4', sizeBytes: big.length });
+    const etags: Array<{ partNumber: number; etag: string }> = [];
+    for (const part of c.structuredContent.parts as Array<{ partNumber: number; url: string; bytes: number }>) {
+      const from = (part.partNumber - 1) * c.structuredContent.partSize;
+      const r = await fetch(part.url, { method: 'PUT', body: new Uint8Array(big.subarray(from, from + part.bytes)) });
+      expect(r.status).toBe(200);
+      etags.push({ partNumber: part.partNumber, etag: r.headers.get('etag') ?? '' });
+    }
+    const spy = vi.spyOn(multipart, 'readObjectHead').mockRejectedValueOnce(new Error('R2 hiccup'));
+    const first = await call(key, 'complete_upload', { uploadId: c.structuredContent.uploadId, parts: etags });
+    spy.mockRestore();
+    expect(first.structuredContent).toMatchObject({ code: 'internal_error', retryable: true });
+    const [mid] = await db.select().from(uploads).where(eq(uploads.id, c.structuredContent.uploadId));
+    expect(mid).toMatchObject({ status: 'uploading', multipartUploadId: null });
+    expect(await objectExists('creatives', mid!.r2Key)).toBe(true);
+    const retry = await call(key, 'complete_upload', { uploadId: c.structuredContent.uploadId });
+    expect(retry.structuredContent).toMatchObject({ status: 'ready', sha256: sha(big) });
+  }, 120_000);
+});
+
+describe('an upload is claimed in the database, so it is filed once', () => {
+  it('two upload_asset calls at once for two clients: one creative, the other refused', async () => {
+    const up = await upload(jpeg(9500, 'race'));
+    await call(key, 'complete_upload', { uploadId: up.uploadId });
+    const [a, b] = await Promise.all([
+      call(key, 'upload_asset', { uploadId: up.uploadId, ...acct(1) }),
+      call(key, 'upload_asset', { uploadId: up.uploadId, ...acct(2) }),
+    ]);
+    const made = [a, b].filter((r) => r.structuredContent.creativeId);
+    const refused = [a, b].filter((r) => r.isError);
+    expect(made).toHaveLength(1);
+    expect(refused).toHaveLength(1);
+    const [row] = await db.select().from(uploads).where(eq(uploads.id, up.uploadId));
+    expect(row).toMatchObject({ creativeId: made[0]!.structuredContent.creativeId, error: null });
+    const same = await db.select({ id: creatives.id }).from(creatives).where(eq(creatives.r2Key, row!.r2Key));
+    expect(same).toHaveLength(1);
+  });
+  it('the claim is taken once, can be given back, and an old dead claim can be taken over', async () => {
+    const up = await upload(jpeg(9400, 'claim'));
+    await call(key, 'complete_upload', { uploadId: up.uploadId });
+    expect(await claimUploadForFiling(up.uploadId)).toBe(true);
+    expect(await claimUploadForFiling(up.uploadId)).toBe(false);
+    await releaseUploadClaim(up.uploadId);
+    expect(await claimUploadForFiling(up.uploadId)).toBe(true);
+    await db.update(uploads).set({ updatedAt: new Date(Date.now() - 11 * 60 * 1000) }).where(eq(uploads.id, up.uploadId));
+    expect(await claimUploadForFiling(up.uploadId)).toBe(true); // the holder is gone: taken over
+    await releaseUploadClaim(up.uploadId);
+  });
+  it('a failed filing gives the claim back, so the call can be repeated', async () => {
+    const up = await upload(jpeg(9600, 'release'));
+    await call(key, 'complete_upload', { uploadId: up.uploadId });
+    const bad = await call(key, 'upload_asset', { uploadId: up.uploadId, platform: 'meta', platformAccountId: `act_55${tag}999` });
+    expect(bad.structuredContent.code).toBe('account_not_linked');
+    const [row] = await db.select().from(uploads).where(eq(uploads.id, up.uploadId));
+    expect(row!.error).toBeNull();
+    expect((await call(key, 'upload_asset', { uploadId: up.uploadId, ...acct(1) })).structuredContent.result).toMatch(/created|duplicate/);
   });
 });
 

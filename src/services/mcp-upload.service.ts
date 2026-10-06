@@ -11,7 +11,7 @@ import { normalisePlatform } from './ad-account-links.service.js';
 import { upsertPlatformCreative } from './creative-library.service.js';
 import { assertCampaignBelongsToClient, campaignsForAccount, resolveCampaignRef, type Caller } from './ad-account-rules.service.js';
 import { linkAdPlatformIds, toAdLinkDto, type AdLinkDto, type AdLinkInput } from './creative-ad-links.service.js';
-import { getReadyUpload, linkUploadToCreative } from './mcp-uploads.service.js';
+import { claimUploadForFiling, getReadyUpload, linkUploadToCreative, releaseUploadClaim } from './mcp-uploads.service.js';
 
 // MCP spec v1.0 upload_asset for a file that arrives as a sourceUrl (up to 50 MB)
 // or as a finished direct upload (uploadId, up to 4 GB). The ad account decides
@@ -49,9 +49,6 @@ export interface UploadAssetResult {
   adLinkResult: 'created' | 'updated' | 'unchanged' | 'duplicate' | null;
   audit: { before?: unknown; after?: unknown };
 }
-
-/** Uploads being filed right now by this process, so two calls cannot file one upload twice at once. */
-const uploadsInUse = new Set<string>();
 
 export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput): Promise<UploadAssetResult> {
   if (Boolean(input.sourceUrl) === Boolean(input.uploadId)) {
@@ -141,12 +138,10 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
     verified = { sha256: uploadRow.sha256!, sizeBytes: Number(uploadRow.sizeBytes), contentType: uploadRow.contentType!, mediaType: family, fileStatus: family === 'video' ? 'processing' : 'ready' };
   }
   let up: Awaited<ReturnType<typeof upsertPlatformCreative>>;
+  // Claimed in the database, so it holds across API instances too.
   const lockId = replayOf ? null : uploadRow?.id ?? null;
-  if (lockId) {
-    if (uploadsInUse.has(lockId)) {
-      throw new ApiError('rate_limited', 'This upload is already being filed by another call.', { retryable: true, details: { retryAfter: 2 }, hint: 'Wait a few seconds, then repeat the same call.' });
-    }
-    uploadsInUse.add(lockId);
+  if (lockId && !(await claimUploadForFiling(lockId))) {
+    throw new ApiError('rate_limited', 'This upload is being filed by another call, or was just used.', { retryable: true, details: { retryAfter: 2 }, hint: 'Wait a few seconds, then repeat the same call with the same arguments.' });
   }
   try {
     if (replayOf) up = { creative: replayOf, created: false } as Awaited<ReturnType<typeof upsertPlatformCreative>>;
@@ -159,7 +154,7 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
   } catch (err) {
     toApiError(err);
   } finally {
-    if (lockId) uploadsInUse.delete(lockId);
+    if (lockId) await releaseUploadClaim(lockId).catch(() => {});
   }
   const { creative, created } = up;
 

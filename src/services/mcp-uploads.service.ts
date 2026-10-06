@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, count, eq, inArray, isNull, lt } from 'drizzle-orm';
+import { and, count, eq, inArray, isNull, lt, or } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { uploads, type UploadRow } from '../db/schema/uploads.js';
 import { creatives } from '../db/schema/creatives.js';
@@ -137,7 +137,8 @@ export async function completeUpload(caller: Caller, uploadId: string, parts?: C
     await db.update(uploads).set({ status: 'expired', updatedAt: new Date() }).where(eq(uploads.id, row.id));
     throw new ApiError('upload_incomplete', 'The upload links expired before the file was finished.', { hint: 'Start again with create_upload.' });
   }
-  if (row.mode === 'multipart' && (!parts || parts.length === 0)) {
+  // Once assembled, multipartUploadId is cleared and a retry needs no parts.
+  if (row.mode === 'multipart' && row.multipartUploadId && (!parts || parts.length === 0)) {
     throw new ApiError('validation_failed', 'parts is required for a multipart upload: the partNumber and ETag of every part.', { fields: [{ field: 'parts', message: 'List every uploaded part with its etag' }] });
   }
 
@@ -161,9 +162,9 @@ export async function completeUpload(caller: Caller, uploadId: string, parts?: C
 async function verifyClaimed(caller: Caller, start: UploadRow, parts?: CompletedPart[]): Promise<UploadStatus> {
   let row = start;
   const uploadId = row.id;
-  if (row.mode === 'multipart') {
+  if (row.mode === 'multipart' && row.multipartUploadId) {
     try {
-      await completeMultipart('creatives', row.r2Key, row.multipartUploadId!, parts!);
+      await completeMultipart('creatives', row.r2Key, row.multipartUploadId, parts!);
     } catch (err) {
       const name = (err as { name?: string }).name ?? '';
       if (name === 'NoSuchUpload') {
@@ -178,6 +179,13 @@ async function verifyClaimed(caller: Caller, start: UploadRow, parts?: Completed
         details: { storageError: name },
       });
     }
+  }
+
+  if (row.mode === 'multipart' && row.multipartUploadId) {
+    // The upload id is used up by assembling. Record that, so a retry after a later storage error goes straight to the
+    // checks instead of completing an upload id that no longer exists (which would fail the upload and lose the file).
+    await db.update(uploads).set({ multipartUploadId: null, updatedAt: new Date() }).where(eq(uploads.id, row.id));
+    row = { ...row, multipartUploadId: null };
   }
 
   const head = await headObjectInfo('creatives', row.r2Key);
@@ -263,9 +271,35 @@ export async function getReadyUpload(caller: Caller, uploadId: string): Promise<
   throw new ApiError('upload_incomplete', `This upload is ${row.status}${row.error ? `: ${row.error}` : ''}.`, { hint: 'Start again with create_upload.' });
 }
 
-/** Marks an upload as used. Only the first call counts: a used upload is never pointed at a second creative. */
+const FILING = 'filing';
+const FILING_STALE_MS = 10 * 60 * 1000;
+
+/**
+ * Claim a ready, unused upload for filing, in the database, so two API instances cannot both file it. The marker lives
+ * in `error` while the claim is held (a ready upload has no error); a claim older than 10 minutes is taken as dead.
+ */
+export async function claimUploadForFiling(uploadId: string): Promise<boolean> {
+  const [row] = await db.update(uploads).set({ error: FILING, updatedAt: new Date() }).where(and(
+    eq(uploads.id, uploadId), eq(uploads.status, 'ready'), isNull(uploads.creativeId),
+    or(isNull(uploads.error), and(eq(uploads.error, FILING), lt(uploads.updatedAt, new Date(Date.now() - FILING_STALE_MS)))),
+  )).returning({ id: uploads.id });
+  return Boolean(row);
+}
+
+/** Give a claim back when filing failed, so the caller can try again. */
+export async function releaseUploadClaim(uploadId: string): Promise<void> {
+  await db.update(uploads).set({ error: null, updatedAt: new Date() }).where(and(eq(uploads.id, uploadId), eq(uploads.error, FILING), isNull(uploads.creativeId)));
+}
+
+/** Marks an upload as used and releases the claim. Only the first call counts: a used upload is never pointed at a second creative. */
 export async function linkUploadToCreative(uploadId: string, creativeId: string): Promise<void> {
-  await db.update(uploads).set({ creativeId, updatedAt: new Date() }).where(and(eq(uploads.id, uploadId), isNull(uploads.creativeId)));
+  await db.update(uploads).set({ creativeId, error: null, updatedAt: new Date() }).where(and(eq(uploads.id, uploadId), isNull(uploads.creativeId)));
+}
+
+/** For the worker: an upload whose processing ran out of attempts fails with a clear reason (and its object is removed). */
+export async function failUploadById(uploadId: string, message: string): Promise<void> {
+  const [row] = await db.select().from(uploads).where(and(eq(uploads.id, uploadId), eq(uploads.status, 'processing')));
+  if (row) await failUpload(row, message);
 }
 
 /** Run by a repeating job: expire abandoned uploads (aborting any multipart upload so no parts are kept) and fail jobs stuck on processing. */
