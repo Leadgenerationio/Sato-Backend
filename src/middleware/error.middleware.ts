@@ -1,15 +1,29 @@
 import { Request, Response, NextFunction } from 'express';
 import { AppError } from '../utils/errors.js';
+import { ApiError, apiErrorBody, toApiError } from '../utils/api-error.js';
 import { logger } from '../utils/logger.js';
 
-export function errorHandler(err: Error, _req: Request, res: Response, _next: NextFunction) {
+export function errorHandler(err: Error, req: Request, res: Response, _next: NextFunction) {
+  const requestId = req.requestId ?? null;
+
+  // The public API / MCP error shape (spec v1.0 §3): code, message, hint,
+  // fields, retryable, requestId.
+  if (err instanceof ApiError) {
+    if (err.retryAfter !== undefined) res.setHeader('Retry-After', String(err.retryAfter));
+    res.status(err.statusCode).json(apiErrorBody(err, requestId));
+    return;
+  }
+
   if (err instanceof AppError) {
     // Some controllers attach extra context via .code (machine-readable error
     // ID) or .errors / .issues (Zod-style array of problems). Surface those in
     // the JSON response when present so the FE can show useful per-field
-    // messages instead of just the generic top-level message.
+    // messages instead of just the generic top-level message. A legacy .code
+    // is kept as-is (the portal reads some of them); without one, the shared
+    // code for the status is added.
+    const shared = apiErrorBody(err, requestId);
     const body: Record<string, unknown> = {
-      status: 'error',
+      ...shared,
       message: err.message,
     };
     const anyErr = err as AppError & {
@@ -24,10 +38,10 @@ export function errorHandler(err: Error, _req: Request, res: Response, _next: Ne
     return;
   }
 
-  logger.error({ err }, 'Unhandled error');
+  logger.error({ err, requestId }, 'Unhandled error');
 
   res.status(500).json({
-    status: 'error',
+    ...apiErrorBody(toApiError(err), requestId),
     message: 'Internal server error',
   });
 }

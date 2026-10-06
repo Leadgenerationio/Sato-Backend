@@ -5,6 +5,7 @@ import { env } from './config/env.js';
 import { logger } from './utils/logger.js';
 import { generalLimiter } from './middleware/rate-limit.middleware.js';
 import { errorHandler } from './middleware/error.middleware.js';
+import { requestIdMiddleware } from './utils/api-error.js';
 import { router } from './routes/index.js';
 import { seedDefaultUsers } from './data/users.js';
 import { registerSchedules } from './jobs/schedules.js';
@@ -64,6 +65,8 @@ app.use(
   }),
 );
 app.use(helmet());
+// Every response carries X-Request-Id; error bodies repeat it as requestId (MCP spec §3).
+app.use(requestIdMiddleware);
 
 // Body parsing — capture raw body for webhook routes so HMAC signature
 // verification has access to the exact bytes the provider signed. Mounted
