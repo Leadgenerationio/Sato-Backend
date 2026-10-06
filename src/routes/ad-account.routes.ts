@@ -11,10 +11,17 @@ import { apiKeyOrJwt, allow, apiKeyRateLimit } from '../middleware/api-key.middl
 // Matching is on (platform, accountId) only — never the account name.
 
 export const adAccountRoutes: RouterType = Router();
-adAccountRoutes.use(authMiddleware);
 
-const listSchema = z.object({
-  query: z.object({ days: z.coerce.number().int().min(1).max(365).optional() }),
+export const listSchema = z.object({
+  query: z.object({
+    days: z.coerce.number().int().min(1).max(365).optional(),
+    // MCP spec v1.0 list_ad_accounts filters. All optional, all AND-ed.
+    platform: z.string().trim().min(1).max(50).optional(),
+    clientId: uuidShape().optional(),
+    campaignId: uuidShape().optional(),
+    linked: z.enum(['true', 'false']).optional(),
+    q: z.string().trim().min(1).max(100).optional(),
+  }),
 });
 
 const bulkLinkSchema = z.object({
@@ -30,15 +37,23 @@ const bulkLinkSchema = z.object({
   }),
 });
 
-adAccountRoutes.get('/', requireRole('owner', 'ops_manager', 'finance_admin'), validate(listSchema), ctrl.list);
-adAccountRoutes.put('/links', requireRole('owner', 'ops_manager'), validate(bulkLinkSchema), ctrl.bulkLink);
+// Also on the public API (X-API-Key, scope clients:read) — MCP list_ad_accounts.
+adAccountRoutes.get(
+  '/',
+  apiKeyOrJwt,
+  apiKeyRateLimit,
+  allow(['owner', 'ops_manager', 'finance_admin'], 'clients:read'),
+  validate(listSchema),
+  ctrl.list,
+);
+adAccountRoutes.put('/links', authMiddleware, requireRole('owner', 'ops_manager'), validate(bulkLinkSchema), ctrl.bulkLink);
 
 // Phase 3 (docs/creative-library-and-api-plan.md): scheduled pull of ads and
 // creatives from Meta / Taboola. Status for the Link ad accounts screen, and
 // a per-account "Sync now". :id is the client_ad_accounts row id.
 const syncNowSchema = z.object({ params: z.object({ id: uuidShape() }) });
-adAccountRoutes.get('/sync-status', requireRole('owner', 'ops_manager', 'finance_admin'), ctrl.syncStatus);
-adAccountRoutes.post('/:id/sync-now', requireRole('owner', 'ops_manager'), validate(syncNowSchema), ctrl.syncNow);
+adAccountRoutes.get('/sync-status', authMiddleware, requireRole('owner', 'ops_manager', 'finance_admin'), ctrl.syncStatus);
+adAccountRoutes.post('/:id/sync-now', authMiddleware, requireRole('owner', 'ops_manager'), validate(syncNowSchema), ctrl.syncNow);
 
 // Mounted at /clients BEFORE clientRoutes (whose GET /:id would otherwise
 // treat "lookup" as a client id). Kept out of client.routes.ts on purpose.

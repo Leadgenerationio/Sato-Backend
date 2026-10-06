@@ -85,7 +85,16 @@ function requireBusiness(requester: AuthPayload): string {
   return requester.businessId;
 }
 
-export async function listAdAccounts(requester: AuthPayload, windowDays = 30): Promise<AdAccountList> {
+export interface AdAccountFilters {
+  platform?: string;
+  clientId?: string;
+  campaignId?: string;
+  linked?: boolean;
+  /** Matches the account ID or the account name, case-insensitive. */
+  q?: string;
+}
+
+export async function listAdAccounts(requester: AuthPayload, windowDays = 30, filters: AdAccountFilters = {}): Promise<AdAccountList> {
   const businessId = requireBusiness(requester);
   const days = Math.max(1, Math.min(365, Math.floor(windowDays)));
   const adPlatform = sql.raw(`coalesce(${canonicalPlatformSql('d.platform')}, lower(trim(d.platform)))`);
@@ -205,7 +214,22 @@ export async function listAdAccounts(requester: AuthPayload, windowDays = 30): P
 
   // Unlinked spend first (largest first) — that's the work to do — then the
   // linked accounts, also by spend.
-  const accounts = [...byKey.values()].sort((a, b) => {
+  const wantPlatform = filters.platform ? normalisePlatform(filters.platform) : null;
+  const wantQ = filters.q ? filters.q.toLowerCase() : null;
+  const wantQId = filters.q ? filters.q.replace(/^act_/i, '').replace(/-/g, '').toLowerCase() : null;
+  const filtered = [...byKey.values()].filter((a) => {
+    if (wantPlatform && a.platform !== wantPlatform) return false;
+    if (filters.linked !== undefined && Boolean(a.link) !== filters.linked) return false;
+    if (filters.clientId && a.link?.clientId !== filters.clientId) return false;
+    if (filters.campaignId && a.link?.campaignId !== filters.campaignId && !a.campaigns.some((c) => c.campaignId === filters.campaignId)) return false;
+    if (wantQ) {
+      const id = a.accountId.toLowerCase();
+      const name = (a.accountName ?? '').toLowerCase();
+      if (!id.includes(wantQ) && !id.includes(wantQId!) && !name.includes(wantQ)) return false;
+    }
+    return true;
+  });
+  const accounts = filtered.sort((a, b) => {
     const au = a.link ? 1 : 0;
     const bu = b.link ? 1 : 0;
     return au - bu || b.spend - a.spend || a.platform.localeCompare(b.platform) || a.accountId.localeCompare(b.accountId);
