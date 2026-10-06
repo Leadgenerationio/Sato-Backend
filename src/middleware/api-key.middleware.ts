@@ -5,6 +5,7 @@ import { and, eq, gt } from 'drizzle-orm';
 import { authMiddleware } from './auth.middleware.js';
 import { requireRole } from './rbac.middleware.js';
 import { verifyApiKey, logApiKeyUse, type ApiScope } from '../services/api-key.service.js';
+import { auditOnFinish, auditRefusedKey } from '../services/api-audit.service.js';
 import { db } from '../config/database.js';
 import IORedis from 'ioredis';
 import { env } from '../config/env.js';
@@ -37,8 +38,12 @@ function bearerApiKey(req: Request): string | undefined {
 export async function apiKeyOrJwt(req: Request, res: Response, next: NextFunction) {
   const key = req.get('x-api-key') ?? bearerApiKey(req);
   if (!key) return authMiddleware(req, res, next);
+  const startedAt = Date.now();
   const row = await verifyApiKey(key.trim());
-  if (!row) throw new UnauthorizedError('Invalid, expired or revoked API key');
+  if (!row) {
+    await auditRefusedKey(key.trim(), req, res, startedAt);
+    throw new UnauthorizedError('Invalid, expired or revoked API key');
+  }
   req.apiKey = { id: row.id, prefix: row.prefix, scopes: row.scopes };
   req.user = {
     userId: row.createdBy ?? '00000000-0000-0000-0000-000000000000',
@@ -47,6 +52,8 @@ export async function apiKeyOrJwt(req: Request, res: Response, next: NextFunctio
     businessId: row.businessId,
   };
   res.on('finish', () => logApiKeyUse(row.id, req.method, req.originalUrl.split('?')[0]!, res.statusCode));
+  // One audit row per key call (MCP spec §3, step 1g).
+  auditOnFinish(row, req, res, startedAt);
   next();
 }
 
