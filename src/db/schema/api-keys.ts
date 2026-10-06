@@ -32,7 +32,9 @@ export const apiKeyUsage = pgTable('api_key_usage', {
 }, (t) => [index('api_key_usage_key_at_idx').on(t.apiKeyId, t.at), index('api_key_usage_at_idx').on(t.at)]);
 
 // Idempotency-Key replay store (24 h). `owner` is `key:<api key id>` or
-// `user:<user id>` so JWT callers can use the header too.
+// `user:<user id>` (REST header, so JWT callers can use it too), or
+// `mcp:key:<api key id>` for an MCP tool's idempotencyKey, so the two never
+// collide (src/services/tool-idempotency.service.ts).
 export const idempotencyKeys = pgTable('idempotency_keys', {
   owner: varchar('owner', { length: 60 }).notNull(),
   key: varchar('key', { length: 100 }).notNull(),
