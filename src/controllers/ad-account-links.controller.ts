@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import * as service from '../services/ad-account-links.service.js';
+import * as rules from '../services/ad-account-rules.service.js';
 import * as platformSync from '../services/platform-creative-sync.service.js';
 import { enqueuePlatformSync } from '../jobs/queue.js';
 
@@ -41,12 +42,20 @@ export async function syncNow(req: Request, res: Response) {
   res.status(data.queued ? 202 : 200).json({ status: 'success', data });
 }
 
-/** POST /clients/:id/ad-accounts — one link, for the public API. */
+/** POST /clients/:id/ad-accounts — one link, for the public API. Same rules as the
+ *  MCP link_ad_account tool: an account already linked to another client is
+ *  refused (409 move_requires_confirm) unless confirmMove is true. */
 export async function linkOne(req: Request, res: Response) {
-  const { platform, accountId, campaignId, accountName, currency } = req.body as {
-    platform: string; accountId: string; campaignId?: string | null; accountName?: string | null; currency?: string | null;
+  const { platform, accountId, campaignId, accountName, currency, confirmMove } = req.body as {
+    platform: string; accountId: string; campaignId?: string | null; accountName?: string | null; currency?: string | null; confirmMove?: boolean;
   };
-  const data = await service.bulkUpsertLinks(req.user!, [{ platform, accountId, clientId: String(req.params.id), campaignId, accountName, currency }]);
-  const action = data.results[0]?.action ?? 'unchanged';
-  res.status(action === 'created' ? 201 : 200).json({ status: 'success', data: { link: data.results[0] ?? null } });
+  const out = await rules.linkAdAccount(
+    { businessId: req.user!.businessId!, userId: rules.realUserId(req.user!.userId), keyId: req.apiKey?.id ?? null },
+    { clientId: String(req.params.id), platform, accountId, campaignId: campaignId ?? undefined, accountName: accountName ?? undefined, currency: currency ?? undefined, confirmMove },
+  );
+  // `action` keeps the old field name; "moved" is new (a confirmed move).
+  res.status(out.result === 'created' ? 201 : 200).json({
+    status: 'success',
+    data: { link: { platform: out.link.platform, accountId: out.link.accountId, action: out.result, clientName: out.link.clientName, campaignName: out.link.campaignName, movedFromClientId: out.link.movedFromClientId } },
+  });
 }

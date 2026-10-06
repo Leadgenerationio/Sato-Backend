@@ -70,6 +70,8 @@ export const linkOneSchema = z.object({
     campaignId: uuidShape().nullable().optional(),
     accountName: z.string().max(255).nullable().optional(),
     currency: z.string().length(3).nullable().optional(),
+    // A link that would move the account from another client is refused unless this is true.
+    confirmMove: z.boolean().optional(),
   }),
 });
 clientLookupRoutes.post(

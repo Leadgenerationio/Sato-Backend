@@ -4,6 +4,7 @@ import { apiKeyOrJwt, apiKeyRateLimit } from '../middleware/api-key.middleware.j
 import { createStatoMcpServer } from '../mcp/server.js';
 import { getTools } from '../mcp/tools/registry.js';
 import type { ToolContext } from '../mcp/types.js';
+import { realUserId } from '../services/ad-account-rules.service.js';
 
 // Remote MCP over Streamable HTTP, one endpoint, stateless (MCP spec v1.0
 // section 3). It sits inside the API: same key check, same scopes, same
@@ -36,7 +37,7 @@ mcpRoutes.post('/', async (req: Request, res: Response) => {
   const key = req.apiKey!;
   const ctx: ToolContext = {
     businessId: req.user!.businessId!,
-    userId: req.user!.userId,
+    userId: realUserId(req.user!.userId),
     apiKey: key,
     agent: (req.get('x-stato-agent') ?? '').trim().slice(0, 100) || null,
     requestId: String(res.locals.requestId ?? ''),

@@ -40,21 +40,25 @@ describe('ad-account links match on the normalised ID', () => {
     await db.delete(clientAdAccounts).where(inArray(clientAdAccounts.clientId, [a, b]));
     await db.delete(clients).where(inArray(clients.id, [a, b]));
   });
-  const link = (clientId: string, platform: string, accountId: string) =>
-    request(app).post(`/api/v1/clients/${clientId}/ad-accounts`).set({ Authorization: `Bearer ${token}` }).send({ platform, accountId });
+  const link = (clientId: string, platform: string, accountId: string, confirmMove?: boolean) =>
+    request(app).post(`/api/v1/clients/${clientId}/ad-accounts`).set({ Authorization: `Bearer ${token}` }).send({ platform, accountId, confirmMove });
   const find = (platform: string, accountId: string) =>
     request(app).get('/api/v1/clients/lookup').query({ platform, accountId }).set({ Authorization: `Bearer ${token}` });
 
-  it('links act_ + facebook-ads, finds it as meta + digits, and a second link MOVES it (one row)', async () => {
+  it('links act_ + facebook-ads, finds it as meta + digits, and a second link only MOVES it with confirmMove (one row)', async () => {
     const first = await link(a, 'facebook-ads', `act_${ACC}`);
     expect([200, 201]).toContain(first.status);
     expect(first.body.data.link.accountId).toBe(ACC);
     const hit = await find('meta', ACC);
     expect(hit.status).toBe(200);
     expect(hit.body.data.client.id).toBe(a);
-    const moved = await link(b, 'meta', ACC);
+    // MCP spec: an account linked to another client is never moved silently.
+    const refused = await link(b, 'meta', ACC);
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('move_requires_confirm');
+    const moved = await link(b, 'meta', ACC, true);
     expect([200, 201]).toContain(moved.status);
-    expect(moved.body.data.link.action).toBe('updated');
+    expect(moved.body.data.link.action).toBe('moved');
     const rows = await db.select().from(clientAdAccounts).where(eq(clientAdAccounts.accountId, ACC));
     expect(rows).toHaveLength(1);
     expect(rows[0]!.clientId).toBe(b);
