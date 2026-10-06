@@ -9,7 +9,7 @@ import { landingPages } from '../db/schema/landing-pages.js';
 import { canonicalPlatformSql } from '../utils/catchr-platform.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
 import { ApiError } from '../utils/api-error.js';
-import { resolveCampaignRef } from './ad-account-rules.service.js';
+import { normAccountSql, resolveCampaignRef } from './ad-account-rules.service.js';
 
 // MCP spec v1.0 discovery tools: list_clients, get_client, list_campaigns,
 // get_campaign. Read only. Campaign IDs are the Stato UUID with the LeadByte
@@ -95,7 +95,12 @@ export async function getClient(businessId: string, clientId: string): Promise<C
 
 // ─── campaigns ───
 
-/** Campaigns this business can see: bought by one of its clients, or shared (no buyer at all). */
+/**
+ * Campaigns this business can see: bought by one of its clients, or shared (no
+ * buyer at all). `campaigns` has no business column, so a shared campaign is
+ * visible to every business; fine with one business, revisit before a second
+ * one is onboarded.
+ */
 function campaignVisible(businessId: string): SQL {
   return sql`(
     exists (select 1 from ${clientCampaigns} cc join ${clients} c on c.id = cc.client_id where cc.campaign_id = ${campaigns.id} and c.business_id = ${businessId})
@@ -148,13 +153,13 @@ export async function getCampaignForMcp(businessId: string, ref: string): Promis
       .where(and(eq(clientCampaigns.campaignId, c.id), eq(clients.businessId, businessId))).orderBy(asc(clients.companyName)),
     db.execute(sql`
       with accs as (
-        select ${tsPlatform} as platform, ts.account_id as acc_id from traffic_sources ts
+        select ${tsPlatform} as platform, ${normAccountSql('ts.account_id')} as acc_id from traffic_sources ts
         where ts.campaign_id = ${c.id} and ts.is_active = true and ts.platform is not null and ts.account_id is not null and ts.account_id <> ''
         union
-        select ${tsPlatform} as platform, jsonb_array_elements_text(ts.account_ids) as acc_id from traffic_sources ts
+        select ${tsPlatform} as platform, ${normAccountSql('a.acc')} as acc_id from traffic_sources ts, jsonb_array_elements_text(ts.account_ids) as a(acc)
         where ts.campaign_id = ${c.id} and ts.is_active = true and ts.platform is not null
         union
-        select a.platform, a.account_id from client_ad_accounts a where a.campaign_id = ${c.id}
+        select a.platform, a.account_id from client_ad_accounts a where a.campaign_id = ${c.id} and a.business_id = ${businessId}
       )
       select distinct x.platform, x.acc_id as account_id, l.account_name, l.client_id
       from accs x left join client_ad_accounts l on l.platform = x.platform and l.account_id = x.acc_id and l.business_id = ${businessId}

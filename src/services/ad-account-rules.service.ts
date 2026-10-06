@@ -56,6 +56,20 @@ export interface AccountOwner {
   campaignRequired: boolean;
 }
 
+/**
+ * SQL for a traffic_sources account ID in the stored form (no act_ on Meta, no
+ * dashes on Google), keyed on the same canonical platform as the row, so it can
+ * be compared with client_ad_accounts.account_id. Same rule as normaliseAccountId.
+ */
+export function normAccountSql(col: string) {
+  const plat = canonicalPlatformSql('ts.platform');
+  return sql.raw(
+    `case when ${plat} = 'facebook-ads' then regexp_replace(trim(${col}), '^act_', '', 'i')`
+    + ` when ${plat} = 'google-ads' then replace(trim(${col}), '-', '')`
+    + ` else trim(${col}) end`,
+  );
+}
+
 // creative_ad_links.platform uses the creatives vocabulary, client_ad_accounts the Catchr one.
 const AD_LINK_PLATFORM: Record<string, string> = { 'facebook-ads': 'meta', 'google-ads': 'google', 'tik-tok': 'tiktok', taboola: 'taboola' };
 
@@ -67,18 +81,13 @@ const AD_LINK_PLATFORM: Record<string, string> = { 'facebook-ads': 'meta', 'goog
  */
 export async function campaignsForAccount(storedPlatform: string, accountId: string): Promise<Array<{ campaignId: string; name: string }>> {
   const tsPlatform = sql.raw(`coalesce(${canonicalPlatformSql('ts.platform')}, lower(trim(ts.platform)))`);
-  const norm = (col: string) => sql.raw(
-    `case when ${canonicalPlatformSql('ts.platform')} = 'facebook-ads' then regexp_replace(trim(${col}), '^act_', '', 'i')`
-    + ` when ${canonicalPlatformSql('ts.platform')} = 'google-ads' then replace(trim(${col}), '-', '')`
-    + ` else trim(${col}) end`,
-  );
   const fromSources = (await db.execute(sql`
     with accs as (
-      select ts.campaign_id, ${tsPlatform} as platform, ${norm('ts.account_id')} as acc_id
+      select ts.campaign_id, ${tsPlatform} as platform, ${normAccountSql('ts.account_id')} as acc_id
       from traffic_sources ts
       where ts.is_active = true and ts.platform is not null and ts.account_id is not null and ts.account_id <> ''
       union
-      select ts.campaign_id, ${tsPlatform} as platform, ${norm('a.acc')} as acc_id
+      select ts.campaign_id, ${tsPlatform} as platform, ${normAccountSql('a.acc')} as acc_id
       from traffic_sources ts, jsonb_array_elements_text(ts.account_ids) as a(acc)
       where ts.is_active = true and ts.platform is not null
     )

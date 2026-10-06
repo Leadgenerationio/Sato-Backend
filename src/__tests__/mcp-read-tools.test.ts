@@ -39,7 +39,7 @@ async function call(k: string, name: string, args: Record<string, unknown> = {})
 beforeAll(async () => {
   const login = await request(app).post('/api/v1/auth/login').send({ email: 'owner@stato.app', password: 'owner123' });
   owner = login.body.data.tokens.accessToken;
-  key = await makeKey(['clients:read']);
+  key = await makeKey(['clients:read', 'campaigns:read']);
   noScopeKey = await makeKey(['creatives:read']);
   const [b2] = await db.insert(businesses).values({ name: `Yash Test Other ${tag}`, slug: `yash-other-${tag}` }).returning();
   otherBiz = b2!.id;
@@ -176,5 +176,33 @@ describe('reads never create a campaign', () => {
     await call(key, 'get_campaign', { campaignId: 'brand-new-leadbyte-number' });
     await call(key, 'get_client', { clientId: cA });
     expect(await count()).toBe(before);
+  });
+});
+
+describe('review of #79', () => {
+  it('a non-UUID clientId is validation_failed naming clientId, not internal_error', async () => {
+    for (const [tool, args] of [['get_client', { clientId: 'abc' }], ['list_campaigns', { clientId: 'abc' }]] as const) {
+      const r = await call(key, tool, args);
+      expect(r.structuredContent).toMatchObject({ code: 'validation_failed', fields: [{ field: 'clientId' }] });
+    }
+  });
+
+  it("get_campaign never lists another business's ad account, even on a shared campaign", async () => {
+    await db.insert(clientAdAccounts).values({ businessId: otherBiz, platform: 'facebook-ads', accountId: `OTHER${tag}`, clientId: cOther, campaignId: kShared });
+    const d = (await call(key, 'get_campaign', { campaignId: kShared })).structuredContent;
+    expect(JSON.stringify(d)).not.toContain(`OTHER${tag}`);
+    expect(d.adAccounts).toEqual([]);
+  });
+
+  it('a traffic-source account written act_… is matched to the client account stored as digits', async () => {
+    await db.insert(trafficSources).values({ campaignId: k2, name: `Yash RD act ${tag}`, platform: 'facebook-ads', accountId: `act_${tag}1` });
+    const d = (await call(key, 'get_campaign', { campaignId: k2 })).structuredContent;
+    expect(d.adAccounts).toEqual([{ platform: 'meta', accountId: `${tag}1`, accountName: 'Alpha Meta', clientId: cA }]);
+  });
+
+  it('campaign reads need campaigns:read; clients:read alone is not enough', async () => {
+    const onlyClients = await makeKey(['clients:read']);
+    expect((await call(onlyClients, 'get_campaign', { campaignId: k1 })).structuredContent.code).toBe('insufficient_scope');
+    expect((await call(onlyClients, 'list_campaigns', {})).structuredContent.code).toBe('insufficient_scope');
   });
 });

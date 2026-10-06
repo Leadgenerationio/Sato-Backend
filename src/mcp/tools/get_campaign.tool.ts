@@ -14,7 +14,7 @@ export default defineTool({
     creativeCount: z.number(),
   },
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
-  scope: 'clients:read',
+  scope: 'campaigns:read',
   handler: async ({ campaignId }, ctx) => {
     const d = await getCampaignForMcp(ctx.businessId, campaignId);
     return { summary: `${d.campaign.name}: ${d.linkedClients.length} clients, ${d.adAccounts.length} ad accounts, ${d.creativeCount} assets.`, data: d };

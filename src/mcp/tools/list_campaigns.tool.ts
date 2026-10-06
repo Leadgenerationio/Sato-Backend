@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { defineTool } from '../types.js';
+import { uuidShape } from '../../utils/zod-helpers.js';
 import { listCampaignsForMcp } from '../../services/mcp-reads.service.js';
 
 export default defineTool({
@@ -9,7 +10,7 @@ export default defineTool({
     'List or search campaigns, optionally only those one client buys (clientId). Each has a Stato campaignId (a UUID, the one to use everywhere) and the LeadByte number as leadbyteId. ' +
     'Results are paged: pass nextCursor back. IDs are strings.',
   inputSchema: {
-    clientId: z.string().optional().describe('Only campaigns this client buys.'),
+    clientId: uuidShape().optional().describe('Only campaigns this client buys.'),
     status: z.string().max(30).optional(),
     vertical: z.string().max(100).optional(),
     q: z.string().max(100).optional().describe('Part of the name, or the exact LeadByte number.'),
@@ -24,7 +25,7 @@ export default defineTool({
     nextCursor: z.string().nullable(),
   },
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
-  scope: 'clients:read',
+  scope: 'campaigns:read',
   handler: async (args, ctx) => {
     const page = await listCampaignsForMcp(ctx.businessId, args);
     return { summary: `${page.items.length} campaigns${page.nextCursor ? ' (more on the next page)' : ''}.`, data: page };
