@@ -128,7 +128,7 @@ export interface LinkResult {
 }
 
 /** A campaign is valid for a client when the client buys it, or it is shared (no buyer links at all). */
-async function assertCampaignBelongsToClient(clientId: string, campaignId: string): Promise<void> {
+export async function assertCampaignBelongsToClient(clientId: string, campaignId: string): Promise<void> {
   const [buyer] = await db.select({ id: clientCampaigns.id }).from(clientCampaigns)
     .where(and(eq(clientCampaigns.clientId, clientId), eq(clientCampaigns.campaignId, campaignId))).limit(1);
   if (buyer) return;
