@@ -1,0 +1,4 @@
+# Everything needs a review from the other developer. GitHub never asks the PR
+# author to review their own PR, so with both listed, Yash's PRs go to Hari and
+# Hari's PRs go to Yash.
+*  @hkv667 @YashC-0101
