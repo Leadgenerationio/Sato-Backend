@@ -11,7 +11,8 @@ import { creativeAdLinks } from '../db/schema/creative-ad-links.js';
 import { uploads } from '../db/schema/uploads.js';
 import { apiKeys } from '../db/schema/api-keys.js';
 import { objectExists } from '../integrations/r2/r2-client.js';
-import { runUrlUpload } from '../services/mcp-url-uploads.service.js';
+import { runUrlUpload, startUrlUpload, MAX_URL_COPIES } from '../services/mcp-url-uploads.service.js';
+import { businesses } from '../db/schema/businesses.js';
 
 // 50 MB to 1 GB by URL (spec v1.0): the API starts a background copy, the worker streams it into storage.
 const BIZ = '26d6b2b4-c867-460e-8473-eca2b1ffd232';
@@ -20,8 +21,9 @@ const MiB = 1024 * 1024;
 const ACCEPT = 'application/json, text/event-stream';
 let owner = ''; let key = ''; let clientA = '';
 const keyIds: string[] = [];
-const files = new Map<string, { body: Buffer; type: string; status?: number; location?: string; length?: string }>();
+const files = new Map<string, { body: Buffer; type: string; status?: number; location?: string; length?: string; delayMs?: number }>();
 let fetchSpy: ReturnType<typeof vi.spyOn>;
+const calls = new Map<string, number>(); // how many times each URL was requested (a delay applies from the 2nd request: the worker's)
 const real = globalThis.fetch;
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 const mp4 = (n: number, seed: string) => { const b = Buffer.alloc(n, 0x00); b.writeUInt32BE(24, 0); b.write('ftyp', 4, 'ascii'); b.write('isom', 8, 'ascii'); b.write('mp41', 16, 'ascii'); b.write(`${seed}-${tag}`, 32); return b; };
@@ -45,6 +47,8 @@ beforeAll(async () => {
     const href = String(input instanceof URL ? input.href : input);
     const f = files.get(href);
     if (!f) return real(input, init);
+    if (f.delayMs && calls.get(href) !== undefined) await new Promise((r) => setTimeout(r, f.delayMs));
+    calls.set(href, (calls.get(href) ?? 0) + 1);
     const headers: Record<string, string> = { 'content-type': f.type, 'content-length': f.length ?? String(f.body.length) };
     if (f.location) headers.location = f.location;
     const redirect = f.status !== undefined && f.status >= 300 && f.status < 400;
@@ -137,4 +141,64 @@ describe('redirects: up to 3, every hop checked', () => {
     expect(r.structuredContent.code).toBe('source_unreachable');
     expect(r.structuredContent.message).toContain('redirects');
   });
+});
+
+describe('octet-stream links: the first bytes decide', () => {
+  it('a 60 MB mp4 served as application/octet-stream is copied and checked as a video', async () => {
+    const body = mp4(60 * MiB, 'octet');
+    files.set(u('octet.bin'), { body, type: 'application/octet-stream' });
+    const first = await upload('octet.bin');
+    expect(first.structuredContent.code).toBe('upload_incomplete');
+    const uploadId = first.structuredContent.details.uploadId as string;
+    expect(await runUrlUpload(uploadId, u('octet.bin'))).toBe('ready');
+    expect((await call(key, 'complete_upload', { uploadId })).structuredContent).toMatchObject({ status: 'ready', contentType: 'video/mp4', sha256: sha(body) });
+  }, 120_000);
+  it('a small png served as octet-stream is filed; an .exe served as octet-stream is unsupported_type', async () => {
+    const png = Buffer.concat([Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'), Buffer.from(`oct-${tag}`)]);
+    files.set(u('o.png'), { body: png, type: 'application/octet-stream' });
+    expect((await call(key, 'upload_asset', { sourceUrl: u('o.png'), mediaType: 'image', platform: 'meta', platformAccountId: `act_44${tag}1`, name: `Yash Test URL octet ${tag}` })).structuredContent).toMatchObject({ result: 'created', mediaType: 'image' });
+    files.set(u('o.exe'), { body: Buffer.concat([Buffer.from('MZ'), Buffer.alloc(100, 1)]), type: 'application/octet-stream' });
+    expect((await call(key, 'upload_asset', { sourceUrl: u('o.exe'), mediaType: 'image', platform: 'meta', platformAccountId: `act_44${tag}1` })).structuredContent.code).toBe('unsupported_type');
+  });
+});
+
+describe('the copy: parts, memory and the clock', () => {
+  it('a 70 MB file (a 64 MiB part and a 6 MiB part) is hashed and stored exactly', async () => {
+    const body = mp4(70 * MiB, 'twopart');
+    files.set(u('two.mp4'), { body, type: 'video/mp4' });
+    const first = await upload('two.mp4');
+    const uploadId = first.structuredContent.details.uploadId as string;
+    expect(await runUrlUpload(uploadId, u('two.mp4'))).toBe('ready');
+    const [row] = await db.select().from(uploads).where(eq(uploads.id, uploadId));
+    expect(row).toMatchObject({ status: 'ready', sizeBytes: body.length, sha256: sha(body) });
+  }, 120_000);
+  it('time spent waiting in the queue does not count: the clock starts when the copy starts', async () => {
+    files.set(u('wait.mp4'), { body: mp4(55 * MiB, 'wait'), type: 'video/mp4', delayMs: 600 });
+    const first = await upload('wait.mp4');
+    const uploadId = first.structuredContent.details.uploadId as string;
+    await db.update(uploads).set({ updatedAt: new Date(Date.now() - 2 * 60 * 60 * 1000) }).where(eq(uploads.id, uploadId));
+    const run = runUrlUpload(uploadId, u('wait.mp4'));
+    await new Promise((r) => setTimeout(r, 250)); // the worker is now waiting on the (slow) URL
+    const [during] = await db.select().from(uploads).where(eq(uploads.id, uploadId));
+    expect(Date.now() - during!.updatedAt.getTime()).toBeLessThan(60_000);
+    expect(await run).toBe('ready');
+  }, 60_000);
+});
+
+describe('a limit on copies running at once', () => {
+  it('refuses a 6th copy with rate_limited, even for a different query string on the same file', async () => {
+    const [b] = await db.insert(businesses).values({ name: `Yash Test cap ${tag}`, slug: `yash-test-cap-${tag}` }).returning();
+    try {
+      const caller = { businessId: b!.id, userId: null, keyId: keyIds[0]! };
+      await db.insert(uploads).values(Array.from({ length: MAX_URL_COPIES }, (_, i) => ({ businessId: b!.id, filename: `url-cap${i}-x.mp4`, contentType: 'video/mp4', sizeBytes: 100, r2Key: `cap-${tag}-${i}`, mode: 'url' as const, status: 'processing' as const })));
+      files.set(u('cap.mp4?n=6'), { body: mp4(55 * MiB, 'cap'), type: 'video/mp4' });
+      await expect(startUrlUpload(caller, u('cap.mp4?n=6'))).rejects.toMatchObject({ code: 'rate_limited' });
+      await db.update(uploads).set({ status: 'ready' }).where(eq(uploads.businessId, b!.id));
+      const ok = await startUrlUpload(caller, u('cap.mp4?n=6'));
+      expect(ok.reused).toBe(false);
+    } finally {
+      await db.delete(uploads).where(eq(uploads.businessId, b!.id));
+      await db.delete(businesses).where(eq(businesses.id, b!.id));
+    }
+  }, 60_000);
 });

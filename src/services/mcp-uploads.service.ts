@@ -325,6 +325,8 @@ export async function sweepUploads(now: Date = new Date()): Promise<{ expired: n
     await discardObject(row);
     await db.update(uploads).set({ status: 'aborted', updatedAt: now }).where(and(eq(uploads.id, row.id), eq(uploads.status, 'failed')));
   }
+  // (Only the hour after expiry is covered: if the worker is down for that whole hour, the leftover object stays. At most one
+  // object per upload, capped at its signed size.)
   // The single-PUT URL can write to the original key until it expires, even after the copy. Remove whatever was
   // written there once the URL is dead (the window is wider than the sweep interval, so no run is missed).
   const copied = await db.select().from(uploads).where(and(eq(uploads.mode, 'single'), lt(uploads.expiresAt, now), gt(uploads.expiresAt, new Date(now.getTime() - ORIGINAL_SWEEP_WINDOW_MS))));

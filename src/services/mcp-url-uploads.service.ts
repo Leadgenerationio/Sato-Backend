@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { and, desc, eq, gt } from 'drizzle-orm';
+import { and, count, desc, eq, gt } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { uploads } from '../db/schema/uploads.js';
 import { abortMultipart, completeMultipart, createMultipart, uploadPart, type CompletedPart } from '../integrations/r2/r2-multipart.js';
 import { isR2Configured } from '../integrations/r2/r2-client.js';
-import { openPublicUrl, type RemoteMediaDeps } from '../utils/remote-media.js';
+import { isGenericBinary, openPublicUrl, type RemoteMediaDeps } from '../utils/remote-media.js';
 import { MediaSourceError } from '../utils/errors.js';
 import { SNIFF_BYTES, sniffMedia } from '../utils/sniff-media.js';
 import { ApiError } from '../utils/api-error.js';
@@ -21,6 +21,8 @@ const PART_BYTES = 64 * MiB;
 const COPY_TIMEOUT_MS = 30 * 60 * 1000;
 /** A copy for the same URL started within this time is reused instead of started again. */
 const REUSE_WINDOW_MS = 60 * 60 * 1000;
+/** Copies running at once per business. Each can pull 1 GB, and the media worker also makes posters and hashes uploads. */
+export const MAX_URL_COPIES = 5;
 
 const urlTag = (sourceUrl: string) => createHash('sha256').update(sourceUrl).digest('hex').slice(0, 16);
 const safeName = (n: string) => n.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80) || 'file';
@@ -34,11 +36,19 @@ export async function startUrlUpload(caller: Caller, sourceUrl: string, deps: Re
   )).orderBy(desc(uploads.createdAt)).limit(20).then((rows) => rows.filter((r) => r.filename.startsWith(tag) && r.status !== 'failed' && r.status !== 'expired'));
   if (recent) return { uploadId: recent.id, reused: true };
 
+  // A different query string is a different URL, so the reuse check above does not cover it: cap the copies themselves.
+  const [running] = await db.select({ n: count() }).from(uploads).where(and(eq(uploads.businessId, caller.businessId), eq(uploads.mode, 'url'), eq(uploads.status, 'processing')));
+  if ((running?.n ?? 0) >= MAX_URL_COPIES) {
+    throw new ApiError('rate_limited', `${MAX_URL_COPIES} files are already being copied from URLs for this business.`, {
+      retryable: true, details: { retryAfter: 30 }, hint: 'Wait for them to finish (poll complete_upload with their uploadIds), then send this one again.',
+    });
+  }
+
   const { res, finalUrl } = await openPublicUrl(sourceUrl, deps);
   await res.body?.cancel().catch(() => {});
   if (!res.ok) throw new MediaSourceError(422, `Could not download sourceUrl (HTTP ${res.status})`, 'source_unreachable');
   const type = (res.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase();
-  if (type && !type.startsWith('image/') && !type.startsWith('video/')) {
+  if (type && !type.startsWith('image/') && !type.startsWith('video/') && !isGenericBinary(type)) {
     throw new MediaSourceError(422, `sourceUrl must be an image or video, got "${type}"`, 'unsupported_type');
   }
   const declared = Number(res.headers.get('content-length') ?? 0);
@@ -67,6 +77,8 @@ export async function startUrlUpload(caller: Caller, sourceUrl: string, deps: Re
 export async function runUrlUpload(uploadId: string, sourceUrl: string, deps: RemoteMediaDeps = {}): Promise<'ready' | 'failed' | 'skipped'> {
   const [row] = await db.select().from(uploads).where(eq(uploads.id, uploadId));
   if (!row || row.mode !== 'url' || row.status !== 'processing') return 'skipped';
+  // Time spent waiting in the queue must not count toward the stuck-processing sweep: the clock starts now.
+  await db.update(uploads).set({ updatedAt: new Date() }).where(eq(uploads.id, uploadId));
   let multipartId: string | null = null;
   const fail = async (message: string): Promise<'failed'> => {
     if (multipartId) await abortMultipart('creatives', row.r2Key, multipartId).catch((err: unknown) => logger.warn({ err, uploadId }, 'Could not abort a failed URL upload'));
@@ -83,27 +95,36 @@ export async function runUrlUpload(uploadId: string, sourceUrl: string, deps: Re
     await db.update(uploads).set({ multipartUploadId: multipartId, updatedAt: new Date() }).where(eq(uploads.id, uploadId));
     const hash = createHash('sha256');
     const parts: CompletedPart[] = [];
-    let buffered: Buffer[] = []; let bufferedBytes = 0; let total = 0; let sniffed: ReturnType<typeof sniffMedia> | undefined;
+    // One reusable 64 MiB buffer (about 64 MiB per copy, no second copy when a part is sent).
+    const partBuf = Buffer.allocUnsafe(PART_BYTES);
+    const head = Buffer.alloc(SNIFF_BYTES); let headLen = 0; // the first bytes, kept for the file-type check
+    let bufferedBytes = 0; let total = 0; let sniffed: ReturnType<typeof sniffMedia> | undefined;
     const flush = async () => {
       if (bufferedBytes === 0) return;
-      const body = Buffer.concat(buffered, bufferedBytes);
-      buffered = []; bufferedBytes = 0;
-      parts.push({ partNumber: parts.length + 1, etag: await uploadPart('creatives', row.r2Key, multipartId!, parts.length + 1, body) });
+      const n = bufferedBytes;
+      bufferedBytes = 0;
+      parts.push({ partNumber: parts.length + 1, etag: await uploadPart('creatives', row.r2Key, multipartId!, parts.length + 1, partBuf.subarray(0, n)) });
     };
     for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
       const buf = Buffer.from(chunk);
       total += buf.length;
       if (total > URL_UPLOAD_MAX_BYTES) return await fail('The file is larger than 1 GB');
       hash.update(buf);
-      buffered.push(buf); bufferedBytes += buf.length;
-      if (sniffed === undefined && bufferedBytes >= SNIFF_BYTES) {
-        sniffed = sniffMedia(Buffer.concat(buffered, bufferedBytes).subarray(0, SNIFF_BYTES));
+      if (headLen < SNIFF_BYTES) headLen += buf.copy(head, headLen, 0, Math.min(buf.length, SNIFF_BYTES - headLen));
+      let offset = 0;
+      while (offset < buf.length) {
+        const take = Math.min(buf.length - offset, PART_BYTES - bufferedBytes);
+        buf.copy(partBuf, bufferedBytes, offset, offset + take);
+        bufferedBytes += take; offset += take;
+        if (bufferedBytes >= PART_BYTES) await flush();
+      }
+      if (sniffed === undefined && headLen >= SNIFF_BYTES) {
+        sniffed = sniffMedia(head);
         if (!sniffed) return await fail('The file content is not a jpg, png, webp, gif, mp4 or mov, whatever its name says');
       }
-      if (bufferedBytes >= PART_BYTES) await flush();
     }
     if (sniffed === undefined) {
-      sniffed = sniffMedia(Buffer.concat(buffered, bufferedBytes).subarray(0, SNIFF_BYTES));
+      sniffed = sniffMedia(head.subarray(0, headLen));
       if (!sniffed) return await fail('The file content is not a jpg, png, webp, gif, mp4 or mov, whatever its name says');
     }
     if (total === 0) return await fail('The file at sourceUrl is empty');
