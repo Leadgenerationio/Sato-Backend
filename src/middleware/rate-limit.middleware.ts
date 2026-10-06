@@ -1,4 +1,5 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { type Options } from 'express-rate-limit';
+import type { Request, Response, NextFunction } from 'express';
 
 // Active admin sessions easily exceed 100 req / 15 min:
 // dashboard polls every 30s (~30 r/15m), LeadByte hooks poll every 90s
@@ -7,6 +8,36 @@ import rateLimit from 'express-rate-limit';
 // flow with "Too many requests, please try again later". 1500/15m =
 // ~100 rpm leaves comfortable headroom for normal use; abusive clients
 // still hit the wall. Auth limiter stays tight (login brute-force).
+/** Seconds until the caller may try again (the same number the Retry-After header carries). */
+export function retryAfterSeconds(req: Request, windowMs: number): number {
+  const reset = (req as Request & { rateLimit?: { resetTime?: Date } }).rateLimit?.resetTime;
+  const ms = reset ? reset.getTime() - Date.now() : windowMs;
+  return Math.max(1, Math.ceil(ms / 1000));
+}
+
+/**
+ * A 429 in the shared error shape (MCP spec v1.0 §3): code rate_limited,
+ * retryable, retryAfter seconds and the request ID, next to the message the
+ * portal already shows. On /mcp the same body goes in a JSON-RPC error, so an
+ * MCP client sees it instead of a transport failure. express-rate-limit sets
+ * the Retry-After header before calling this.
+ */
+export function rateLimitedHandler(message: string, hint: string): Options['handler'] {
+  return (req: Request, res: Response, _next: NextFunction, options: Options) => {
+    const retryAfter = retryAfterSeconds(req, options.windowMs);
+    const requestId = res.locals.requestId as string | undefined;
+    const body = {
+      status: 'error', code: 'rate_limited', message, hint, retryable: true, retryAfter,
+      ...(requestId ? { requestId } : {}),
+    };
+    if (req.originalUrl.startsWith('/mcp')) {
+      res.status(options.statusCode).json({ jsonrpc: '2.0', error: { code: -32000, message, data: body }, id: null });
+      return;
+    }
+    res.status(options.statusCode).json(body);
+  };
+}
+
 export const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 export const GENERAL_LIMIT_MAX = 1500;
 export const AUTH_LIMIT_MAX = 20;
@@ -16,7 +47,7 @@ export const generalLimiter = rateLimit({
   max: GENERAL_LIMIT_MAX,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { status: 'error', message: 'Too many requests, please try again later' },
+  handler: rateLimitedHandler('Too many requests, please try again later', 'Wait retryAfter seconds, then try again.'),
 });
 
 export const authLimiter = rateLimit({
@@ -24,5 +55,5 @@ export const authLimiter = rateLimit({
   max: AUTH_LIMIT_MAX,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { status: 'error', message: 'Too many login attempts, please try again later' },
+  handler: rateLimitedHandler('Too many login attempts, please try again later', 'Wait retryAfter seconds before trying to sign in again.'),
 });
