@@ -31,7 +31,7 @@ function buildEndpoint(): string {
   throw new Error('R2_ENDPOINT or R2_ACCOUNT_ID must be set');
 }
 
-function buildKey(folder: R2Folder, key: string): string {
+export function buildKey(folder: R2Folder, key: string): string {
   const safe = key.replace(/^\/+/, '');
   return `${folder}/${safe}`;
 }
@@ -104,7 +104,11 @@ function buildPublicUrl(fullKey: string): string {
   return `${buildEndpoint().replace(/\/$/, '')}/${bucket}/${fullKey}`;
 }
 
-async function getS3Client() {
+export function r2Bucket(): string {
+  return (process.env.R2_BUCKET || env.R2_BUCKET) as string;
+}
+
+export async function getS3Client() {
   const { S3Client } = await import('@aws-sdk/client-s3');
   return new S3Client({
     region: 'auto',

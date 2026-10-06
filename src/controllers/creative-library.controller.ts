@@ -99,6 +99,7 @@ export const listQuerySchema = z.object({
   q: z.string().max(200).optional(),
   from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  includeArchived: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
   sort: z.enum(['created', 'last_seen', 'name']).optional(),
   order: z.enum(['asc', 'desc']).optional(),
   page: z.coerce.number().int().min(1).optional(),

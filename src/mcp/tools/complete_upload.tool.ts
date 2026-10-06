@@ -1,0 +1,33 @@
+import { z } from 'zod';
+import { defineTool } from '../types.js';
+import { completeUpload } from '../../services/mcp-uploads.service.js';
+import { realUserId } from '../../services/ad-account-rules.service.js';
+
+export default defineTool({
+  name: 'complete_upload',
+  title: 'Finish a direct file upload',
+  description:
+    'Tell Stato the file is uploaded. For a multipart upload send parts: the partNumber and ETag of every part. Stato checks the real size and the real file type from the first bytes (an .exe renamed .mp4 is refused and removed) and computes the SHA-256. ' +
+    'status "ready" means you can call upload_asset with the uploadId. status "processing" (very large files) means call complete_upload again with the same uploadId until it is ready. Safe to repeat.',
+  inputSchema: {
+    uploadId: z.string().min(1),
+    parts: z.array(z.object({ partNumber: z.number().int().min(1), etag: z.string().min(1).max(200) })).max(10000).optional().describe('Every uploaded part with its ETag. Needed for a multipart upload.'),
+  },
+  outputSchema: {
+    uploadId: z.string(),
+    status: z.enum(['ready', 'processing']),
+    sizeBytes: z.number(),
+    contentType: z.string(),
+    sha256: z.string().nullable(),
+  },
+  annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: true },
+  scope: 'uploads:write',
+  handler: async ({ uploadId, parts }, ctx) => {
+    const res = await completeUpload({ businessId: ctx.businessId, userId: realUserId(ctx.userId), keyId: ctx.apiKey.id }, uploadId, parts);
+    return {
+      summary: res.status === 'ready' ? `Upload ${res.uploadId} is ready (${res.contentType}, ${res.sizeBytes} bytes). Call upload_asset with this uploadId.` : `Upload ${res.uploadId} is still being checked. Call complete_upload again shortly.`,
+      data: res,
+      audit: { after: { uploadId: res.uploadId, status: res.status }, recordsTouched: [{ type: 'upload', id: res.uploadId }] },
+    };
+  },
+});

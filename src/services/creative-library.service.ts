@@ -52,6 +52,8 @@ export interface UpsertPlatformCreativeInput {
   name?: string;
   /** Internal: who uploaded (JWT callers). */
   uploadedBy?: string | null;
+  /** Internal: a file uploaded through create_upload and already verified (size, real file type, SHA-256), up to 4 GB. */
+  verified?: { sha256: string; sizeBytes: number; contentType: string; mediaType: 'image' | 'video'; fileStatus?: 'processing' | 'ready' };
 }
 
 // ─── Scoping ───
@@ -371,6 +373,8 @@ export interface ListCreativesFilters {
   q?: string;
   from?: string;
   to?: string;
+  /** Archived assets are hidden unless this is true. */
+  includeArchived?: boolean;
   sort?: 'created' | 'last_seen' | 'name';
   order?: 'asc' | 'desc';
   page?: number;
@@ -379,6 +383,7 @@ export interface ListCreativesFilters {
 
 export async function listCreatives(businessId: string, f: ListCreativesFilters = {}) {
   const where: SQL[] = [eq(creatives.isDeleted, false), creativeInBusiness(businessId)];
+  if (!f.includeArchived) where.push(isNull(creatives.archivedAt));
   if (f.clientId) {
     where.push(SHARED_SHOWS_UNDER_EVERY_BUYER
       ? or(
@@ -494,7 +499,29 @@ export async function upsertPlatformCreative(
   let sha256 = input.sha256?.toLowerCase() ?? null;
   let mediaType = input.mediaType;
 
-  if (r2Key) {
+  if (r2Key && input.verified) {
+    // Already checked by complete_upload: the real size, file type and SHA-256 of the stored object.
+    sha256 = input.verified.sha256;
+    sizeBytes = input.verified.sizeBytes;
+    contentType = input.verified.contentType;
+    mediaType = input.verified.mediaType;
+    const holders = await db.select().from(creatives).where(eq(creatives.r2Key, r2Key));
+    for (const holder of holders) {
+      if (!(await creativeBelongsToBusiness(holder, businessId))) throw new AppError(409, 'This file is already registered to another business');
+    }
+    if (!existing && clientId) {
+      [existing] = await db.select().from(creatives)
+        .where(and(eq(creatives.sha256, sha256), eq(creatives.clientId, clientId), eq(creatives.isDeleted, false)));
+      // Identical bytes are already on file: keep that file and remove the duplicate upload.
+      if (existing?.r2Key && existing.r2Key !== r2Key) {
+        if (holders.length === 0) {
+          deleteFile('creatives', r2Key).catch((err: unknown) => logger.warn({ err, r2Key }, 'Could not delete duplicate creative upload'));
+        }
+        r2Key = existing.r2Key;
+      }
+    }
+    fileUrl = r2Ref(r2Key);
+  } else if (r2Key) {
     if (contentType && !mediaTypeOf(contentType)) throw new AppError(422, 'Creatives must be images or videos');
     if (sizeBytes && sizeBytes > MAX_MEDIA_BYTES) throw new AppError(413, 'File too large: max 50 MB');
     // Presigned keys are not bound to a business, so a key already held by
@@ -627,6 +654,7 @@ export async function upsertPlatformCreative(
     sha256,
     type: mediaType,
     section: 'media',
+    fileStatus: input.verified?.fileStatus ?? 'ready',
     landingPageId: landingPageId ?? null,
     uploadedBy: input.uploadedBy ?? null,
     firstSeen: now,
