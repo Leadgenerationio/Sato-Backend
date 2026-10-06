@@ -148,7 +148,36 @@ export function auditOnFinish(key: KeyForAudit, req: Request, res: Response, sta
     if (typeof code === 'string') res.locals.auditErrorCode = code;
     return json(body);
   }) as Response['json'];
-  res.once('finish', () => { void writeAuditRow(buildAuditRow(key, req, res, startedAt)); });
+  res.once('finish', () => {
+    void (async () => {
+      if (!res.locals.audit && !res.locals.auditErrorCode) {
+        const code = await unrunToolCode(req);
+        if (code) res.locals.auditErrorCode = code;
+      }
+      await writeAuditRow(buildAuditRow(key, req, res, startedAt));
+    })();
+  });
+}
+
+/**
+ * A tools/call whose tool never ran leaves no res.locals.audit, and the SDK's
+ * error goes out inside a 200 we don't read. Name the reason so the row isn't
+ * logged as a success: an unknown tool is not_found; a known tool the SDK
+ * refused before it ran had invalid input.
+ */
+async function unrunToolCode(req: Request): Promise<string | null> {
+  if (!isMcp(req)) return null;
+  const rpc = req.body as { method?: unknown; params?: { name?: unknown } } | undefined;
+  if (rpc?.method !== 'tools/call' || typeof rpc.params?.name !== 'string') return null;
+  try {
+    // Imported here: the registry loads every tool file, which the key middleware must not pull in at start-up.
+    const { getTools } = await import('../mcp/tools/registry.js');
+    const names = new Set((await getTools()).map((t) => t.name));
+    return names.has(rpc.params.name) ? 'validation_failed' : 'not_found';
+  } catch (err) {
+    logger.warn({ err }, 'API audit could not load the MCP tool list');
+    return null;
+  }
 }
 
 /**
