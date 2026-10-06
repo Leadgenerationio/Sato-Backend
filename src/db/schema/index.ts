@@ -37,3 +37,6 @@ export * from './webhooks.js';
 export * from './ad-account-sync-state.js';
 export * from './api-keys.js';
 export * from './fx-rates.js';
+export * from './creative-ad-links.js';
+export * from './uploads.js';
+export * from './api-audit-log.js';

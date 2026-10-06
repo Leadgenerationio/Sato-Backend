@@ -74,11 +74,11 @@ export function buildOpenApi(serverUrl: string): Json {
       '/clients/{id}/ad-accounts': {
         post: {
           summary: 'Link an ad account to a client',
-          description: 'Upsert on (platform, accountId): linking an account that belongs to another client moves it.',
+          description: 'Upsert on (platform, accountId). An account already linked to another client is refused with 409 `move_requires_confirm` unless the body has `confirmMove: true`; a confirmed move is recorded. `campaignId` may be the Stato UUID or the LeadByte number and must belong to the client; leave it out to keep the current campaign, send `null` to clear it. The response `platform` uses the API names `meta`, `google`, `tiktok`, `taboola` (it was `facebook-ads` / `tik-tok` before).',
           security: sec('ad_accounts:write'),
           parameters: [idParam],
           requestBody: { required: true, content: { 'application/json': { schema: schema(linkOneSchema.shape.body) } } },
-          responses: { 201: ok('Linked.'), 200: ok('Updated or unchanged.'), ...errors },
+          responses: { 201: ok('Linked.'), 200: ok('Updated, unchanged or moved (confirmMove).'), 409: { description: 'move_requires_confirm: the account belongs to another client.' }, 422: { description: 'campaign_client_mismatch: that campaign is not linked to this client.' }, ...errors },
         },
       },
       '/creatives': {

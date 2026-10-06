@@ -1,0 +1,250 @@
+-- MCP connector spec v1.0, step 1a (schema). Every statement is re-runnable:
+-- auto-migrate re-applies all files on every boot, so each one is IF NOT
+-- EXISTS / a no-op when already done. DDL plus one backfill, no data deleted.
+
+-- ─── creatives ───────────────────────────────────────────────────────────
+-- A 4 GB video does not fit a 32-bit integer (max ~2.1 GB). Checked first:
+-- even a same-type ALTER takes an ACCESS EXCLUSIVE lock on creatives, and this
+-- file runs on every boot.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'creatives' AND column_name = 'size_bytes' AND data_type <> 'bigint') THEN
+    ALTER TABLE creatives ALTER COLUMN size_bytes TYPE bigint;
+  END IF;
+END $$;
+--> statement-breakpoint
+-- Copy-only assets (type = 'copy', headline/body text, no file). Same check.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'creatives' AND column_name = 'file_url' AND is_nullable = 'NO') THEN
+    ALTER TABLE creatives ALTER COLUMN file_url DROP NOT NULL;
+  END IF;
+END $$;
+--> statement-breakpoint
+ALTER TABLE creatives ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+--> statement-breakpoint
+ALTER TABLE creatives ADD COLUMN IF NOT EXISTS archived_by uuid REFERENCES users(id) ON DELETE SET NULL;
+--> statement-breakpoint
+ALTER TABLE creatives ADD COLUMN IF NOT EXISTS archive_reason varchar(255);
+--> statement-breakpoint
+-- processing -> ready | failed. Existing rows are files already stored.
+ALTER TABLE creatives ADD COLUMN IF NOT EXISTS file_status varchar(16) NOT NULL DEFAULT 'ready';
+--> statement-breakpoint
+-- Where the row came from: portal | api | mcp | sync. Rows that already exist
+-- and carry a platform other than 'manual' were written by the pull or the API,
+-- so they start as 'sync'. Done once, when the column is added, never on a later boot.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'creatives' AND column_name = 'source') THEN
+    ALTER TABLE creatives ADD COLUMN source varchar(16) NOT NULL DEFAULT 'portal';
+    UPDATE creatives SET source = 'sync' WHERE platform IS NOT NULL AND platform <> 'manual';
+  END IF;
+END $$;
+--> statement-breakpoint
+ALTER TABLE creatives ADD COLUMN IF NOT EXISTS created_by_key_id uuid REFERENCES api_keys(id) ON DELETE SET NULL;
+--> statement-breakpoint
+ALTER TABLE creatives ADD COLUMN IF NOT EXISTS tags text[] NOT NULL DEFAULT '{}';
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS creatives_archived_at_idx ON creatives (archived_at);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS creatives_file_status_idx ON creatives (file_status) WHERE file_status <> 'ready';
+--> statement-breakpoint
+
+-- ─── creative_ad_links ───────────────────────────────────────────────────
+-- One row per ad a creative is used in. A creative can sit in several ads, an
+-- ad account can feed several campaigns (campaign_id lives here, not only on
+-- client_ad_accounts). The old single platform_* columns on creatives stay,
+-- read-only, for two releases so the portal and the Meta/Taboola pull keep
+-- working. platform uses the creatives.platform vocabulary (meta, taboola,
+-- google, tiktok).
+CREATE TABLE IF NOT EXISTS creative_ad_links (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid NOT NULL REFERENCES businesses(id),
+  creative_id uuid NOT NULL REFERENCES creatives(id) ON DELETE CASCADE,
+  client_id uuid REFERENCES clients(id) ON DELETE SET NULL,
+  campaign_id uuid REFERENCES campaigns(id) ON DELETE SET NULL,
+  platform varchar(20) NOT NULL,
+  platform_account_id varchar(100),
+  platform_campaign_id varchar(100),
+  platform_campaign_name varchar(255),
+  platform_adset_id varchar(100),
+  platform_adset_name varchar(255),
+  platform_ad_id varchar(100),
+  platform_ad_name varchar(255),
+  platform_creative_id varchar(100),
+  -- Meta image hash or video ID, Google asset resource name, TikTok video or image ID.
+  platform_asset_id varchar(255),
+  landing_page_id uuid REFERENCES landing_pages(id) ON DELETE SET NULL,
+  status varchar(10) NOT NULL DEFAULT 'active',
+  -- mcp | api | sync | portal.
+  source varchar(10) NOT NULL DEFAULT 'api',
+  linked_by uuid REFERENCES users(id) ON DELETE SET NULL,
+  created_by_key_id uuid REFERENCES api_keys(id) ON DELETE SET NULL,
+  first_seen timestamptz NOT NULL DEFAULT now(),
+  last_seen timestamptz NOT NULL DEFAULT now(),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  -- A wrong link is removed, never deleted (kept in history).
+  removed_at timestamptz,
+  CONSTRAINT creative_ad_links_status_chk CHECK (status IN ('active', 'paused', 'removed', 'unknown')),
+  CONSTRAINT creative_ad_links_has_id_chk CHECK (platform_ad_id IS NOT NULL OR platform_creative_id IS NOT NULL OR platform_asset_id IS NOT NULL)
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS creative_ad_links_creative_idx ON creative_ad_links (creative_id);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS creative_ad_links_business_idx ON creative_ad_links (business_id);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS creative_ad_links_campaign_idx ON creative_ad_links (campaign_id);
+--> statement-breakpoint
+-- Backfill: one link per creative that already has a platform ad or
+-- creative ID. Oldest creative wins when two share an ad ID, the rest stay
+-- without a link (the unique index below needs one owner per ad). Creatives with no
+-- client have no business to file the link under and are skipped. Safe to
+-- re-run: a creative that already has a link is never inserted again, and ON
+-- CONFLICT DO NOTHING covers an ad that a later creative (the pull, or POST
+-- /creatives with platformAdId) shares with an existing link: without it the
+-- unique index below fails this statement on the next boot and the API never
+-- starts. Each boot therefore also gives a new pull/API creative that carries an
+-- ad ID a 'sync' link, so the links stay in step with the legacy platform_* columns.
+-- The account ID is stored normalised (no act_ on Meta, no dashes on Google), as
+-- new links are, so lookups by account find these rows too.
+INSERT INTO creative_ad_links (business_id, creative_id, client_id, campaign_id, platform, platform_account_id, platform_campaign_id, platform_campaign_name, platform_ad_id, platform_creative_id, landing_page_id, source, first_seen, last_seen, created_at)
+SELECT DISTINCT ON (c.platform, COALESCE(c.platform_ad_id, 'creative:' || c.platform_creative_id))
+       cl.business_id, c.id, c.client_id, c.campaign_id, c.platform,
+       CASE c.platform WHEN 'meta' THEN regexp_replace(c.platform_account_id, '^act_', '', 'i') WHEN 'google' THEN replace(c.platform_account_id, '-', '') ELSE c.platform_account_id END,
+       c.platform_campaign_id, c.platform_campaign_name, c.platform_ad_id, c.platform_creative_id, c.landing_page_id,
+       'sync', COALESCE(c.first_seen, c.created_at, now()), COALESCE(c.last_seen, c.created_at, now()), COALESCE(c.created_at, now())
+FROM creatives c
+JOIN clients cl ON cl.id = c.client_id
+WHERE c.platform IS NOT NULL AND c.platform <> 'manual'
+  AND (c.platform_ad_id IS NOT NULL OR c.platform_creative_id IS NOT NULL)
+  AND NOT EXISTS (SELECT 1 FROM creative_ad_links l WHERE l.creative_id = c.id)
+  AND NOT EXISTS (
+    SELECT 1 FROM creative_ad_links l
+    WHERE l.status <> 'removed' AND l.platform = c.platform
+      AND l.platform_ad_id IS NOT DISTINCT FROM c.platform_ad_id
+      AND l.platform_creative_id IS NOT DISTINCT FROM c.platform_creative_id
+  )
+ORDER BY c.platform, COALESCE(c.platform_ad_id, 'creative:' || c.platform_creative_id), c.created_at NULLS LAST, c.id
+ON CONFLICT DO NOTHING;
+--> statement-breakpoint
+-- One live link per ad (active, paused or unknown; only a removed link frees the ad).
+-- Created after the backfill so the backfill never trips it.
+-- The table is new, so a plain (non-concurrent) build is safe here.
+CREATE UNIQUE INDEX IF NOT EXISTS creative_ad_links_ad_uq
+  ON creative_ad_links (platform, platform_ad_id)
+  WHERE status <> 'removed' AND platform_ad_id IS NOT NULL;
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS creative_ad_links_creative_uq
+  ON creative_ad_links (creative_id, platform, COALESCE(platform_ad_id, ''), COALESCE(platform_creative_id, ''))
+  WHERE status <> 'removed';
+--> statement-breakpoint
+
+-- ─── uploads ─────────────────────────────────────────────────────────────
+-- One row per direct/multipart/URL upload, so a job stuck on processing can be
+-- found and swept, and an abandoned multipart upload can be aborted.
+CREATE TABLE IF NOT EXISTS uploads (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid NOT NULL REFERENCES businesses(id),
+  created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+  created_by_key_id uuid REFERENCES api_keys(id) ON DELETE SET NULL,
+  filename varchar(255) NOT NULL,
+  content_type varchar(120),
+  size_bytes bigint,
+  sha256 char(64),
+  r2_key varchar(500) NOT NULL,
+  mode varchar(10) NOT NULL,
+  multipart_upload_id varchar(500),
+  part_size bigint,
+  status varchar(12) NOT NULL DEFAULT 'created',
+  error text,
+  creative_id uuid REFERENCES creatives(id) ON DELETE SET NULL,
+  expires_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT uploads_mode_chk CHECK (mode IN ('single', 'multipart', 'url')),
+  CONSTRAINT uploads_status_chk CHECK (status IN ('created', 'uploading', 'processing', 'ready', 'failed', 'aborted', 'expired'))
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS uploads_business_idx ON uploads (business_id);
+--> statement-breakpoint
+-- The sweeper looks for unfinished uploads by age.
+CREATE INDEX IF NOT EXISTS uploads_open_idx ON uploads (status, updated_at) WHERE status IN ('created', 'uploading', 'processing');
+--> statement-breakpoint
+
+-- ─── client_ad_accounts ──────────────────────────────────────────────────
+-- A confirmed move is recorded on the row (and in the audit log).
+ALTER TABLE client_ad_accounts ADD COLUMN IF NOT EXISTS moved_from_client_id uuid REFERENCES clients(id) ON DELETE SET NULL;
+--> statement-breakpoint
+ALTER TABLE client_ad_accounts ADD COLUMN IF NOT EXISTS moved_at timestamptz;
+--> statement-breakpoint
+ALTER TABLE client_ad_accounts ADD COLUMN IF NOT EXISTS linked_by_key_id uuid REFERENCES api_keys(id) ON DELETE SET NULL;
+--> statement-breakpoint
+-- Store the normalised account ID (no act_ on Meta, no dashes on Google), the
+-- same rule the API now applies on write. Rows that would collide with an
+-- already-normalised row are left alone; of several rows that normalise to the
+-- same ID (act_1 and ACT_1) only the lowest id is rewritten, so one statement
+-- never collides with itself.
+UPDATE client_ad_accounts c
+SET account_id = regexp_replace(c.account_id, '^act_', '', 'i')
+WHERE c.platform = 'facebook-ads' AND c.account_id ~* '^act_'
+  AND NOT EXISTS (SELECT 1 FROM client_ad_accounts o WHERE o.platform = c.platform AND o.account_id = regexp_replace(c.account_id, '^act_', '', 'i'))
+  AND NOT EXISTS (SELECT 1 FROM client_ad_accounts o WHERE o.id < c.id AND o.platform = c.platform AND regexp_replace(o.account_id, '^act_', '', 'i') = regexp_replace(c.account_id, '^act_', '', 'i'));
+--> statement-breakpoint
+UPDATE client_ad_accounts c
+SET account_id = replace(c.account_id, '-', '')
+WHERE c.platform = 'google-ads' AND c.account_id LIKE '%-%'
+  AND NOT EXISTS (SELECT 1 FROM client_ad_accounts o WHERE o.platform = c.platform AND o.account_id = replace(c.account_id, '-', ''))
+  AND NOT EXISTS (SELECT 1 FROM client_ad_accounts o WHERE o.id < c.id AND o.platform = c.platform AND replace(o.account_id, '-', '') = replace(c.account_id, '-', ''));
+--> statement-breakpoint
+-- Rows skipped above (a collision) keep their old spelling; say how many, so they can be cleaned up.
+DO $$
+DECLARE n integer;
+BEGIN
+  SELECT count(*) INTO n FROM client_ad_accounts
+   WHERE (platform = 'facebook-ads' AND account_id ~* '^act_') OR (platform = 'google-ads' AND account_id LIKE '%-%');
+  IF n > 0 THEN RAISE NOTICE '[0055] % ad account row(s) keep a non-normalised ID because a normalised duplicate exists', n; END IF;
+END $$;
+--> statement-breakpoint
+
+-- ─── api_keys ────────────────────────────────────────────────────────────
+-- NULL allowed_client_ids = the key sees every client in its business.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allowed_client_ids uuid[];
+--> statement-breakpoint
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS agent_label varchar(100);
+--> statement-breakpoint
+
+-- ─── api_audit_log ───────────────────────────────────────────────────────
+-- One row per API/MCP call (api_key_usage only keeps method, path, status).
+-- Arguments are stored redacted; before/after hold the changed records.
+CREATE TABLE IF NOT EXISTS api_audit_log (
+  id bigserial PRIMARY KEY,
+  business_id uuid NOT NULL REFERENCES businesses(id),
+  api_key_id uuid REFERENCES api_keys(id) ON DELETE SET NULL,
+  key_name varchar(100),
+  owner_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  agent varchar(100),
+  mcp_session_id varchar(100),
+  request_id varchar(64),
+  ip varchar(45),
+  transport varchar(4) NOT NULL DEFAULT 'rest',
+  tool varchar(100),
+  method varchar(8),
+  path varchar(300),
+  status integer,
+  error_code varchar(60),
+  args jsonb,
+  result jsonb,
+  records_touched jsonb,
+  before jsonb,
+  after jsonb,
+  duration_ms integer,
+  at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT api_audit_log_transport_chk CHECK (transport IN ('rest', 'mcp'))
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS api_audit_log_business_at_idx ON api_audit_log (business_id, at DESC);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS api_audit_log_key_at_idx ON api_audit_log (api_key_id, at DESC);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS api_audit_log_at_idx ON api_audit_log (at);

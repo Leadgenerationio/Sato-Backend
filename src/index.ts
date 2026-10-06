@@ -5,6 +5,8 @@ import { env } from './config/env.js';
 import { logger } from './utils/logger.js';
 import { generalLimiter } from './middleware/rate-limit.middleware.js';
 import { errorHandler } from './middleware/error.middleware.js';
+import { requestId } from './middleware/request-id.middleware.js';
+import { mcpRoutes } from './routes/mcp.routes.js';
 import { router } from './routes/index.js';
 import { seedDefaultUsers } from './data/users.js';
 import { registerSchedules } from './jobs/schedules.js';
@@ -61,8 +63,11 @@ app.use(
       }
     },
     credentials: true,
+    // The portal can read X-Request-Id off a failed response.
+    exposedHeaders: ['X-Request-Id'],
   }),
 );
+app.use(requestId);
 app.use(helmet());
 
 // Body parsing — capture raw body for webhook routes so HMAC signature
@@ -119,6 +124,8 @@ app.use('/api/v1', (req, res, next) => {
 });
 
 // API routes
+// Remote MCP endpoint (spec v1.0): inside the API, keys only.
+app.use('/mcp', mcpRoutes);
 app.use('/api/v1', router);
 
 // Domain events (creative.added, client.added, …) → outbound webhooks.
