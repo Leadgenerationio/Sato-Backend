@@ -71,6 +71,16 @@ Ask the assistant to call **`whoami`**. It answers with the key name, the owner,
 
 A key with only `*:read` scopes is a read-only key.
 
+## Keys limited to some clients
+
+A key can be limited to some clients, for an assistant that works for one client only. Choose **Only these clients** when you create the key in Settings, API keys, or press **Change clients** on an existing key (the API: `allowedClientIds` on `POST /api-keys`, or `PATCH /api-keys/{id}`). It applies from the key's next call.
+
+- The key sees only those clients through every tool. Another client's clients, campaigns, assets, ad accounts, ad links and landing pages answer `not_found`, exactly like something that does not exist, and nothing is saved.
+- An asset with no client (shared on a campaign) is not visible to such a key. A campaign is visible when it is linked to one of its clients.
+- `upload_asset` with such a key must send `platformAccountId` (or `clientId`), so the asset is filed under one of its clients.
+- Such a key works only on `/mcp` and `whoami`. The REST API refuses it with `insufficient_scope`.
+- `whoami` shows the limit in `key.allowedClients` (`null` means every client).
+
 ## The tools
 
 See [mcp-tools.md](./mcp-tools.md) for all of them with scope and inputs. It is generated from the code, so it is always current.
@@ -119,7 +129,8 @@ Codes: `unauthorized`, `insufficient_scope`, `not_found`, `validation_failed`, `
 | You see | Do this |
 | --- | --- |
 | 401 or `unauthorized` | the key is wrong, expired or revoked; make a new one |
-| `insufficient_scope` | add the scope named in the message to the key |
+| `insufficient_scope` | add the scope named in the message to the key; on REST with a key limited to some clients, use `/mcp` or a key without a limit |
+| `not_found` for a client you know exists | the key is limited to other clients: check `whoami` (`key.allowedClients`) |
 | `rate_limited` | wait `retryAfter` seconds and repeat the same call |
 | the client says the tool output does not match the schema | update Stato to the latest staging build; older builds could not return errors to SDK clients |
 | `upload_incomplete` on `upload_asset` | normal for a big `sourceUrl`: poll `complete_upload` with `details.uploadId` |

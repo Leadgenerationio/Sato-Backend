@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { users } from '../db/schema/users.js';
+import { clients } from '../db/schema/clients.js';
 import { apiKeys, apiKeyUsage, type ApiKeyRow } from '../db/schema/api-keys.js';
 import { AppError } from '../utils/errors.js';
 
@@ -28,11 +29,25 @@ export interface ApiKeyDto {
   expiresAt: string | null;
   revokedAt: string | null;
   createdAt: string | null;
+  /** The clients this key is limited to, or null for every client in the business (MCP spec §3, step 1h). */
+  allowedClientIds: string[] | null;
+  /** The same clients with their names, for the keys screen (a client deleted since is left out). */
+  allowedClients: Array<{ id: string; name: string }> | null;
+  /** Bot name used in the activity log when a call sends no X-Stato-Agent header. */
+  agentLabel: string | null;
   /** Calls logged in the last 30 days (Settings → API keys). */
   usage30d: number;
 }
 
-const dto = (r: ApiKeyRow, usage30d = 0): ApiKeyDto => ({
+/** Names of every client any of these keys is limited to, in one query. */
+async function clientNames(businessId: string, rows: ApiKeyRow[]): Promise<Map<string, string>> {
+  const ids = [...new Set(rows.flatMap((r) => r.allowedClientIds ?? []))];
+  if (!ids.length) return new Map();
+  const found = await db.select({ id: clients.id, name: clients.companyName }).from(clients).where(and(inArray(clients.id, ids), eq(clients.businessId, businessId)));
+  return new Map(found.map((c) => [c.id, c.name]));
+}
+
+const dto = (r: ApiKeyRow, usage30d = 0, names: Map<string, string> = new Map()): ApiKeyDto => ({
   id: r.id,
   name: r.name,
   prefix: r.prefix,
@@ -41,12 +56,32 @@ const dto = (r: ApiKeyRow, usage30d = 0): ApiKeyDto => ({
   expiresAt: r.expiresAt?.toISOString() ?? null,
   revokedAt: r.revokedAt?.toISOString() ?? null,
   createdAt: r.createdAt?.toISOString() ?? null,
+  allowedClientIds: r.allowedClientIds ?? null,
+  allowedClients: r.allowedClientIds ? r.allowedClientIds.filter((id) => names.has(id)).map((id) => ({ id, name: names.get(id)! })) : null,
+  agentLabel: r.agentLabel ?? null,
   usage30d,
 });
 
+export interface KeyLimits {
+  /** null or absent = every client in the business. At least one client when given. */
+  allowedClientIds?: string[] | null;
+  agentLabel?: string | null;
+}
+
+/** Every listed client must be in this business, so a key can never be pointed at another business's client. */
+async function checkClientsInBusiness(businessId: string, ids: string[] | null | undefined): Promise<string[] | null> {
+  if (!ids) return null;
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) throw new AppError(422, 'allowedClientIds needs at least one client; send null for every client');
+  const found = await db.select({ id: clients.id }).from(clients).where(and(inArray(clients.id, unique), eq(clients.businessId, businessId)));
+  if (found.length !== unique.length) throw new AppError(422, 'allowedClientIds lists a client that is not in this business');
+  return unique;
+}
+
 export async function createApiKey(
-  businessId: string, createdBy: string | null, input: { name: string; scopes: ApiScope[]; expiresAt?: string | null },
+  businessId: string, createdBy: string | null, input: { name: string; scopes: ApiScope[]; expiresAt?: string | null } & KeyLimits,
 ): Promise<{ key: string; apiKey: ApiKeyDto }> {
+  const allowedClientIds = await checkClientsInBusiness(businessId, input.allowedClientIds);
   const secret = randomBytes(32).toString('base64url');
   const key = `${KEY_MARKER}${secret}`;
   const [row] = await db.insert(apiKeys).values({
@@ -57,8 +92,23 @@ export async function createApiKey(
     scopes: [...new Set(input.scopes)],
     createdBy,
     expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
+    allowedClientIds,
+    agentLabel: input.agentLabel?.trim() || null,
   }).returning();
-  return { key, apiKey: dto(row!) };
+  return { key, apiKey: dto(row!, 0, await clientNames(businessId, [row!])) };
+}
+
+/** Change a key's client limit or agent label. Takes effect on the key's next call. A revoked key cannot be changed. */
+export async function updateApiKeyLimits(businessId: string, id: string, input: KeyLimits): Promise<ApiKeyDto> {
+  const set: Partial<typeof apiKeys.$inferInsert> = {};
+  if (input.allowedClientIds !== undefined) set.allowedClientIds = await checkClientsInBusiness(businessId, input.allowedClientIds);
+  if (input.agentLabel !== undefined) set.agentLabel = input.agentLabel?.trim() || null;
+  const where = and(eq(apiKeys.id, id), eq(apiKeys.businessId, businessId), isNull(apiKeys.revokedAt));
+  const [row] = Object.keys(set).length
+    ? await db.update(apiKeys).set(set).where(where).returning()
+    : await db.select().from(apiKeys).where(where);
+  if (!row) throw new AppError(404, 'API key not found');
+  return dto(row, 0, await clientNames(businessId, [row]));
 }
 
 export async function listApiKeys(businessId: string): Promise<ApiKeyDto[]> {
@@ -68,7 +118,8 @@ export async function listApiKeys(businessId: string): Promise<ApiKeyDto[]> {
       n: sql<number>`(select count(*)::int from api_key_usage u where u.api_key_id = "api_keys"."id" and u.at > now() - interval '30 days')`,
     })
     .from(apiKeys).where(eq(apiKeys.businessId, businessId)).orderBy(desc(apiKeys.createdAt));
-  return rows.map((r) => dto(r.k, r.n));
+  const names = await clientNames(businessId, rows.map((r) => r.k));
+  return rows.map((r) => dto(r.k, r.n, names));
 }
 
 export async function revokeApiKey(businessId: string, id: string): Promise<void> {

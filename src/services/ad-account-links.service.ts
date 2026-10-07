@@ -7,6 +7,7 @@ import { canonicalizePlatform, canonicalPlatformSql, normaliseAccountId, sourceL
 import { NotFoundError, ValidationError } from '../utils/errors.js';
 import type { AuthPayload } from '../types/index.js';
 import { campaignVisible } from './ad-account-rules.service.js';
+import { clientAllowed, currentClientScope } from './key-client-scope.service.js';
 
 /**
  * Sam S13 (feedback round 1, 2026-09-29): one screen to say which client
@@ -229,6 +230,9 @@ export async function listAdAccounts(requester: AuthPayload, windowDays = 30, fi
   for (const [k, row] of byKey) if (!row.link && elsewhere.has(k)) byKey.delete(k);
 
   if (filters.businessOnly) for (const [k, row] of byKey) if (!row.link && row.campaigns.length === 0) byKey.delete(k);
+  // A key limited to some clients sees only the accounts linked to them (src/mcp/client-scope.ts).
+  const scope = currentClientScope();
+  if (scope) for (const [k, row] of byKey) if (!row.link || !clientAllowed(row.link.clientId, scope)) byKey.delete(k);
 
   // Unlinked spend first (largest first) — that's the work to do — then the
   // linked accounts, also by spend.

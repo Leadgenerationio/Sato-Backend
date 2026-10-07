@@ -21,7 +21,15 @@ export const createKeySchema = z.object({
   name: z.string().trim().min(1).max(100),
   scopes: z.array(z.enum(keys.API_SCOPES)).min(1),
   expiresAt: z.string().datetime().nullable().optional(),
+  // MCP spec §3, step 1h: limit the key to some clients (null = every client), and the bot name for the activity log.
+  allowedClientIds: z.array(uuidShape()).min(1).max(500).nullable().optional(),
+  agentLabel: z.string().trim().max(100).nullable().optional(),
 });
+
+export const updateKeySchema = z.object({
+  allowedClientIds: z.array(uuidShape()).min(1).max(500).nullable().optional(),
+  agentLabel: z.string().trim().max(100).nullable().optional(),
+}).refine((b) => b.allowedClientIds !== undefined || b.agentLabel !== undefined, { message: 'Send allowedClientIds or agentLabel' });
 
 const businessOf = (req: Request) => {
   if (!req.user?.businessId) throw new AppError(403, 'No business assigned to your account');
@@ -61,6 +69,12 @@ apiKeyRoutes.post('/', validate(z.object({ body: createKeySchema })), async (req
   const out = await keys.createApiKey(businessOf(req), req.user!.userId, body);
   res.setHeader('Cache-Control', 'no-store');
   res.status(201).json({ status: 'success', data: { ...out, note: 'Copy this key now — it is not shown again.' } });
+});
+
+// Change who a key can see (its client limit) or its agent label. Scopes are fixed at creation.
+apiKeyRoutes.patch('/:id', validate(z.object({ params: z.object({ id: uuidShape() }), body: updateKeySchema })), async (req: Request, res: Response) => {
+  const body = updateKeySchema.parse(req.body);
+  res.json({ status: 'success', data: { apiKey: await keys.updateApiKeyLimits(businessOf(req), String(req.params.id), body) } });
 });
 
 apiKeyRoutes.delete('/:id', validate(z.object({ params: z.object({ id: uuidShape() }) })), async (req: Request, res: Response) => {

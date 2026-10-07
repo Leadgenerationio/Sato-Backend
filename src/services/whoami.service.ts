@@ -1,12 +1,18 @@
-import { eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { apiKeys } from '../db/schema/api-keys.js';
 import { businesses } from '../db/schema/businesses.js';
 import { users } from '../db/schema/users.js';
+import { clients } from '../db/schema/clients.js';
 
 export interface CallerInfo {
   authType: 'api_key';
-  key: { id: string; name: string; prefix: string; scopes: string[]; expiresAt: string | null; lastUsedAt: string | null };
+  key: {
+    id: string; name: string; prefix: string; scopes: string[]; expiresAt: string | null; lastUsedAt: string | null;
+    /** The clients this key is limited to, or null for every client in the business. */
+    allowedClients: Array<{ clientId: string; name: string }> | null;
+    agentLabel: string | null;
+  };
   owner: { name: string } | null;
   business: { id: string; name: string } | null;
   rateLimit: { limit: number; windowSeconds: number };
@@ -22,6 +28,10 @@ export async function describeApiKeyCaller(apiKeyId: string, businessId: string)
     const [u] = await db.select({ name: users.name }).from(users).where(eq(users.id, row.createdBy)).limit(1);
     owner = u ?? null;
   }
+  const allowedClients = row.allowedClientIds
+    ? row.allowedClientIds.length === 0 ? [] : await db.select({ clientId: clients.id, name: clients.companyName }).from(clients)
+        .where(and(inArray(clients.id, row.allowedClientIds), eq(clients.businessId, businessId))).orderBy(asc(clients.companyName))
+    : null;
   return {
     authType: 'api_key',
     key: {
@@ -31,6 +41,8 @@ export async function describeApiKeyCaller(apiKeyId: string, businessId: string)
       scopes: row.scopes,
       expiresAt: row.expiresAt?.toISOString() ?? null,
       lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
+      allowedClients,
+      agentLabel: row.agentLabel ?? null,
     },
     owner,
     business: business ?? null,

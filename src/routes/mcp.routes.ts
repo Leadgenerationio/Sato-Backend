@@ -45,7 +45,8 @@ mcpRoutes.post('/', async (req: Request, res: Response) => {
   const ctx: ToolContext = {
     businessId: req.user!.businessId!,
     userId: realUserId(req.user!.userId),
-    apiKey: key,
+    apiKey: { id: key.id, prefix: key.prefix, scopes: key.scopes },
+    allowedClientIds: key.allowedClientIds,
     agent: (req.get('x-stato-agent') ?? '').trim().slice(0, 100) || null,
     requestId: String(res.locals.requestId ?? ''),
     rateLimit: rateLimitOf(req),

@@ -11,6 +11,8 @@ export interface ToolContext {
   /** The user who owns the key, when known. */
   userId: string | null;
   apiKey: { id: string; prefix: string; scopes: string[] };
+  /** Clients this key may use (api_keys.allowed_client_ids); null = every client in its business. See client-scope.ts. */
+  allowedClientIds: readonly string[] | null;
   /** Bot name from the X-Stato-Agent header, or the MCP client name. */
   agent: string | null;
   requestId: string;

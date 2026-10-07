@@ -19,7 +19,7 @@ import type { UserRole } from '../types/index.js';
 declare global {
   namespace Express {
     interface Request {
-      apiKey?: { id: string; prefix: string; scopes: string[] };
+      apiKey?: { id: string; prefix: string; scopes: string[]; allowedClientIds: string[] | null };
     }
   }
 }
@@ -45,7 +45,7 @@ export async function apiKeyOrJwt(req: Request, res: Response, next: NextFunctio
     await auditRefusedKey(key.trim(), req, res, startedAt);
     throw new UnauthorizedError('Invalid, expired or revoked API key');
   }
-  req.apiKey = { id: row.id, prefix: row.prefix, scopes: row.scopes };
+  req.apiKey = { id: row.id, prefix: row.prefix, scopes: row.scopes, allowedClientIds: row.allowedClientIds ?? null };
   req.user = {
     userId: row.createdBy ?? '00000000-0000-0000-0000-000000000000',
     email: `api-key:${row.prefix}`,
@@ -55,8 +55,23 @@ export async function apiKeyOrJwt(req: Request, res: Response, next: NextFunctio
   res.on('finish', () => logApiKeyUse(row.id, req.method, req.originalUrl.split('?')[0]!, res.statusCode));
   // One audit row per key call (MCP spec §3, step 1g).
   auditOnFinish(row, req, res, startedAt);
+  // A key limited to some clients works on /mcp (every tool checks the limit, see
+  // src/mcp/client-scope.ts) and on whoami. The REST routes do not check it, so
+  // they refuse such a key rather than show it every client.
+  const path = req.originalUrl.split('?')[0]!.replace(/\/+$/, '');
+  if (row.allowedClientIds && !LIMITED_KEY_PATHS.some((p) => path === p || path.startsWith(`${p}/`))) {
+    res.status(403).json({
+      status: 'error', code: 'insufficient_scope',
+      message: 'This API key is limited to some clients and can only be used on the MCP endpoint (/mcp) and whoami.',
+      hint: 'Use a key without a client limit for the REST API.',
+    });
+    return;
+  }
   next();
 }
+
+/** Where a key limited to some clients is accepted. */
+const LIMITED_KEY_PATHS = ['/mcp', '/api/v1/whoami'];
 
 /** JWT callers are checked by role; API-key callers by scope. */
 export function allow(roles: UserRole[], scope: ApiScope): RequestHandler {

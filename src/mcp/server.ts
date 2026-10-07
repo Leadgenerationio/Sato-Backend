@@ -4,6 +4,7 @@ import { ApiError } from '../utils/api-error.js';
 import { buildErrorBody } from '../utils/error-body.js';
 import { logger } from '../utils/logger.js';
 import type { StatoTool, ToolContext } from './types.js';
+import { callWithinClientScope } from './client-scope.js';
 
 export const SERVER_INFO = { name: 'stato', version: '1.0.0' } as const;
 
@@ -42,7 +43,7 @@ export function createStatoMcpServer(ctx: ToolContext, tools: StatoTool[], onAud
               hint: 'Ask the owner to add that scope to the key in Settings, API keys, or use a key that has it.',
             });
           }
-          const out = await t.handler(args, ctx);
+          const out = await callWithinClientScope(t, args, ctx);
           onAudit?.({ tool: t.name, args, before: out.audit?.before, after: out.audit?.after, recordsTouched: out.audit?.recordsTouched });
           return { content: [{ type: 'text', text: `${out.summary}\n\n${JSON.stringify(out.data, null, 2)}` }], structuredContent: out.data };
         } catch (err) {
