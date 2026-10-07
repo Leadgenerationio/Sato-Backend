@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import postgres from 'postgres';
 import request from 'supertest';
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import app from '../index.js';
 import { db } from '../config/database.js';
 import { clients } from '../db/schema/clients.js';
@@ -13,6 +13,7 @@ import { logger } from '../utils/logger.js';
 import { ensureUniqueIndex, findDuplicateGroups, indexState, createIndexSql } from '../../scripts/lib/creative-unique-index.js';
 import * as r2 from '../integrations/r2/r2-client.js';
 import { uniqueViolationConstraint } from '../utils/pg-errors.js';
+import { upsertCopyCreative } from '../services/creative-copy.service.js';
 import { CREATIVE_CLIENT_SHA_INDEX } from '../db/schema/creatives.js';
 
 // One live creative per (client, file hash): the check script, the index script and the code that survives the index.
@@ -137,6 +138,13 @@ describe('the code survives the index: a request that loses the race gets the ex
     expect(deleted).not.toContain(winner!.r2Key);
     for (const key of deleted) expect(await r2.objectExists('creatives', key)).toBe(false);
     expect(await r2.objectExists('creatives', winner!.r2Key!)).toBe(true);
+  }, 60_000);
+  it('copy-only: 6 of the same text at once: one creative, every call gets it back (the same index)', async () => {
+    const text = `Race copy ${tag}`;
+    const results = await Promise.all(Array.from({ length: 6 }, () => upsertCopyCreative({ businessId: BIZ, clientId: client, platform: 'meta', headline: text })));
+    expect(new Set(results.map((r) => r.creative.id)).size).toBe(1);
+    expect(results.filter((r) => r.created)).toHaveLength(1);
+    expect(await db.select({ id: creatives.id }).from(creatives).where(and(eq(creatives.clientId, client), eq(creatives.type, 'copy')))).toHaveLength(1);
   }, 60_000);
   it('a violation of some OTHER unique index is not answered as a duplicate (it stays an error)', async () => {
     const OTHER = `creatives_other_${tag}_uq`;
