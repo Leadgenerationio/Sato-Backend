@@ -26,6 +26,7 @@ export default defineTool({
     expiresAt: z.string().nullable(),
     adLinks: z.array(adLinkOut),
     landingPage: z.object({ id: z.string(), url: z.string(), title: z.string().nullable() }).nullable(),
+    history: z.array(z.object({ at: z.string(), tool: z.string().nullable(), by: z.string().nullable(), transport: z.string(), result: z.string() })).describe('The latest API-key calls that touched this asset, newest first (at most 10).'),
   },
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   scope: 'creatives:read',

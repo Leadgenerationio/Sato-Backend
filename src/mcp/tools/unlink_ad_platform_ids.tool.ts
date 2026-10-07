@@ -9,7 +9,7 @@ export default defineTool({
   title: 'Remove a wrong ad link',
   description:
     'Remove an ad link that was recorded by mistake. The link is marked removed and kept in history; the asset and its file are untouched. ' +
-    'Find the adLinkId with find_asset_by_platform_id or get_asset. Safe to repeat: an already removed link returns unchanged.',
+    'Find the adLinkId with find_asset_by_platform_id or get_asset. Safe to repeat: an already removed link returns unchanged. IDs are strings.',
   inputSchema: {
     adLinkId: uuidShape().describe('The ad link ID (UUID).'),
     reason: z.string().max(500).optional().describe('Why it is being removed. Stored in the audit log.'),

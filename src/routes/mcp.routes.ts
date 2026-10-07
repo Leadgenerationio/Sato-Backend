@@ -17,6 +17,13 @@ function jsonRpcError(res: Response, status: number, message: string, headers: R
   res.status(status).set(headers).json({ jsonrpc: '2.0', error: { code: -32000, message }, id: null });
 }
 
+/** The limiter's view of this key after the current call (express-rate-limit puts it on the request). */
+function rateLimitOf(req: Request): { limit: number; remaining: number; resetsInSeconds: number } | null {
+  const rl = (req as Request & { rateLimit?: { limit: number; remaining: number; resetTime?: Date } }).rateLimit;
+  if (!rl) return null;
+  return { limit: rl.limit, remaining: Math.max(0, rl.remaining), resetsInSeconds: rl.resetTime ? Math.max(0, Math.ceil((rl.resetTime.getTime() - Date.now()) / 1000)) : 60 };
+}
+
 function hasKey(req: Request): boolean {
   return Boolean(req.get('x-api-key')) || /^Bearer\s+stk_/i.test(req.get('authorization') ?? '');
 }
@@ -41,6 +48,7 @@ mcpRoutes.post('/', async (req: Request, res: Response) => {
     apiKey: key,
     agent: (req.get('x-stato-agent') ?? '').trim().slice(0, 100) || null,
     requestId: String(res.locals.requestId ?? ''),
+    rateLimit: rateLimitOf(req),
     auth: { userId: req.user!.userId, email: req.user!.email, role: 'ops_manager', businessId: req.user!.businessId! },
   };
   // One audit entry per request: res.locals.audit holds a single call, so a
