@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { defineTool } from '../types.js';
+import { withToolResult } from '../../services/tool-idempotency.service.js';
 import { adLinkOut } from '../schemas.js';
 import { linkAdPlatformIds } from '../../services/creative-ad-links.service.js';
 import { realUserId } from '../../services/ad-account-rules.service.js';
@@ -15,6 +16,7 @@ export default defineTool({
     'Safe to repeat: the same ad returns unchanged. An ad already linked to a different asset returns result = duplicate with that link\'s IDs and saves nothing (it is not an error; use unlink_ad_platform_ids first if the ad really changed asset). ' +
     'If the ad account feeds several campaigns and the asset has none, send campaignId (the Stato campaign) or the call fails with validation_failed listing them.',
   inputSchema: {
+    idempotencyKey: z.string().max(100).optional().describe('Optional. Repeating the same call with the same key returns the first answer instead of doing it twice.'),
     creativeId: uuidShape().describe('Stato asset ID (UUID).'),
     platform: z.string().min(1).max(50).describe('meta, google, tiktok or taboola.'),
     accountId: z.string().min(1).max(100).describe('The ad account ID the ad lives in.'),
@@ -33,7 +35,10 @@ export default defineTool({
   outputSchema: { adLinkId: z.string(), result: z.enum(['created', 'unchanged', 'updated', 'duplicate']), adLink: adLinkOut },
   annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
   scope: 'ad_links:write',
-  handler: async (args, ctx) => {
+  handler: async (rawArgs, ctx) => {
+    const { idempotencyKey, ...args } = rawArgs;
+    return withToolResult(ctx.apiKey.id, idempotencyKey, 'link_ad_platform_ids', args, async () => {
+
     const res = await linkAdPlatformIds(
       { businessId: ctx.businessId, userId: realUserId(ctx.userId), keyId: ctx.apiKey.id, source: 'mcp' },
       args as Parameters<typeof linkAdPlatformIds>[1],
@@ -50,5 +55,6 @@ export default defineTool({
       data: { adLinkId: res.link.adLinkId, result: res.result, adLink: res.link },
       audit: { before: res.before ?? undefined, after: res.link, recordsTouched: [{ type: 'ad_link', id: res.link.adLinkId }, { type: 'creative', id: res.link.creativeId }] },
     };
+    });
   },
 });

@@ -21,6 +21,8 @@ export async function withIdempotency<T extends Record<string, unknown>>(
   tool: string,
   request: unknown,
   run: () => Promise<T>,
+  /** Keep the answer only when this says so (a poll that is not final, such as complete_upload still processing, is not kept). */
+  storeIf: (value: T) => boolean = () => true,
 ): Promise<{ value: T; replayed: boolean }> {
   if (!idempotencyKey) return { value: await run(), replayed: false };
   const key = idempotencyKey.trim();
@@ -55,6 +57,7 @@ export async function withIdempotency<T extends Record<string, unknown>>(
   inFlight.add(flight);
   try {
     const value = await run();
+    if (!storeIf(value)) return { value, replayed: false };
     // Only successes are kept: a failed call must be retryable once the caller fixes it.
     await db.insert(idempotencyKeys).values({ owner, key, requestHash, status: 200, response: value })
       .onConflictDoUpdate({ target: [idempotencyKeys.owner, idempotencyKeys.key], set: { requestHash, status: 200, response: value, createdAt: new Date() } });
@@ -74,8 +77,9 @@ export async function withToolResult<R extends { summary: string; data: unknown;
   tool: string,
   request: unknown,
   run: () => Promise<R>,
+  storeIf: (result: R) => boolean = () => true,
 ): Promise<R> {
-  const { value, replayed } = await withIdempotency(keyId, idempotencyKey, tool, request, async () => (await run()) as unknown as Record<string, unknown>);
+  const { value, replayed } = await withIdempotency(keyId, idempotencyKey, tool, request, async () => (await run()) as unknown as Record<string, unknown>, (v) => storeIf(v as unknown as R));
   const r = value as unknown as R;
   return replayed ? { ...r, summary: `Same request as before (idempotencyKey): returning the first answer. ${r.summary}` } : r;
 }
