@@ -16,7 +16,7 @@ export default defineTool({
   },
   outputSchema: {
     uploadId: z.string(),
-    status: z.enum(['ready', 'processing']),
+    status: z.enum(['ready', 'processing', 'error']).describe('ready, or processing (call again). error when the call failed: see code and hint.'),
     sizeBytes: z.number(),
     contentType: z.string(),
     sha256: z.string().nullable(),
