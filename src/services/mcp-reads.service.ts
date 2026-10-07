@@ -9,6 +9,7 @@ import { landingPages } from '../db/schema/landing-pages.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
 import { ApiError } from '../utils/api-error.js';
 import { campaignVisible, resolveCampaignRef, trafficSourceAccountsSql } from './ad-account-rules.service.js';
+import { campaignInScope, clientColumnInScope } from './key-client-scope.service.js';
 
 // MCP spec v1.0 discovery tools: list_clients, get_client, list_campaigns,
 // get_campaign. Read only. Campaign IDs are the Stato UUID with the LeadByte
@@ -45,6 +46,8 @@ export interface ClientListItem { clientId: string; name: string; status: string
 export async function listClients(businessId: string, f: { q?: string; status?: (typeof clientStatusEnum.enumValues)[number]; limit?: number; cursor?: string }): Promise<Page<ClientListItem>> {
   const { limit, offset } = pageArgs(f.limit, f.cursor);
   const where: SQL[] = [eq(clients.businessId, businessId)];
+  const inScope = clientColumnInScope(clients.id); // a key limited to some clients lists only those
+  if (inScope) where.push(inScope);
   if (f.q) where.push(ilike(clients.companyName, like(f.q)));
   if (f.status) where.push(eq(clients.status, f.status));
   const rows = await db
@@ -105,6 +108,8 @@ export async function listCampaignsForMcp(businessId: string, f: { clientId?: st
     if (!c) throw new ApiError('not_found', 'That client does not exist in this business.', { hint: 'Use list_clients to find the right clientId.' });
   }
   const where: SQL[] = [campaignVisible(businessId)];
+  const inScope = campaignInScope(campaigns.id); // a key limited to some clients lists only their campaigns
+  if (inScope) where.push(inScope);
   if (f.clientId) where.push(sql`exists (select 1 from ${clientCampaigns} cc where cc.campaign_id = ${campaigns.id} and cc.client_id = ${f.clientId})`);
   // status is free-form text from LeadByte: compare without case.
   if (f.status) where.push(sql`lower(${campaigns.status}) = lower(${f.status})`);

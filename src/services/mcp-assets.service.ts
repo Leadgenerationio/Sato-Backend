@@ -15,6 +15,7 @@ import { creativeInBusiness, SHARED_SHOWS_UNDER_EVERY_BUYER } from './creative-l
 import { resolveR2Location } from './creative.service.js';
 import { toAdLinkDto, type AdLinkDto } from './creative-ad-links.service.js';
 import { normalisePlatform } from './ad-account-links.service.js';
+import { clientColumnInScope } from './key-client-scope.service.js';
 
 // MCP spec v1.0 list_assets and get_asset. Read only. Archived assets are
 // hidden unless includeArchived is sent (spec test 13); the file is never touched.
@@ -55,6 +56,8 @@ export async function listAssets(businessId: string, f: ListAssetsFilters): Prom
   const offset = cursorOffset(f.cursor);
   const where: SQL[] = [eq(creatives.isDeleted, false), creativeInBusiness(businessId)];
   if (!f.includeArchived) where.push(isNull(creatives.archivedAt));
+  const inScope = clientColumnInScope(creatives.clientId); // a key limited to some clients lists only their assets
+  if (inScope) where.push(inScope);
   if (f.clientId) {
     where.push(SHARED_SHOWS_UNDER_EVERY_BUYER
       ? or(eq(creatives.clientId, f.clientId), and(isNull(creatives.clientId), sql`${creatives.campaignId} in (select cc.campaign_id from ${clientCampaigns} cc where cc.client_id = ${f.clientId})`))!
