@@ -69,7 +69,7 @@ beforeAll(async () => {
 
   const made = await makeKey({ allowedClientIds: [ids.clientA], agentLabel: 'scope-bot' });
   expect(made.status).toBe(201);
-  expect(made.body.data.apiKey).toMatchObject({ allowedClientIds: [ids.clientA], agentLabel: 'scope-bot' });
+  expect(made.body.data.apiKey).toMatchObject({ allowedClientIds: [ids.clientA], allowedClients: [{ id: ids.clientA, name: `Hari Test SCOPE A ${tag}` }], agentLabel: 'scope-bot' });
   limited = made.body.data.key;
   open = (await makeKey({})).body.data.key;
 });
@@ -155,8 +155,10 @@ describe('a key limited to client A', () => {
     expect(await db.select().from(creativeAdLinks).where(inArray(creativeAdLinks.platformAdId, [`9${tag}3`, `9${tag}4`]))).toHaveLength(0);
   });
 
-  it('must name a client when uploading', async () => {
+  it('must name a client when uploading, and send platform with an account', async () => {
     expect(codeOf(await call(limited, 'upload_asset', { sourceUrl: 'https://scope.invalid/a.png', name: 'x', platform: 'meta' }))).toBe('validation_failed');
+    const r = await call(limited, 'upload_asset', { sourceUrl: 'https://scope.invalid/a.png', name: 'x', platformAccountId: acct('B') });
+    expect(r.structuredContent).toMatchObject({ code: 'validation_failed', fields: [{ field: 'platform' }] });
   });
 
   it('is refused on the REST routes, which do not check the limit, but works on whoami', async () => {
@@ -189,6 +191,8 @@ describe('setting the limit', () => {
     const patched = await request(app).patch(`/api/v1/api-keys/${id}`).set('Authorization', `Bearer ${owner}`).send({ allowedClientIds: [ids.clientA] });
     expect(patched.status).toBe(200);
     expect(patched.body.data.apiKey.allowedClientIds).toEqual([ids.clientA]);
+    const listed = (await request(app).get('/api/v1/api-keys').set('Authorization', `Bearer ${owner}`)).body.data.apiKeys.find((x: any) => x.id === id);
+    expect(listed.allowedClients).toEqual([{ id: ids.clientA, name: `Hari Test SCOPE A ${tag}` }]);
     expect(codeOf(await call(k, 'get_client', { clientId: ids.clientB }))).toBe('not_found');
     expect((await request(app).patch(`/api/v1/api-keys/${id}`).set('Authorization', `Bearer ${owner}`).send({ allowedClientIds: [ids.otherClient] })).status).toBe(422);
     await request(app).patch(`/api/v1/api-keys/${id}`).set('Authorization', `Bearer ${owner}`).send({ allowedClientIds: null }).expect(200);

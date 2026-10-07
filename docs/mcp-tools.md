@@ -27,4 +27,4 @@
 | `unlink_ad_platform_ids` | Remove an ad link that was recorded by mistake. | `ad_links:write` | write (hides or removes, never deletes a file) | `adLinkId`; optional: `reason`; takes `idempotencyKey` |
 | `update_asset` | Change an asset's name, headline, bodyText, tags (replaces the list) or campaign. | `creatives:write` | write | `creativeId`; optional: `name`, `headline`, `bodyText`, `tags`, `campaignId`, `clientId`, `confirmMove`; takes `idempotencyKey` |
 | `upload_asset` | File an image or video under the right client and campaign. | `creatives:write` | write | optional: `mediaType`, `sourceUrl`, `uploadId`, `name`, `platform`, `platformAccountId`, `clientId`, `campaignId`, `headline`, `bodyText`, `landingPageUrl`, `tags`, `adLink`; takes `idempotencyKey` |
-| `whoami` | Shows which API key, owner and business this connection is using, and the scopes it holds. | any key | read only | none |
+| `whoami` | Shows which API key, owner and business this connection is using, the scopes it holds, and the clients it is limited to (key.allowedClients; null means every client). | any key | read only | none |

@@ -85,6 +85,9 @@ const RULES: Record<string, ClientRule> = {
   upload_asset: {
     before: async (a, c, s) => {
       clientArg(a, s);
+      if (str(a.platformAccountId) && !str(a.platform)) {
+        throw new ApiError('validation_failed', 'platform is required with platformAccountId.', { fields: [{ field: 'platform', message: 'Required with platformAccountId' }] });
+      }
       if (str(a.platformAccountId)) await assertAccountInScope(c.businessId, String(a.platform), String(a.platformAccountId), s);
       else if (!str(a.clientId)) {
         throw new ApiError('validation_failed', 'This key is limited to some clients: send platformAccountId or clientId so the asset is filed under one of them.', {

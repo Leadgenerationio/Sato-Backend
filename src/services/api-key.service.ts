@@ -31,13 +31,23 @@ export interface ApiKeyDto {
   createdAt: string | null;
   /** The clients this key is limited to, or null for every client in the business (MCP spec §3, step 1h). */
   allowedClientIds: string[] | null;
+  /** The same clients with their names, for the keys screen (a client deleted since is left out). */
+  allowedClients: Array<{ id: string; name: string }> | null;
   /** Bot name used in the activity log when a call sends no X-Stato-Agent header. */
   agentLabel: string | null;
   /** Calls logged in the last 30 days (Settings → API keys). */
   usage30d: number;
 }
 
-const dto = (r: ApiKeyRow, usage30d = 0): ApiKeyDto => ({
+/** Names of every client any of these keys is limited to, in one query. */
+async function clientNames(businessId: string, rows: ApiKeyRow[]): Promise<Map<string, string>> {
+  const ids = [...new Set(rows.flatMap((r) => r.allowedClientIds ?? []))];
+  if (!ids.length) return new Map();
+  const found = await db.select({ id: clients.id, name: clients.companyName }).from(clients).where(and(inArray(clients.id, ids), eq(clients.businessId, businessId)));
+  return new Map(found.map((c) => [c.id, c.name]));
+}
+
+const dto = (r: ApiKeyRow, usage30d = 0, names: Map<string, string> = new Map()): ApiKeyDto => ({
   id: r.id,
   name: r.name,
   prefix: r.prefix,
@@ -47,6 +57,7 @@ const dto = (r: ApiKeyRow, usage30d = 0): ApiKeyDto => ({
   revokedAt: r.revokedAt?.toISOString() ?? null,
   createdAt: r.createdAt?.toISOString() ?? null,
   allowedClientIds: r.allowedClientIds ?? null,
+  allowedClients: r.allowedClientIds ? r.allowedClientIds.filter((id) => names.has(id)).map((id) => ({ id, name: names.get(id)! })) : null,
   agentLabel: r.agentLabel ?? null,
   usage30d,
 });
@@ -84,7 +95,7 @@ export async function createApiKey(
     allowedClientIds,
     agentLabel: input.agentLabel?.trim() || null,
   }).returning();
-  return { key, apiKey: dto(row!) };
+  return { key, apiKey: dto(row!, 0, await clientNames(businessId, [row!])) };
 }
 
 /** Change a key's client limit or agent label. Takes effect on the key's next call. A revoked key cannot be changed. */
@@ -97,7 +108,7 @@ export async function updateApiKeyLimits(businessId: string, id: string, input: 
     ? await db.update(apiKeys).set(set).where(where).returning()
     : await db.select().from(apiKeys).where(where);
   if (!row) throw new AppError(404, 'API key not found');
-  return dto(row);
+  return dto(row, 0, await clientNames(businessId, [row]));
 }
 
 export async function listApiKeys(businessId: string): Promise<ApiKeyDto[]> {
@@ -107,7 +118,8 @@ export async function listApiKeys(businessId: string): Promise<ApiKeyDto[]> {
       n: sql<number>`(select count(*)::int from api_key_usage u where u.api_key_id = "api_keys"."id" and u.at > now() - interval '30 days')`,
     })
     .from(apiKeys).where(eq(apiKeys.businessId, businessId)).orderBy(desc(apiKeys.createdAt));
-  return rows.map((r) => dto(r.k, r.n));
+  const names = await clientNames(businessId, rows.map((r) => r.k));
+  return rows.map((r) => dto(r.k, r.n, names));
 }
 
 export async function revokeApiKey(businessId: string, id: string): Promise<void> {
