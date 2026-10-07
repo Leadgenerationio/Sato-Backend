@@ -186,10 +186,11 @@ export async function ensureLandingPage(
 }
 
 export async function listLandingPages(
-  businessId: string, filters: { clientId?: string; q?: string; includeArchived?: boolean } = {},
+  businessId: string, filters: { clientId?: string; campaignId?: string; q?: string; includeArchived?: boolean } = {},
 ): Promise<LandingPageDto[]> {
   const where: SQL[] = [sql`exists (select 1 from ${clients} c where c.id = ${landingPages.clientId} and c.business_id = ${businessId})`];
   if (filters.clientId) where.push(eq(landingPages.clientId, filters.clientId));
+  if (filters.campaignId) where.push(eq(landingPages.campaignId, filters.campaignId));
   if (!filters.includeArchived) where.push(sql`coalesce(${landingPages.status}, 'active') <> 'archived'`);
   if (filters.q) where.push(or(ilike(landingPages.url, `%${filters.q}%`), ilike(landingPages.title, `%${filters.q}%`))!);
   const rows = await db

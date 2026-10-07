@@ -3,6 +3,7 @@ import { defineTool } from '../types.js';
 import { adLinkOut } from '../schemas.js';
 import { ApiError } from '../../utils/api-error.js';
 import { uuidShape } from '../../utils/zod-helpers.js';
+import { env } from '../../config/env.js';
 import { uploadAssetFromUrl } from '../../services/mcp-upload.service.js';
 import { withIdempotency } from '../../services/tool-idempotency.service.js';
 import { realUserId } from '../../services/ad-account-rules.service.js';
@@ -15,7 +16,7 @@ export default defineTool({
     'Call find_client_by_ad_account first. Send platform and platformAccountId and Stato picks the client from the ad account; clientId is only a cross-check and a mismatch is rejected (account_client_mismatch) with nothing saved. ' +
     'An unlinked account is account_not_linked: stop and ask the owner. If the account feeds several campaigns you must send campaignId. ' +
     'Optionally send adLink to record the ad in the same call (the IDs the platform returned; all strings). ' +
-    'Safe to repeat: the same file for the same client returns result "duplicate" with the existing creativeId; the same idempotencyKey replays the first answer for 24 hours.',
+    'Safe to repeat: the same file for the same client returns result "duplicate" with the existing creativeId; the same idempotencyKey replays the first answer for 24 hours. IDs are strings.',
   inputSchema: {
     mediaType: z.enum(['image', 'video']).optional().describe('Required with sourceUrl. With uploadId it is read from the file.'),
     sourceUrl: z.string().min(1).max(2000).optional().describe('Public http(s) URL of a file up to 50 MB. Private and internal addresses are blocked. Send this or uploadId.'),
@@ -48,6 +49,8 @@ export default defineTool({
     sizeBytes: z.number().nullable(),
     fileStatus: z.string(),
     approvalStatus: z.string(),
+    thumbnailUrl: z.string().nullable().describe('A signed link to the poster or thumbnail, when one exists yet.'),
+    portalUrl: z.string().describe('The asset in the Stato portal.'),
     adLink: adLinkOut.nullable(),
     adLinkResult: z.enum(['created', 'updated', 'unchanged', 'duplicate']).nullable().describe('duplicate: the ad already runs another asset. This asset is saved; nothing was linked.'),
   },
@@ -65,7 +68,7 @@ export default defineTool({
       const { audit: _audit, ...res } = await uploadAssetFromUrl(caller, request as Parameters<typeof uploadAssetFromUrl>[1]);
       return res as unknown as Record<string, unknown>;
     });
-    const out = value as unknown as { creativeId: string; result: 'created' | 'updated' | 'duplicate'; name: string; mediaType: string | null; sizeBytes: number | null; fileStatus: string; approvalStatus: string; adLink: z.infer<typeof adLinkOut> | null; adLinkResult: 'created' | 'updated' | 'unchanged' | 'duplicate' | null };
+    const out = value as unknown as { creativeId: string; result: 'created' | 'updated' | 'duplicate'; name: string; mediaType: string | null; sizeBytes: number | null; fileStatus: string; approvalStatus: string; thumbnailUrl?: string | null; portalUrl?: string; adLink: z.infer<typeof adLinkOut> | null; adLinkResult: 'created' | 'updated' | 'unchanged' | 'duplicate' | null };
     const summary = replayed ? `Same request as before (idempotencyKey): returning the first answer, asset ${out.creativeId}.`
       : out.result === 'created' ? `Added "${out.name}" as asset ${out.creativeId}.`
       : out.result === 'duplicate' ? `That file is already in Stato for this client: asset ${out.creativeId}. Nothing new was added.`
@@ -73,7 +76,7 @@ export default defineTool({
     const note = out.adLinkResult === 'duplicate' ? ` That ad already runs another asset (${out.adLink?.creativeId}), so the ad was not linked; unlink it first if it changed asset.` : '';
     return {
       summary: summary + note,
-      data: { ...out, replayed },
+      data: { ...out, thumbnailUrl: out.thumbnailUrl ?? null, portalUrl: out.portalUrl ?? `${env.FRONTEND_URL.replace(/\/$/, '')}/creatives?creative=${out.creativeId}`, replayed },
       audit: { after: { creativeId: out.creativeId, result: out.result, replayed }, recordsTouched: [{ type: 'creative', id: out.creativeId }, ...(request.uploadId ? [{ type: 'upload', id: request.uploadId }] : [])] },
     };
   },

@@ -10,7 +10,7 @@ export default defineTool({
   description:
     'Start an upload for a file too big to send as a sourceUrl (images up to 30 MB, videos up to 4 GB). Declare the filename, contentType and exact sizeBytes; ' +
     'a file over the limit or of an unsupported type is refused now, before anything is sent. You get either one uploadUrl (PUT the whole file with the headers given) or a list of parts: PUT each part\'s bytes to its url and keep the ETag response header of every part. ' +
-    'Then call complete_upload, and finally upload_asset with the uploadId. Links last 6 hours. Allowed types: image/jpeg, image/png, image/webp, image/gif, video/mp4, video/quicktime. Sizes are numbers of bytes.',
+    'Then call complete_upload, and finally upload_asset with the uploadId. Links last 6 hours. Allowed types: image/jpeg, image/png, image/webp, image/gif, video/mp4, video/quicktime. Sizes are numbers of bytes. IDs are strings.',
   inputSchema: {
     idempotencyKey: z.string().max(100).optional().describe('Optional. Repeating the same call with the same key returns the first answer instead of doing it twice.'),
     filename: z.string().min(1).max(255),

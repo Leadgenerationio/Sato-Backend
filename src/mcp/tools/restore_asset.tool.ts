@@ -13,7 +13,7 @@ export default defineTool({
   inputSchema: {
     idempotencyKey: z.string().max(100).optional().describe('Optional. Repeating the same call with the same key returns the first answer instead of doing it twice.'),
     creativeId: uuidShape().describe('Stato asset ID (UUID).'),
-
+    reason: z.string().max(255).optional().describe('Why it is being restored. Kept in the audit log.'),
   },
   outputSchema: {
     result: z.enum(['restored', 'unchanged']),
