@@ -75,6 +75,18 @@ async function campaignInBusiness(campaignId: string, businessId: string): Promi
   return Boolean(row);
 }
 
+/**
+ * A campaign a business may file under: one of its own, or a shared campaign that no client buys yet (spec v1.0 section 2.1:
+ * "linked to that client, or a shared campaign with no client"). Ownership of an existing creative still uses the stricter
+ * campaignInBusiness; this only decides whether a new or edited creative may point at the campaign.
+ */
+async function campaignUsableBy(campaignId: string, businessId: string): Promise<boolean> {
+  if (await campaignInBusiness(campaignId, businessId)) return true;
+  const [row] = await db.select({ id: campaigns.id }).from(campaigns)
+    .where(and(eq(campaigns.id, campaignId), isNull(campaigns.clientId), sql`not exists (select 1 from ${clientCampaigns} cc where cc.campaign_id = ${campaigns.id})`));
+  return Boolean(row);
+}
+
 /** SQL predicate: this creative row belongs to the business. */
 export function creativeInBusiness(businessId: string): SQL {
   return sql`(
@@ -211,7 +223,7 @@ export async function createLandingPage(
   businessId: string, input: { clientId: string; url: string; title?: string | null; campaignId?: string | null },
 ): Promise<{ page: LandingPageDto; created: boolean }> {
   if (!(await clientInBusiness(input.clientId, businessId))) throw new AppError(404, 'Client not found');
-  if (input.campaignId && !(await campaignInBusiness(input.campaignId, businessId))) throw new AppError(404, 'Campaign not found');
+  if (input.campaignId && !(await campaignUsableBy(input.campaignId, businessId))) throw new AppError(404, 'Campaign not found');
   const { page, created } = await ensureLandingPage(input.clientId, input.url, { title: input.title, campaignId: input.campaignId });
   if (!created && input.title && !page.title) {
     const [row] = await db.update(landingPages).set({ title: input.title, updatedAt: new Date() }).where(eq(landingPages.id, page.id)).returning();
@@ -469,7 +481,7 @@ export async function upsertPlatformCreative(
     }
   }
   if (clientId && !(await clientInBusiness(clientId, businessId))) throw new AppError(404, 'Client not found');
-  if (campaignId && !(await campaignInBusiness(campaignId, businessId))) throw new AppError(404, 'Campaign not found');
+  if (campaignId && !(await campaignUsableBy(campaignId, businessId))) throw new AppError(404, 'Campaign not found');
   if (!clientId && !campaignId) {
     throw new AppError(422, input.platformAccountId
       ? `No client is linked to ${input.platform} ad account ${input.platformAccountId}. Link it on the "Link ad accounts" screen first, or send clientId.`
@@ -718,7 +730,7 @@ export async function updateCreative(
     set.clientId = patch.clientId;
   }
   if (patch.campaignId !== undefined) {
-    if (patch.campaignId && !(await campaignInBusiness(patch.campaignId, businessId))) throw new AppError(404, 'Campaign not found');
+    if (patch.campaignId && !(await campaignUsableBy(patch.campaignId, businessId))) throw new AppError(404, 'Campaign not found');
     set.campaignId = patch.campaignId;
   }
   if (!nextClient && !nextCampaign) throw new AppError(422, 'A creative needs a client or a campaign');
