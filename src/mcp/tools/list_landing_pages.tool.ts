@@ -6,9 +6,10 @@ import { listLandingPages } from '../../services/creative-library.service.js';
 export default defineTool({
   name: 'list_landing_pages',
   title: 'Find landing pages',
-  description: 'List the saved landing pages for a client, with how many assets use each. Use it before add_landing_page or attach_landing_page. IDs are strings.',
+  description: 'List the saved landing pages for a client or campaign, with how many assets use each. Use it before add_landing_page or attach_landing_page. IDs are strings.',
   inputSchema: {
     clientId: uuidShape().optional(),
+    campaignId: uuidShape().optional().describe('Only the landing pages saved for this Stato campaign.'),
     q: z.string().max(100).optional().describe('Part of the URL or title.'),
     includeArchived: z.boolean().optional(),
   },

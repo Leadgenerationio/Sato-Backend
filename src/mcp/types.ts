@@ -14,6 +14,8 @@ export interface ToolContext {
   /** Bot name from the X-Stato-Agent header, or the MCP client name. */
   agent: string | null;
   requestId: string;
+  /** This key's rate-limit window after the current call, when the limiter reported it. */
+  rateLimit?: { limit: number; remaining: number; resetsInSeconds: number } | null;
   /** The same caller shaped like a signed-in user, for the existing service functions. */
   auth: { userId: string; email: string; role: 'ops_manager'; businessId: string };
 }
