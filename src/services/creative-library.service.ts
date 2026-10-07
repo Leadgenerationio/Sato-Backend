@@ -8,6 +8,7 @@ import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { AppError, MediaSourceError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
+import { isUniqueViolation } from '../utils/pg-errors.js';
 import { canonicalizePlatform, normaliseAccountId } from '../utils/catchr-platform.js';
 import { normaliseLandingUrl } from '../utils/landing-url.js';
 import { fetchRemoteMedia, mediaTypeOf, MAX_MEDIA_BYTES, type RemoteMediaDeps } from '../utils/remote-media.js';
@@ -644,22 +645,33 @@ export async function upsertPlatformCreative(
     return { creative: row!, created: false };
   }
 
-  const [row] = await db.insert(creatives).values({
-    ...fields,
-    name: input.name ?? input.headline ?? input.platformCreativeId ?? 'Creative',
-    fileUrl: fileUrl ?? r2Ref(r2Key!),
-    r2Key,
-    contentType,
-    sizeBytes,
-    sha256,
-    type: mediaType,
-    section: 'media',
-    fileStatus: input.verified?.fileStatus ?? 'ready',
-    landingPageId: landingPageId ?? null,
-    uploadedBy: input.uploadedBy ?? null,
-    firstSeen: now,
-    lastSeen: now,
-  }).returning();
+  let row: CreativeRow | undefined;
+  try {
+    [row] = await db.insert(creatives).values({
+      ...fields,
+      name: input.name ?? input.headline ?? input.platformCreativeId ?? 'Creative',
+      fileUrl: fileUrl ?? r2Ref(r2Key!),
+      r2Key,
+      contentType,
+      sizeBytes,
+      sha256,
+      type: mediaType,
+      section: 'media',
+      fileStatus: input.verified?.fileStatus ?? 'ready',
+      landingPageId: landingPageId ?? null,
+      uploadedBy: input.uploadedBy ?? null,
+      firstSeen: now,
+      lastSeen: now,
+    }).returning();
+  } catch (err) {
+    // The unique index on (client, file hash) refused a second live creative for the same file: a request for the same file
+    // got there first. Return that one as a duplicate instead of failing.
+    if (!isUniqueViolation(err) || !sha256 || !clientId) throw err;
+    const [winner] = await db.select().from(creatives).where(and(eq(creatives.sha256, sha256), eq(creatives.clientId, clientId), eq(creatives.isDeleted, false)));
+    if (!winner) throw err;
+    logger.warn({ creativeId: winner.id, clientId }, 'A second creative for the same file was refused by the unique index; returning the existing one');
+    return { creative: winner, created: false };
+  }
   logger.info({ creativeId: row!.id, clientId, platform: input.platform }, 'Creative added to library');
   domainEvents.emit('creative.added', { businessId, data: { creativeId: row!.id, clientId, campaignId, platform: input.platform, platformCreativeId: input.platformCreativeId ?? null } });
   enqueueThumbnail(row!.id);
