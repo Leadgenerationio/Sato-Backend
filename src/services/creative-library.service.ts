@@ -83,7 +83,7 @@ export async function campaignInBusiness(campaignId: string, businessId: string)
  * its campaign's buyers, so on an unbought campaign it would belong to nobody and then to whoever buys it first.
  * Ownership of an existing creative still uses the stricter campaignInBusiness.
  */
-async function campaignUsableBy(campaignId: string, businessId: string, resultingClientId: string | null): Promise<boolean> {
+export async function campaignUsableBy(campaignId: string, businessId: string, resultingClientId: string | null): Promise<boolean> {
   if (await campaignInBusiness(campaignId, businessId)) return true;
   if (!resultingClientId) return false;
   const [row] = await db.select({ id: campaigns.id }).from(campaigns)

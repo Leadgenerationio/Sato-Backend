@@ -6,7 +6,7 @@ import { AppError } from '../utils/errors.js';
 import { isUniqueViolation } from '../utils/pg-errors.js';
 import { logger } from '../utils/logger.js';
 import { domainEvents } from './events.js';
-import { campaignInBusiness, clientInBusiness, creativeBelongsToBusiness, ensureLandingPage } from './creative-library.service.js';
+import { campaignUsableBy, clientInBusiness, creativeBelongsToBusiness, ensureLandingPage } from './creative-library.service.js';
 
 // Copy-only assets (spec v1.0, Sam's decision: "Copy-only assets: yes"). Ad copy with no file: type 'copy', headline and/or
 // body text, kept in `creatives` so approvals, ad links and history work as for any asset. The "file hash" that makes the same
@@ -42,7 +42,7 @@ export async function upsertCopyCreative(input: CopyInput): Promise<{ creative: 
   const headline = norm(input.headline); const bodyText = norm(input.bodyText);
   if (!headline && !bodyText) throw new AppError(422, 'A copy-only asset needs a headline or bodyText');
   if (!(await clientInBusiness(input.clientId, input.businessId))) throw new AppError(404, 'Client not found');
-  if (input.campaignId && !(await campaignInBusiness(input.campaignId, input.businessId))) throw new AppError(404, 'Campaign not found');
+  if (input.campaignId && !(await campaignUsableBy(input.campaignId, input.businessId, input.clientId))) throw new AppError(404, 'Campaign not found');
   const sha256 = copyHash(headline, bodyText);
   const now = new Date();
 

@@ -205,3 +205,15 @@ describe('copy upsert by platformCreativeId is scoped', () => {
     await db.delete(creatives).where(eq(creatives.platformCreativeId, pidC));
   });
 });
+
+// A shared campaign (nobody buys it) is accepted for copy with a client, the same as for files (#96).
+describe('copy on a shared campaign', () => {
+  let shared = '';
+  beforeAll(async () => { shared = (await db.insert(campaigns).values({ name: `Yash Test COPY shared ${tag}`, leadbyteCampaignId: `COPY-S-${tag}` }).returning())[0]!.id; });
+  afterAll(async () => { await db.delete(creatives).where(eq(creatives.campaignId, shared)); await db.delete(campaigns).where(eq(campaigns.id, shared)); });
+  it('is accepted with a client', async () => {
+    const r = await copy({ campaignId: shared, headline: `Shared camp ${tag}` });
+    expect(r.isError, JSON.stringify(r.structuredContent)).toBeUndefined();
+    expect((await rowOf(r.structuredContent.creativeId)).campaignId).toBe(shared);
+  });
+});
