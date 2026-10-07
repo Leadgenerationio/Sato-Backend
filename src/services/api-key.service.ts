@@ -3,7 +3,7 @@ import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { db } from '../config/database.js';
 import { users } from '../db/schema/users.js';
 import { clients } from '../db/schema/clients.js';
-import { apiKeys, apiKeyUsage, type ApiKeyRow } from '../db/schema/api-keys.js';
+import { apiKeys, apiKeyUsage, idempotencyKeys, type ApiKeyRow } from '../db/schema/api-keys.js';
 import { AppError } from '../utils/errors.js';
 
 // Public API keys (plan phase 2). Keys look like `stk_<43 base64url chars>`;
@@ -108,6 +108,10 @@ export async function updateApiKeyLimits(businessId: string, id: string, input: 
     ? await db.update(apiKeys).set(set).where(where).returning()
     : await db.select().from(apiKeys).where(where);
   if (!row) throw new AppError(404, 'API key not found');
+  // A stored idempotencyKey answer may name a client the key can no longer see: replays must not outlive a change of limit (issue #94).
+  if (set.allowedClientIds !== undefined) {
+    await db.delete(idempotencyKeys).where(inArray(idempotencyKeys.owner, [`mcp:key:${row.id}`, `key:${row.id}`]));
+  }
   return dto(row, 0, await clientNames(businessId, [row]));
 }
 

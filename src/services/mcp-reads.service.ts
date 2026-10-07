@@ -167,7 +167,8 @@ export async function getCampaignForMcp(businessId: string, ref: string): Promis
       where x.acc_id is not null and x.acc_id <> '' and (l.client_id is not null or ${owned})
       order by x.platform, x.acc_id
     `) as unknown as Promise<Array<{ platform: string; account_id: string; account_name: string | null; client_id: string | null }>>,
-    db.select({ n: sql<number>`count(*)::int` }).from(creatives).where(and(eq(creatives.campaignId, c.id), eq(creatives.isDeleted, false), isNull(creatives.archivedAt))),
+    // A key limited to some clients counts only their assets (issue #94): on a shared campaign the total would leak other clients' activity.
+    db.select({ n: sql<number>`count(*)::int` }).from(creatives).where(and(eq(creatives.campaignId, c.id), eq(creatives.isDeleted, false), isNull(creatives.archivedAt), clientColumnInScope(creatives.clientId))),
   ]);
   return {
     campaign: { campaignId: c.id, leadbyteId: c.leadbyteCampaignId ?? null, name: c.name, vertical: c.vertical ?? null, status: c.status ?? null, currency: c.currency ?? null },
