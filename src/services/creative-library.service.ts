@@ -77,11 +77,15 @@ async function campaignInBusiness(campaignId: string, businessId: string): Promi
 
 /**
  * A campaign a business may file under: one of its own, or a shared campaign that no client buys yet (spec v1.0 section 2.1:
- * "linked to that client, or a shared campaign with no client"). Ownership of an existing creative still uses the stricter
- * campaignInBusiness; this only decides whether a new or edited creative may point at the campaign.
+ * "linked to that client, or a shared campaign with no client"). "Shared" here means no client of any business buys it
+ * (campaigns has no business column), so a campaign bought by another business's client is still refused.
+ * The shared branch needs the creative's resulting clientId: a creative with no client belongs to a business only through
+ * its campaign's buyers, so on an unbought campaign it would belong to nobody and then to whoever buys it first.
+ * Ownership of an existing creative still uses the stricter campaignInBusiness.
  */
-async function campaignUsableBy(campaignId: string, businessId: string): Promise<boolean> {
+async function campaignUsableBy(campaignId: string, businessId: string, resultingClientId: string | null): Promise<boolean> {
   if (await campaignInBusiness(campaignId, businessId)) return true;
+  if (!resultingClientId) return false;
   const [row] = await db.select({ id: campaigns.id }).from(campaigns)
     .where(and(eq(campaigns.id, campaignId), isNull(campaigns.clientId), sql`not exists (select 1 from ${clientCampaigns} cc where cc.campaign_id = ${campaigns.id})`));
   return Boolean(row);
@@ -223,7 +227,7 @@ export async function createLandingPage(
   businessId: string, input: { clientId: string; url: string; title?: string | null; campaignId?: string | null },
 ): Promise<{ page: LandingPageDto; created: boolean }> {
   if (!(await clientInBusiness(input.clientId, businessId))) throw new AppError(404, 'Client not found');
-  if (input.campaignId && !(await campaignUsableBy(input.campaignId, businessId))) throw new AppError(404, 'Campaign not found');
+  if (input.campaignId && !(await campaignUsableBy(input.campaignId, businessId, input.clientId))) throw new AppError(404, 'Campaign not found');
   const { page, created } = await ensureLandingPage(input.clientId, input.url, { title: input.title, campaignId: input.campaignId });
   if (!created && input.title && !page.title) {
     const [row] = await db.update(landingPages).set({ title: input.title, updatedAt: new Date() }).where(eq(landingPages.id, page.id)).returning();
@@ -481,7 +485,7 @@ export async function upsertPlatformCreative(
     }
   }
   if (clientId && !(await clientInBusiness(clientId, businessId))) throw new AppError(404, 'Client not found');
-  if (campaignId && !(await campaignUsableBy(campaignId, businessId))) throw new AppError(404, 'Campaign not found');
+  if (campaignId && !(await campaignUsableBy(campaignId, businessId, clientId))) throw new AppError(404, 'Campaign not found');
   if (!clientId && !campaignId) {
     throw new AppError(422, input.platformAccountId
       ? `No client is linked to ${input.platform} ad account ${input.platformAccountId}. Link it on the "Link ad accounts" screen first, or send clientId.`
@@ -730,8 +734,11 @@ export async function updateCreative(
     set.clientId = patch.clientId;
   }
   if (patch.campaignId !== undefined) {
-    if (patch.campaignId && !(await campaignUsableBy(patch.campaignId, businessId))) throw new AppError(404, 'Campaign not found');
+    if (patch.campaignId && !(await campaignUsableBy(patch.campaignId, businessId, nextClient ?? null))) throw new AppError(404, 'Campaign not found');
     set.campaignId = patch.campaignId;
+  } else if (patch.clientId !== undefined && !nextClient && nextCampaign && !(await campaignInBusiness(nextCampaign, businessId))) {
+    // Dropping the client leaves only the campaign to say whose it is; a shared one says nothing.
+    throw new AppError(422, 'A shared campaign needs a client');
   }
   if (!nextClient && !nextCampaign) throw new AppError(422, 'A creative needs a client or a campaign');
   if (patch.landingPageId !== undefined) {

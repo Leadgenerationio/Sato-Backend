@@ -11,6 +11,7 @@ import { campaigns } from '../db/schema/campaigns.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { apiKeys } from '../db/schema/api-keys.js';
 import { apiAuditLog } from '../db/schema/api-audit-log.js';
+import { updateCreative, getCreative, upsertPlatformCreative } from '../services/creative-library.service.js';
 
 // MCP spec v1.0 section 2.1, "Rules the tools must enforce", one describe per rule, through the real tools.
 const BIZ = '26d6b2b4-c867-460e-8473-eca2b1ffd232';
@@ -126,6 +127,36 @@ describe('Campaign check', () => {
   it('a shared campaign with no client is accepted', async () => {
     const r = await upload('cmp5', { platform: 'meta', platformAccountId: acct(1), campaignId: CS });
     expect(r.isError, JSON.stringify(r.structuredContent)).toBeUndefined();
+  });
+  // Tenancy probe (review of #96): a creative with no client belongs to a business only through its campaign's buyers, so on an
+  // unbought shared campaign it would belong to nobody, and then to whichever business buys the campaign first.
+  describe('a shared campaign needs a client', () => {
+    const orphanIds: string[] = [];
+    afterAll(async () => { if (orphanIds.length) await db.delete(creatives).where(inArray(creatives.id, orphanIds)); });
+    const noClientOnCa = async (n: string) => {
+      const [row] = await db.insert(creatives).values({ clientId: null, campaignId: CA, platform: 'manual', name: `Yash Test RULES orphan ${n} ${tag}`, type: 'image', section: 'media', fileStatus: 'ready' }).returning();
+      orphanIds.push(row!.id); return row!.id;
+    };
+    it('PATCH: moving a no-client creative onto a shared campaign is refused and the creative stays visible', async () => {
+      const id = await noClientOnCa('patch');
+      await expect(updateCreative(BIZ, id, { campaignId: CS })).rejects.toMatchObject({ statusCode: 404 });
+      expect(await getCreative(BIZ, id)).not.toBeNull();
+    });
+    it('PATCH: with a client, the same move is allowed', async () => {
+      const id = await noClientOnCa('patch-client');
+      await updateCreative(BIZ, id, { clientId: A, campaignId: CS });
+      expect(await getCreative(BIZ, id)).not.toBeNull();
+    });
+    it('PATCH: dropping the client from a creative on a shared campaign is refused', async () => {
+      const id = await noClientOnCa('drop');
+      await updateCreative(BIZ, id, { clientId: A, campaignId: CS });
+      await expect(updateCreative(BIZ, id, { clientId: null })).rejects.toMatchObject({ statusCode: 422 });
+      expect(await getCreative(BIZ, id)).not.toBeNull();
+    });
+    it('portal create: campaign only, on a shared campaign, is refused', async () => {
+      await expect(upsertPlatformCreative({ businessId: BIZ, campaignId: CS, platform: 'manual', mediaType: 'image', name: `Yash Test RULES portal ${tag}` }))
+        .rejects.toMatchObject({ statusCode: 404 });
+    });
   });
 });
 
