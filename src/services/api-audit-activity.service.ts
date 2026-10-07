@@ -78,7 +78,7 @@ export async function listApiActivity(businessId: string, f: ActivityFilters = {
   return queryActivity(businessId, f, Math.min(Math.max(f.limit ?? 50, 1), ACTIVITY_MAX_LIMIT));
 }
 
-async function queryActivity(businessId: string, f: ActivityFilters, limit: number): Promise<{ items: ActivityRow[]; nextCursor: string | null }> {
+function activityWhere(businessId: string, f: ActivityFilters): SQL[] {
   const where: SQL[] = [eq(apiAuditLog.businessId, businessId)];
   if (f.keyId) where.push(eq(apiAuditLog.apiKeyId, f.keyId));
   if (f.tool) where.push(eq(apiAuditLog.tool, f.tool));
@@ -86,7 +86,8 @@ async function queryActivity(businessId: string, f: ActivityFilters, limit: numb
   if (f.outcome === 'ok') where.push(isNull(apiAuditLog.errorCode));
   if (f.outcome === 'error') where.push(isNotNull(apiAuditLog.errorCode));
   if (f.errorCode) where.push(eq(apiAuditLog.errorCode, f.errorCode));
-  if (f.creativeId) where.push(sql`${apiAuditLog.recordsTouched} @> ${JSON.stringify([{ type: 'creative', id: f.creativeId }])}::jsonb`);
+  // records_touched holds ids as text, lowercase like Postgres prints a uuid; @> compares text exactly.
+  if (f.creativeId) where.push(sql`${apiAuditLog.recordsTouched} @> ${JSON.stringify([{ type: 'creative', id: f.creativeId.toLowerCase() }])}::jsonb`);
   if (f.from) where.push(gte(apiAuditLog.at, f.from));
   if (f.to) where.push(lte(apiAuditLog.at, f.to));
   if (f.cursor) {
@@ -95,12 +96,17 @@ async function queryActivity(businessId: string, f: ActivityFilters, limit: numb
     const [micros, id] = f.cursor.split('.') as [string, string];
     where.push(sql`(${apiAuditLog.at}, ${apiAuditLog.id}) < (timestamptz 'epoch' + ${micros}::bigint * interval '1 microsecond', ${Number(id)})`);
   }
+  return where;
+}
 
+const atMicros = sql<string>`(extract(epoch from ${apiAuditLog.at}) * 1000000)::bigint::text`;
+
+async function queryActivity(businessId: string, f: ActivityFilters, limit: number): Promise<{ items: ActivityRow[]; nextCursor: string | null }> {
   const rows = await db
-    .select({ row: apiAuditLog, owner: users.name, atMicros: sql<string>`(extract(epoch from ${apiAuditLog.at}) * 1000000)::bigint::text` })
+    .select({ row: apiAuditLog, owner: users.name, atMicros })
     .from(apiAuditLog)
     .leftJoin(users, eq(users.id, apiAuditLog.ownerUserId))
-    .where(and(...where))
+    .where(and(...activityWhere(businessId, f)))
     .orderBy(desc(apiAuditLog.at), desc(apiAuditLog.id))
     .limit(limit + 1);
   const page = rows.slice(0, limit);
@@ -112,9 +118,19 @@ async function queryActivity(businessId: string, f: ActivityFilters, limit: numb
 
 // CSV export (spec D9): the same filters as the list, newest first, one sheet.
 export const ACTIVITY_EXPORT_LIMIT = 10_000;
+const EXPORT_PAGE = 1_000;
 
-const CSV_COLUMNS: Array<[string, (r: ActivityRow) => string | number]> = [
-  ['Time (UTC)', (r) => r.at],
+const csvFields = {
+  at: apiAuditLog.at, keyName: apiAuditLog.keyName, owner: users.name, agent: apiAuditLog.agent, transport: apiAuditLog.transport,
+  tool: apiAuditLog.tool, method: apiAuditLog.method, path: apiAuditLog.path, status: apiAuditLog.status, errorCode: apiAuditLog.errorCode,
+  recordsTouched: apiAuditLog.recordsTouched, durationMs: apiAuditLog.durationMs, requestId: apiAuditLog.requestId, ip: apiAuditLog.ip,
+  id: apiAuditLog.id, atMicros,
+};
+type CsvRow = { at: Date; recordsTouched: unknown } & Record<'keyName' | 'owner' | 'agent' | 'tool' | 'method' | 'path' | 'errorCode' | 'requestId' | 'ip', string | null>
+  & { transport: string; status: number | null; durationMs: number | null };
+
+const CSV_COLUMNS: Array<[string, (r: CsvRow) => string | number]> = [
+  ['Time (UTC)', (r) => r.at.toISOString()],
   ['Key', (r) => r.keyName ?? ''],
   ['Key owner', (r) => r.owner ?? ''],
   ['Bot', (r) => r.agent ?? ''],
@@ -129,11 +145,39 @@ const CSV_COLUMNS: Array<[string, (r: ActivityRow) => string | number]> = [
   ['Request ID', (r) => r.requestId ?? ''],
   ['IP', (r) => r.ip ?? ''],
 ];
+const csvLine = (cells: Array<string | number>) => cells.map(csvCell).join(',') + '\r\n';
 
-/** Arguments and before/after stay out of the sheet: they are JSON, and open in the Activity view. */
-export async function exportApiActivityCsv(businessId: string, f: Omit<ActivityFilters, 'limit' | 'cursor'> = {}): Promise<{ csv: string; count: number; truncated: boolean }> {
-  const { items, nextCursor } = await queryActivity(businessId, f, ACTIVITY_EXPORT_LIMIT);
-  const lines = [CSV_COLUMNS.map(([h]) => csvCell(h)).join(',')];
-  for (const r of items) lines.push(CSV_COLUMNS.map(([, get]) => csvCell(get(r))).join(','));
-  return { csv: lines.join('\r\n') + '\r\n', count: items.length, truncated: nextCursor !== null };
+/**
+ * The export, ready to stream: how many rows it will hold (for X-Row-Count, sent
+ * before the body) and the CSV text in pages of EXPORT_PAGE, so at most one page
+ * is in memory. Only the sheet's columns are read: arguments and before/after
+ * stay in the Activity view. Calls made after the export started are left out,
+ * so the count and the rows agree.
+ */
+export async function exportApiActivityCsv(businessId: string, f: Omit<ActivityFilters, 'limit' | 'cursor'> = {}): Promise<{ count: number; truncated: boolean; chunks: AsyncGenerator<string> }> {
+  const startedAt = new Date();
+  const filters: ActivityFilters = { ...f, to: f.to && f.to < startedAt ? f.to : startedAt };
+  const counted = await db.execute<{ n: number }>(
+    sql`select count(*)::int as n from (select 1 from ${apiAuditLog} where ${and(...activityWhere(businessId, filters))} limit ${ACTIVITY_EXPORT_LIMIT + 1}) t`,
+  );
+  const total = Number((counted as unknown as Array<{ n: number }>)[0]?.n ?? 0);
+  const count = Math.min(total, ACTIVITY_EXPORT_LIMIT);
+
+  async function* chunks(): AsyncGenerator<string> {
+    yield csvLine(CSV_COLUMNS.map(([h]) => h));
+    let cursor: string | undefined;
+    for (let sent = 0; sent < count;) {
+      const rows = await db.select(csvFields).from(apiAuditLog)
+        .leftJoin(users, eq(users.id, apiAuditLog.ownerUserId))
+        .where(and(...activityWhere(businessId, { ...filters, cursor })))
+        .orderBy(desc(apiAuditLog.at), desc(apiAuditLog.id))
+        .limit(Math.min(EXPORT_PAGE, count - sent));
+      if (!rows.length) return;
+      yield rows.map((r) => csvLine(CSV_COLUMNS.map(([, get]) => get(r)))).join('');
+      sent += rows.length;
+      const last = rows[rows.length - 1]!;
+      cursor = `${last.atMicros}.${last.id}`;
+    }
+  }
+  return { count, truncated: total > ACTIVITY_EXPORT_LIMIT, chunks: chunks() };
 }
