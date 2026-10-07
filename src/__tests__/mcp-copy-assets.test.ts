@@ -217,3 +217,24 @@ describe('copy on a shared campaign', () => {
     expect((await rowOf(r.structuredContent.creativeId)).campaignId).toBe(shared);
   });
 });
+
+describe('the same platformCreativeId sent at the same moment', () => {
+  const pidR = `copy-conc-${tag}`;
+  afterAll(async () => { await db.delete(creatives).where(eq(creatives.platformCreativeId, pidR)); });
+  it('files one creative for that id, whatever the texts', async () => {
+    await Promise.all(Array.from({ length: 8 }, (_, i) => upsertCopyCreative({ businessId: BIZ, clientId: A, platform: 'meta', platformCreativeId: pidR, headline: `Conc ${i} ${tag}` })));
+    const rows = await db.select().from(creatives).where(and(eq(creatives.platform, 'meta'), eq(creatives.platformCreativeId, pidR)));
+    expect(rows).toHaveLength(1);
+  });
+  it('more concurrent calls than the pool has connections do not stall the API (the tx must not need a second connection)', async () => {
+    const pid = `${pidR}-pool`;
+    const first = await upsertCopyCreative({ businessId: BIZ, clientId: A, platform: 'meta', platformCreativeId: pid, headline: `Pool ${tag}` });
+    // 16 > the postgres.js default pool of 10, all on an id that already exists (so each runs the ownership check inside its tx)
+    const done = Promise.all(Array.from({ length: 16 }, () => upsertCopyCreative({ businessId: BIZ, clientId: A, platform: 'meta', platformCreativeId: pid, headline: `Pool ${tag}` })));
+    const timeout = new Promise<'stalled'>((r) => setTimeout(() => r('stalled'), 20_000));
+    const out = await Promise.race([done, timeout]);
+    expect(out).not.toBe('stalled');
+    expect((out as Array<{ creative: { id: string } }>).every((r) => r.creative.id === first.creative.id)).toBe(true);
+    await db.delete(creatives).where(eq(creatives.platformCreativeId, pid));
+  }, 40_000);
+});

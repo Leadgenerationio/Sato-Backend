@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, ilike, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { db } from '../config/database.js';
-import { creatives, CREATIVE_CLIENT_SHA_INDEX } from '../db/schema/creatives.js';
+import { creatives } from '../db/schema/creatives.js';
 import { landingPages, type LandingPageRow } from '../db/schema/landing-pages.js';
 import { clients } from '../db/schema/clients.js';
 import { campaigns } from '../db/schema/campaigns.js';
@@ -8,7 +8,7 @@ import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { AppError, MediaSourceError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
-import { isUniqueViolation, uniqueViolationConstraint } from '../utils/pg-errors.js';
+import { isCreativeShaRace } from '../utils/pg-errors.js';
 import { canonicalizePlatform, normaliseAccountId } from '../utils/catchr-platform.js';
 import { normaliseLandingUrl } from '../utils/landing-url.js';
 import { fetchRemoteMedia, mediaTypeOf, MAX_MEDIA_BYTES, type RemoteMediaDeps } from '../utils/remote-media.js';
@@ -59,14 +59,17 @@ export interface UpsertPlatformCreativeInput {
 
 // ─── Scoping ───
 
-export async function clientInBusiness(clientId: string, businessId: string): Promise<boolean> {
-  const [row] = await db.select({ id: clients.id }).from(clients)
+/** A query runner: the pool, or a transaction. A caller inside a transaction must pass its tx, or the check takes a second pool connection. */
+export type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+export async function clientInBusiness(clientId: string, businessId: string, q: Executor = db): Promise<boolean> {
+  const [row] = await q.select({ id: clients.id }).from(clients)
     .where(and(eq(clients.id, clientId), eq(clients.businessId, businessId)));
   return Boolean(row);
 }
 
-export async function campaignInBusiness(campaignId: string, businessId: string): Promise<boolean> {
-  const [row] = await db.select({ id: campaigns.id }).from(campaigns)
+export async function campaignInBusiness(campaignId: string, businessId: string, q: Executor = db): Promise<boolean> {
+  const [row] = await q.select({ id: campaigns.id }).from(campaigns)
     .where(and(eq(campaigns.id, campaignId), sql`(
       exists (select 1 from ${clients} c where c.id = ${campaigns.clientId} and c.business_id = ${businessId})
       or exists (select 1 from ${clientCampaigns} cc join ${clients} c on c.id = cc.client_id
@@ -104,9 +107,9 @@ export function creativeInBusiness(businessId: string): SQL {
   )`;
 }
 
-export async function creativeBelongsToBusiness(row: Pick<CreativeRow, 'clientId' | 'campaignId'>, businessId: string): Promise<boolean> {
-  if (row.clientId) return clientInBusiness(row.clientId, businessId);
-  if (row.campaignId) return campaignInBusiness(row.campaignId, businessId);
+export async function creativeBelongsToBusiness(row: Pick<CreativeRow, 'clientId' | 'campaignId'>, businessId: string, q: Executor = db): Promise<boolean> {
+  if (row.clientId) return clientInBusiness(row.clientId, businessId, q);
+  if (row.campaignId) return campaignInBusiness(row.campaignId, businessId, q);
   return false;
 }
 
@@ -684,7 +687,7 @@ export async function upsertPlatformCreative(
     // The unique index on (client, file hash) refused a second live creative for the same file: a request for the same file
     // got there first. Return that one as a duplicate instead of failing.
     // Only OUR index counts: a violation of some other unique index must not be answered with a lookalike creative.
-    if (!isUniqueViolation(err) || uniqueViolationConstraint(err) !== CREATIVE_CLIENT_SHA_INDEX || !sha256 || !clientId) throw err;
+    if (!isCreativeShaRace(err) || !sha256 || !clientId) throw err;
     const [winner] = await db.select().from(creatives).where(and(eq(creatives.sha256, sha256), eq(creatives.clientId, clientId), eq(creatives.isDeleted, false)));
     if (!winner) throw err;
     logger.warn({ creativeId: winner.id, clientId }, 'A second creative for the same file was refused by the unique index; returning the existing one');

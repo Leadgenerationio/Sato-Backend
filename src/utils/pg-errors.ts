@@ -1,3 +1,5 @@
+import { CREATIVE_CLIENT_SHA_INDEX } from '../db/schema/creatives.js';
+
 /**
  * A Postgres unique violation (23505). Drizzle wraps the driver error in a
  * DrizzleQueryError and puts the Postgres code on `.cause`, so `err.code`
@@ -12,4 +14,9 @@ export function uniqueViolationConstraint(err: unknown): string | undefined {
 export function isUniqueViolation(err: unknown): boolean {
   const e = err as { code?: string; cause?: { code?: string } } | null;
   return e?.code === '23505' || e?.cause?.code === '23505';
+}
+
+/** A unique violation of OUR creatives (client, file or text hash) index: the sign that the same asset raced in. Any other unique violation is a different problem. */
+export function isCreativeShaRace(err: unknown): boolean {
+  return isUniqueViolation(err) && uniqueViolationConstraint(err) === CREATIVE_CLIENT_SHA_INDEX;
 }
