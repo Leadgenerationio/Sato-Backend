@@ -220,7 +220,8 @@ describe('copy on a shared campaign', () => {
 
 describe('the same platformCreativeId sent at the same moment', () => {
   const pidR = `copy-conc-${tag}`;
-  afterAll(async () => { await db.delete(creatives).where(eq(creatives.platformCreativeId, pidR)); });
+  // Both ids are cleaned here, so a stalled or failed test still leaves nothing behind.
+  afterAll(async () => { await db.delete(creatives).where(inArray(creatives.platformCreativeId, [pidR, `${pidR}-pool`])); });
   it('files one creative for that id, whatever the texts', async () => {
     await Promise.all(Array.from({ length: 8 }, (_, i) => upsertCopyCreative({ businessId: BIZ, clientId: A, platform: 'meta', platformCreativeId: pidR, headline: `Conc ${i} ${tag}` })));
     const rows = await db.select().from(creatives).where(and(eq(creatives.platform, 'meta'), eq(creatives.platformCreativeId, pidR)));
@@ -235,6 +236,5 @@ describe('the same platformCreativeId sent at the same moment', () => {
     const out = await Promise.race([done, timeout]);
     expect(out).not.toBe('stalled');
     expect((out as Array<{ creative: { id: string } }>).every((r) => r.creative.id === first.creative.id)).toBe(true);
-    await db.delete(creatives).where(eq(creatives.platformCreativeId, pid));
   }, 40_000);
 });
