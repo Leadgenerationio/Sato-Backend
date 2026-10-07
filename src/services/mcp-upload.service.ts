@@ -7,7 +7,6 @@ import { normaliseAccountId } from '../utils/catchr-platform.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
 import { toApiError } from '../utils/to-api-error.js';
 import { env } from '../config/env.js';
-import { getSignedDownloadUrl } from '../integrations/r2/r2-client.js';
 import { AppError } from '../utils/errors.js';
 import { startUrlUpload } from './mcp-url-uploads.service.js';
 import { ApiError, accountClientMismatch, accountNotLinked } from '../utils/api-error.js';
@@ -48,8 +47,6 @@ export interface UploadAssetResult {
   sizeBytes: number | null;
   fileStatus: string;
   approvalStatus: string;
-  /** A signed link to the poster or thumbnail once one exists (a video poster is made in the background, so often null at first). */
-  thumbnailUrl: string | null;
   /** The asset in the Stato portal. */
   portalUrl: string;
   adLink: AdLinkDto | null;
@@ -213,7 +210,6 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
     sizeBytes: creative.sizeBytes,
     fileStatus: creative.fileStatus,
     approvalStatus: creative.status,
-    thumbnailUrl: creative.thumbnailKey ? await getSignedDownloadUrl({ folder: 'creatives', key: creative.thumbnailKey, expiresInSeconds: 3600 }).catch(() => null) : null,
     portalUrl: `${env.FRONTEND_URL.replace(/\/$/, '')}/creatives?creative=${creative.id}`,
     adLink,
     adLinkResult,

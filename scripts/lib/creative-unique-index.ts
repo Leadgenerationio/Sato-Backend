@@ -1,11 +1,12 @@
 import type postgres from 'postgres';
+import { CREATIVE_CLIENT_SHA_INDEX } from '../../src/db/schema/creatives.js';
 
 // The same file for the same client is one creative (spec v1.0 section 2.1). The code checks it; this makes the database
 // enforce it too. CREATE INDEX CONCURRENTLY cannot run inside a transaction, so it is a script, not a migration, and it
 // refuses to run while duplicates exist (they would make the build fail and leave an INVALID index behind).
 
 export type Sql = postgres.Sql;
-export const INDEX_NAME = 'creatives_client_sha256_live_uq';
+export const INDEX_NAME = CREATIVE_CLIENT_SHA_INDEX;
 const ident = (s: string) => `"${s.replace(/"/g, '""')}"`;
 
 export interface DuplicateGroup { clientId: string; sha256: string; count: number; ids: string[] }
@@ -32,7 +33,7 @@ export async function indexState(sql: Sql, name = INDEX_NAME): Promise<IndexStat
   return { exists: rows.length > 0, valid: rows.length > 0 && Boolean(rows[0]!.valid) };
 }
 
-export type IndexResult = 'created' | 'already_there' | 'rebuilt' | 'refused_duplicates' | 'failed';
+export type IndexResult = 'created' | 'already_there' | 'rebuilt' | 'would_create' | 'would_rebuild' | 'refused_duplicates' | 'failed';
 
 /**
  * Create the unique index safely: refuse while duplicates exist, leave a valid index alone, drop and rebuild an INVALID one
@@ -45,7 +46,7 @@ export async function ensureUniqueIndex(sql: Sql, opts: { table?: string; name?:
   if (duplicates.length) { log(`${duplicates.length} group(s) of duplicates: not creating the index`); return { result: 'refused_duplicates', duplicates, sql: statement }; }
   const state = await indexState(sql, name);
   if (state.exists && state.valid) { log('index already exists and is valid'); return { result: 'already_there', duplicates, sql: statement }; }
-  if (opts.dryRun) { log(`dry run: would run ${state.exists ? `drop index concurrently ${ident(name)}, then ` : ''}${statement}`); return { result: state.exists ? 'rebuilt' : 'created', duplicates, sql: statement }; }
+  if (opts.dryRun) { log(`dry run: would run ${state.exists ? `drop index concurrently ${ident(name)}, then ` : ''}${statement}`); return { result: state.exists ? 'would_rebuild' : 'would_create', duplicates, sql: statement }; }
   if (state.exists) { log('an INVALID index was left by a failed build: dropping it'); await sql.unsafe(`drop index concurrently if exists ${ident(name)}`); }
   try {
     await sql.unsafe(statement);

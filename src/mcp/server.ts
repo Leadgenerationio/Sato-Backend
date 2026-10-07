@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ApiError } from '../utils/api-error.js';
 import { buildErrorBody } from '../utils/error-body.js';
 import { logger } from '../utils/logger.js';
+import { env } from '../config/env.js';
 import type { StatoTool, ToolContext } from './types.js';
 import { callWithinClientScope } from './client-scope.js';
 
@@ -30,6 +31,8 @@ export function createStatoMcpServer(ctx: ToolContext, tools: StatoTool[], onAud
   const server = new McpServer(SERVER_INFO, { instructions: INSTRUCTIONS });
 
   for (const t of tools) {
+    // The registered schema is loose (see below), so a success result is also checked here against the strict one.
+    const strictOutput = z.object(t.outputSchema);
     server.registerTool(
       t.name,
       // Every output field is optional (and extras are allowed) because a tool error comes back in the same structuredContent,
@@ -44,6 +47,12 @@ export function createStatoMcpServer(ctx: ToolContext, tools: StatoTool[], onAud
             });
           }
           const out = await callWithinClientScope(t, args, ctx);
+          const strict = strictOutput.safeParse(out.data);
+          if (!strict.success) {
+            logger.error({ tool: t.name, issues: strict.error.issues.slice(0, 5).map((i) => `${i.path.join('.')}: ${i.message}`) }, 'MCP tool result does not match its output schema');
+            // Outside production this is a bug in the tool: fail loudly so the tests catch it. In production the caller still gets the result.
+            if (env.NODE_ENV !== 'production') throw new Error(`${t.name} returned a result that does not match its output schema`);
+          }
           onAudit?.({ tool: t.name, args, before: out.audit?.before, after: out.audit?.after, recordsTouched: out.audit?.recordsTouched });
           return { content: [{ type: 'text', text: `${out.summary}\n\n${JSON.stringify(out.data, null, 2)}` }], structuredContent: out.data };
         } catch (err) {

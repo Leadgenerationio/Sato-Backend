@@ -3,6 +3,7 @@ import { defineTool } from '../types.js';
 import { adLinkOut } from '../schemas.js';
 import { ApiError } from '../../utils/api-error.js';
 import { uuidShape } from '../../utils/zod-helpers.js';
+import { thumbnailUrlFor } from '../../services/mcp-assets.service.js';
 import { env } from '../../config/env.js';
 import { uploadAssetFromUrl } from '../../services/mcp-upload.service.js';
 import { withIdempotency } from '../../services/tool-idempotency.service.js';
@@ -68,7 +69,7 @@ export default defineTool({
       const { audit: _audit, ...res } = await uploadAssetFromUrl(caller, request as Parameters<typeof uploadAssetFromUrl>[1]);
       return res as unknown as Record<string, unknown>;
     });
-    const out = value as unknown as { creativeId: string; result: 'created' | 'updated' | 'duplicate'; name: string; mediaType: string | null; sizeBytes: number | null; fileStatus: string; approvalStatus: string; thumbnailUrl?: string | null; portalUrl?: string; adLink: z.infer<typeof adLinkOut> | null; adLinkResult: 'created' | 'updated' | 'unchanged' | 'duplicate' | null };
+    const out = value as unknown as { creativeId: string; result: 'created' | 'updated' | 'duplicate'; name: string; mediaType: string | null; sizeBytes: number | null; fileStatus: string; approvalStatus: string; portalUrl?: string; adLink: z.infer<typeof adLinkOut> | null; adLinkResult: 'created' | 'updated' | 'unchanged' | 'duplicate' | null };
     const summary = replayed ? `Same request as before (idempotencyKey): returning the first answer, asset ${out.creativeId}.`
       : out.result === 'created' ? `Added "${out.name}" as asset ${out.creativeId}.`
       : out.result === 'duplicate' ? `That file is already in Stato for this client: asset ${out.creativeId}. Nothing new was added.`
@@ -76,7 +77,7 @@ export default defineTool({
     const note = out.adLinkResult === 'duplicate' ? ` That ad already runs another asset (${out.adLink?.creativeId}), so the ad was not linked; unlink it first if it changed asset.` : '';
     return {
       summary: summary + note,
-      data: { ...out, thumbnailUrl: out.thumbnailUrl ?? null, portalUrl: out.portalUrl ?? `${env.FRONTEND_URL.replace(/\/$/, '')}/creatives?creative=${out.creativeId}`, replayed },
+      data: { ...out, thumbnailUrl: await thumbnailUrlFor(out.creativeId), portalUrl: out.portalUrl ?? `${env.FRONTEND_URL.replace(/\/$/, '')}/creatives?creative=${out.creativeId}`, replayed },
       audit: { after: { creativeId: out.creativeId, result: out.result, replayed }, recordsTouched: [{ type: 'creative', id: out.creativeId }, ...(request.uploadId ? [{ type: 'upload', id: request.uploadId }] : [])] },
     };
   },

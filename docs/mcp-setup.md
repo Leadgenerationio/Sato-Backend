@@ -11,7 +11,7 @@ Stato never writes to Meta, Google or TikTok. Your ad-platform tools do that. St
 3. Tick only what the bot needs (see the scopes below) and press **Create key**.
 4. Copy the key now. It starts with `stk_` and is shown once; Stato stores only a hash.
 
-Revoke it in the same screen. A revoked key stops working within a minute.
+Revoke it in the same screen. A revoked key stops working at once (the next call is refused).
 
 ## 2. Point the assistant at Stato
 
@@ -112,7 +112,7 @@ A tool error comes back with `isError: true` and a body:
 
 ```json
 { "status": "error", "code": "account_not_linked", "message": "The meta account 123 is not linked to a client.",
-  "hint": "Link it first with link_ad_account, or ask the owner which client it belongs to.",
+  "hint": "Link it first with link_ad_account, or ask the owner which client it belongs to. Do not guess from names.",
   "fields": [], "retryable": false, "requestId": "..." }
 ```
 
