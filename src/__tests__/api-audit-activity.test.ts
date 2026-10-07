@@ -94,6 +94,8 @@ describe('GET /api-keys/activity', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.items.map((i: any) => i.tool)).toEqual(['update_asset']);
     expect((await activity({ creativeId: 'c1' })).status).toBe(400);
+    // An id pasted in capitals (some tools print uuids that way) still finds the calls.
+    expect((await activity({ creativeId: CREATIVE.toUpperCase() })).body.data.items.map((i: any) => i.tool)).toEqual(['update_asset']);
   });
 
   it('the creative filter has a GIN index to use', async () => {
@@ -115,6 +117,26 @@ describe('GET /api-keys/activity', () => {
     const byCreative = await request(app).get('/api/v1/api-keys/activity.csv').query({ creativeId: CREATIVE }).set('Authorization', `Bearer ${owner}`);
     expect(byCreative.headers['x-row-count']).toBe('1');
     expect((await request(app).get('/api/v1/api-keys/activity.csv').set('Authorization', `Bearer ${ops}`)).status).toBe(403);
+  });
+
+  it('streams an export bigger than one page, every row once, in order', async () => {
+    const keyC = await makeKey('Hari Test act C');
+    try {
+      const base = Date.now() - 60_000;
+      await db.insert(apiAuditLog).values(Array.from({ length: 2_345 }, (_, i) => row(keyC.id, { tool: `bulk_${i}`, at: new Date(base + i) })));
+      const res = await request(app).get('/api/v1/api-keys/activity.csv').query({ keyId: keyC.id }).set('Authorization', `Bearer ${owner}`);
+      expect(res.status).toBe(200);
+      expect(res.headers['x-row-count']).toBe('2345');
+      expect(res.headers['x-truncated']).toBeUndefined();
+      const tools = res.text.replace(/^\uFEFF/, '').trim().split('\r\n').slice(1).map((l) => l.split(',')[5]);
+      expect(tools).toHaveLength(2_345);
+      expect(tools[0]).toBe('bulk_2344');
+      expect(tools[2_344]).toBe('bulk_0');
+      expect(new Set(tools).size).toBe(2_345);
+    } finally {
+      await db.delete(apiAuditLog).where(eq(apiAuditLog.apiKeyId, keyC.id));
+      await db.delete(apiKeys).where(eq(apiKeys.id, keyC.id));
+    }
   });
 
   it('per key: only that key, and a key from nowhere is not found', async () => {

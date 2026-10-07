@@ -60,18 +60,37 @@ apiKeyRoutes.get('/activity', validate(z.object({ query: activityQuerySchema }))
   res.json({ status: 'success', data: await listApiActivity(businessOf(req), activityFilters(q)) });
 });
 
+/** Wait until the socket takes more, or the client has gone (then res.destroyed stops the loop). */
+function drainOrClose(res: Response) {
+  return new Promise<void>((resolve) => {
+    const done = () => { res.off('drain', done); res.off('close', done); resolve(); };
+    res.on('drain', done);
+    res.on('close', done);
+  });
+}
+
 // The same list as a CSV (spec D9), every matching row up to ACTIVITY_EXPORT_LIMIT.
 const exportQuerySchema = activityQuerySchema.omit({ limit: true, cursor: true });
 apiKeyRoutes.get('/activity.csv', validate(z.object({ query: exportQuerySchema })), async (req: Request, res: Response) => {
   const q = exportQuerySchema.parse(req.query);
-  const { csv, count, truncated } = await exportApiActivityCsv(businessOf(req), activityFilters(q));
+  const { count, truncated, chunks } = await exportApiActivityCsv(businessOf(req), activityFilters(q));
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="api-activity-${new Date().toISOString().slice(0, 10)}.csv"`);
   res.setHeader('X-Row-Count', String(count));
   if (truncated) res.setHeader('X-Truncated', 'true');
-  // BOM so Excel reads names with accents correctly.
-  res.send('\uFEFF' + csv);
+  // BOM so Excel reads names with accents correctly. Streamed a page at a time.
+  res.write('\uFEFF');
+  try {
+    for await (const chunk of chunks) {
+      if (res.destroyed) return;
+      if (!res.write(chunk)) await drainOrClose(res);
+    }
+    res.end();
+  } catch (err) {
+    // The headers are gone: cut the download short rather than end a truncated file as if it were whole.
+    res.destroy(err as Error);
+  }
 });
 
 apiKeyRoutes.get('/', async (req: Request, res: Response) => {
