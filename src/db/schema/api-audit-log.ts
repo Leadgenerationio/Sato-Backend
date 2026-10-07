@@ -1,4 +1,5 @@
 import { pgTable, uuid, varchar, integer, bigserial, jsonb, timestamp, index } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { businesses } from './businesses.js';
 import { users } from './users.js';
 import { apiKeys } from './api-keys.js';
@@ -35,6 +36,8 @@ export const apiAuditLog = pgTable('api_audit_log', {
   index('api_audit_log_business_at_idx').on(t.businessId, t.at),
   index('api_audit_log_key_at_idx').on(t.apiKeyId, t.at),
   index('api_audit_log_at_idx').on(t.at),
+  // Per-creative history (0057): records_touched @> '[{"type":"creative","id":…}]'.
+  index('api_audit_log_records_touched_idx').using('gin', sql`${t.recordsTouched} jsonb_path_ops`),
 ]);
 
 export type ApiAuditRow = typeof apiAuditLog.$inferSelect;

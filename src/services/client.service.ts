@@ -13,6 +13,7 @@ import { leadDeliveries } from '../db/schema/lead-deliveries.js';
 import { adSpend } from '../db/schema/ad-spend.js';
 import { workflows } from '../db/schema/workflows.js';
 import { users } from '../db/schema/users.js';
+import { csvCell } from '../utils/csv.js';
 import * as creditCheck from '../integrations/credit-check/index.js';
 import { scoreToRiskRating } from '../integrations/credit-check/types.js';
 import * as xero from '../integrations/xero/xero-client.js';
@@ -499,12 +500,7 @@ const CSV_COLUMNS: Array<[string, (c: ClientSummary) => string | number]> = [
   ['Created', (c) => c.createdAt.slice(0, 10)],
 ];
 
-export function csvCell(v: string | number): string {
-  let s = String(v ?? '');
-  // Neutralise spreadsheet formula injection (a company named "=HYPERLINK(...)").
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
+export { csvCell };
 
 export function clientsToCsv(items: ClientSummary[]): string {
   const lines = [CSV_COLUMNS.map(([h]) => csvCell(h)).join(',')];
