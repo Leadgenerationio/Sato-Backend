@@ -12,6 +12,7 @@ import { campaigns } from '../db/schema/campaigns.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { apiKeys } from '../db/schema/api-keys.js';
 import { apiAuditLog } from '../db/schema/api-audit-log.js';
+import { idempotencyKeys } from '../db/schema/api-keys.js';
 
 // Spec v1.0 section 2: every tool has the inputs and outputs the table lists, and descriptions and annotations written for
 // an AI reader. This is the contract: a new tool or a renamed field that breaks it fails here.
@@ -174,3 +175,26 @@ describe('the six gaps found in the spec check', () => {
     expect((await call('list_landing_pages', { campaignId: 'abc' })).structuredContent.code).toBe('validation_failed');
   });
 });
+
+describe('review follow-ups on the six gaps', () => {
+  it('a signed thumbnail link is never kept in the 24 h replay store: it is signed when the answer is made', async () => {
+    const args = { sourceUrl: `https://93.184.216.34/${tag}/replay.png`, mediaType: 'image', platform: 'meta', platformAccountId: `act_22${tag}1`, name: `Yash Test CONF replay ${tag}`, idempotencyKey: `conf-${tag}-thumb` };
+    const first = (await call('upload_asset', args)).structuredContent;
+    const stored = await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.key, `conf-${tag}-thumb`));
+    expect(stored).toHaveLength(1);
+    expect(JSON.stringify(stored[0]!.response)).not.toMatch(/thumbnailUrl|X-Amz|Signature/i);
+    const replay = (await call('upload_asset', args)).structuredContent;
+    expect(replay.creativeId).toBe(first.creativeId);
+    expect(replay).toHaveProperty('thumbnailUrl');
+    await db.delete(idempotencyKeys).where(eq(idempotencyKeys.key, `conf-${tag}-thumb`));
+  });
+  it('get_asset history looks back 90 days only', async () => {
+    const [cr] = await db.select().from(creatives).where(eq(creatives.clientId, clientA));
+    await db.insert(apiAuditLog).values({ businessId: BIZ, apiKeyId: keyIds[0]!, keyName: 'old key', transport: 'mcp', tool: 'ancient_call', recordsTouched: [{ type: 'creative', id: cr!.id }], at: new Date(Date.now() - 120 * 24 * 60 * 60 * 1000) } as any);
+    await db.insert(apiAuditLog).values({ businessId: BIZ, apiKeyId: keyIds[0]!, keyName: 'recent key', transport: 'mcp', tool: 'recent_call', recordsTouched: [{ type: 'creative', id: cr!.id }], at: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000) } as any);
+    const tools = ((await call('get_asset', { creativeId: cr!.id })).structuredContent.history as Array<{ tool: string }>).map((h) => h.tool);
+    expect(tools).toContain('recent_call');
+    expect(tools).not.toContain('ancient_call');
+  });
+});
+

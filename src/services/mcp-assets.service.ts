@@ -128,8 +128,14 @@ export interface AssetDetail {
   expiresAt: string | null;
   adLinks: AdLinkDto[];
   landingPage: { id: string; url: string; title: string | null } | null;
-  /** The latest API-key calls that touched this asset, newest first (at most 10). */
+  /** The latest API-key calls that touched this asset in the last 90 days, newest first (at most 10). */
   history: Array<{ at: string; tool: string | null; by: string | null; transport: string; result: string }>;
+}
+
+/** A signed link (1 hour) to the poster or thumbnail of an asset, or null while none exists. Signed when the answer is made, never stored. */
+export async function thumbnailUrlFor(creativeId: string): Promise<string | null> {
+  const [r] = await db.select({ key: creatives.thumbnailKey }).from(creatives).where(eq(creatives.id, creativeId));
+  return r?.key ? getSignedDownloadUrl({ folder: 'creatives', key: r.key, expiresInSeconds: 3600 }).catch(() => null) : null;
 }
 
 /** One asset, a signed download link (default 60 minutes, at most 24 hours) and its ad links. */
@@ -176,7 +182,8 @@ export async function getAsset(businessId: string, creativeId: string, downloadU
 async function recentHistory(businessId: string, creativeId: string): Promise<AssetDetail['history']> {
   const rows = await db.select({ at: apiAuditLog.at, tool: apiAuditLog.tool, agent: apiAuditLog.agent, keyName: apiAuditLog.keyName, transport: apiAuditLog.transport, errorCode: apiAuditLog.errorCode })
     .from(apiAuditLog)
-    .where(and(eq(apiAuditLog.businessId, businessId), sql`${apiAuditLog.recordsTouched} @> ${JSON.stringify([{ type: 'creative', id: creativeId }])}::jsonb`))
+    // Bounded to 90 days so the query stays cheap as the audit log grows (it is kept 12 months); a GIN index on records_touched would lift the bound.
+    .where(and(eq(apiAuditLog.businessId, businessId), sql`${apiAuditLog.at} > now() - interval '90 days'`, sql`${apiAuditLog.recordsTouched} @> ${JSON.stringify([{ type: 'creative', id: creativeId }])}::jsonb`))
     .orderBy(desc(apiAuditLog.at)).limit(10);
   return rows.map((r) => ({ at: r.at.toISOString(), tool: r.tool, by: r.agent ?? r.keyName ?? null, transport: r.transport, result: r.errorCode ?? 'ok' }));
 }

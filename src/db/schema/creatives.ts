@@ -26,6 +26,14 @@ export type CreativeStatus =
   | 'rejected'
   | 'changes_requested';
 
+/**
+ * One live creative per (client, file hash). This index is NOT declared in the table below on purpose: it is created by
+ * scripts/create-creative-unique-index.ts (CREATE INDEX CONCURRENTLY cannot run in a migration transaction).
+ * Do NOT run `drizzle-kit push` on a database that has it: push sees an index the schema does not declare and drops it.
+ * Generated migrations (auto-migrate) are unaffected.
+ */
+export const CREATIVE_CLIENT_SHA_INDEX = 'creatives_client_sha256_live_uq';
+
 export const creatives = pgTable('creatives', {
   id: uuid('id').primaryKey().defaultRandom(),
   // Nullable since migration 0045 (creative library): a creative synced from

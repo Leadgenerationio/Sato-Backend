@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, ilike, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { db } from '../config/database.js';
-import { creatives } from '../db/schema/creatives.js';
+import { creatives, CREATIVE_CLIENT_SHA_INDEX } from '../db/schema/creatives.js';
 import { landingPages, type LandingPageRow } from '../db/schema/landing-pages.js';
 import { clients } from '../db/schema/clients.js';
 import { campaigns } from '../db/schema/campaigns.js';
@@ -8,7 +8,7 @@ import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { AppError, MediaSourceError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
-import { isUniqueViolation } from '../utils/pg-errors.js';
+import { isUniqueViolation, uniqueViolationConstraint } from '../utils/pg-errors.js';
 import { canonicalizePlatform, normaliseAccountId } from '../utils/catchr-platform.js';
 import { normaliseLandingUrl } from '../utils/landing-url.js';
 import { fetchRemoteMedia, mediaTypeOf, MAX_MEDIA_BYTES, type RemoteMediaDeps } from '../utils/remote-media.js';
@@ -667,10 +667,17 @@ export async function upsertPlatformCreative(
   } catch (err) {
     // The unique index on (client, file hash) refused a second live creative for the same file: a request for the same file
     // got there first. Return that one as a duplicate instead of failing.
-    if (!isUniqueViolation(err) || !sha256 || !clientId) throw err;
+    // Only OUR index counts: a violation of some other unique index must not be answered with a lookalike creative.
+    if (!isUniqueViolation(err) || uniqueViolationConstraint(err) !== CREATIVE_CLIENT_SHA_INDEX || !sha256 || !clientId) throw err;
     const [winner] = await db.select().from(creatives).where(and(eq(creatives.sha256, sha256), eq(creatives.clientId, clientId), eq(creatives.isDeleted, false)));
     if (!winner) throw err;
     logger.warn({ creativeId: winner.id, clientId }, 'A second creative for the same file was refused by the unique index; returning the existing one');
+    // The loser already stored its own copy of the file. Nothing references it now, so remove it (as the dedupe branch above does),
+    // or each lost race would leave up to 4 GB in the bucket.
+    if (r2Key && r2Key !== winner.r2Key) {
+      const holders = await db.select({ id: creatives.id }).from(creatives).where(eq(creatives.r2Key, r2Key));
+      if (holders.length === 0) deleteFile('creatives', r2Key).catch((e: unknown) => logger.warn({ err: e, r2Key }, 'Could not delete the file of a creative that lost a race'));
+    }
     return { creative: winner, created: false };
   }
   logger.info({ creativeId: row!.id, clientId, platform: input.platform }, 'Creative added to library');
