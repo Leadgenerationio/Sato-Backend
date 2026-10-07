@@ -163,14 +163,23 @@ describe('the code survives the index: a request that loses the race gets the ex
     const text = `Race copy lp ${tag}`;
     const lp = `https://offers.example.com/copy-race-${tag}`;
     let loser!: ReturnType<typeof upsertCopyCreative>;
+    const warn = vi.spyOn(logger, 'warn');
     await sql.begin(async (tx) => {
       await tx`insert into creatives (client_id, name, type, section, platform, headline, sha256, file_status, content_type)
                values (${client}, ${'Winner'}, 'copy', 'copy_lp', 'meta', ${text}, ${copyHash(text, '')}, 'ready', 'text/plain')`;
       loser = upsertCopyCreative({ businessId: BIZ, clientId: client, platform: 'meta', headline: text, landingPageUrl: lp, name: `Loser name ${tag}` });
       loser.catch(() => undefined);
-      await new Promise((r) => setTimeout(r, 600)); // the loser is now waiting on the winner's uncommitted row
+      // Commit only once the loser's INSERT is really waiting on the winner's uncommitted row (not a fixed sleep).
+      for (let i = 0; i < 100; i++) {
+        const waiting = await sql`select 1 from pg_stat_activity where wait_event_type = 'Lock' and query like 'insert into "creatives"%'`;
+        if (waiting.length) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
     });
     const result = await loser;
+    const raced = warn.mock.calls.some((c) => String(c[1] ?? c[0]).includes('copy-only asset for the same text was refused by the unique index'));
+    warn.mockRestore();
+    expect(raced).toBe(true); // it really took the race-loser path, not the normal existing-row path
     expect(result.created).toBe(false);
     const rows = await db.select().from(creatives).where(and(eq(creatives.clientId, client), eq(creatives.headline, text)));
     expect(rows).toHaveLength(1);

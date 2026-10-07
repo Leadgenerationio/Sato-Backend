@@ -95,7 +95,7 @@ export async function upsertCopyCreative(input: CopyInput): Promise<{ creative: 
         [existing] = await tx.select().from(creatives).where(and(eq(creatives.platform, input.platform), eq(creatives.platformCreativeId, input.platformCreativeId), eq(creatives.isDeleted, false)));
         // The same rules as the file path (upsertPlatformCreative): another business's id is never updated, and neither is
         // another client's inside this business (that would silently file under a client the account does not belong to).
-        if (existing && !(await creativeBelongsToBusiness(existing, input.businessId))) {
+        if (existing && !(await creativeBelongsToBusiness(existing, input.businessId, tx))) {
           throw new AppError(409, 'This platform creative id is already registered to another business');
         }
         if (existing && existing.clientId !== input.clientId) {

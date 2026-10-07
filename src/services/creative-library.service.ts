@@ -59,14 +59,17 @@ export interface UpsertPlatformCreativeInput {
 
 // ─── Scoping ───
 
-export async function clientInBusiness(clientId: string, businessId: string): Promise<boolean> {
-  const [row] = await db.select({ id: clients.id }).from(clients)
+/** A query runner: the pool, or a transaction. A caller inside a transaction must pass its tx, or the check takes a second pool connection. */
+export type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+export async function clientInBusiness(clientId: string, businessId: string, q: Executor = db): Promise<boolean> {
+  const [row] = await q.select({ id: clients.id }).from(clients)
     .where(and(eq(clients.id, clientId), eq(clients.businessId, businessId)));
   return Boolean(row);
 }
 
-export async function campaignInBusiness(campaignId: string, businessId: string): Promise<boolean> {
-  const [row] = await db.select({ id: campaigns.id }).from(campaigns)
+export async function campaignInBusiness(campaignId: string, businessId: string, q: Executor = db): Promise<boolean> {
+  const [row] = await q.select({ id: campaigns.id }).from(campaigns)
     .where(and(eq(campaigns.id, campaignId), sql`(
       exists (select 1 from ${clients} c where c.id = ${campaigns.clientId} and c.business_id = ${businessId})
       or exists (select 1 from ${clientCampaigns} cc join ${clients} c on c.id = cc.client_id
@@ -104,9 +107,9 @@ export function creativeInBusiness(businessId: string): SQL {
   )`;
 }
 
-export async function creativeBelongsToBusiness(row: Pick<CreativeRow, 'clientId' | 'campaignId'>, businessId: string): Promise<boolean> {
-  if (row.clientId) return clientInBusiness(row.clientId, businessId);
-  if (row.campaignId) return campaignInBusiness(row.campaignId, businessId);
+export async function creativeBelongsToBusiness(row: Pick<CreativeRow, 'clientId' | 'campaignId'>, businessId: string, q: Executor = db): Promise<boolean> {
+  if (row.clientId) return clientInBusiness(row.clientId, businessId, q);
+  if (row.campaignId) return campaignInBusiness(row.campaignId, businessId, q);
   return false;
 }
 
