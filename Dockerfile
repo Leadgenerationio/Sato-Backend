@@ -25,6 +25,8 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./
 COPY --from=build /app/src/db/migrations ./src/db/migrations
 COPY --from=build /app/scripts ./scripts
+# The MCP setup guide, served by GET /api/v1/mcp-docs.
+COPY --from=build /app/docs ./docs
 COPY --from=build /app/drizzle.config.ts ./
 
 EXPOSE 3001

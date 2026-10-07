@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import request from 'supertest';
+import app from '../index.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getTools } from '../mcp/tools/registry.js';
@@ -29,5 +31,20 @@ describe('MCP docs stay in step with the code', () => {
     expect(doc.paths['/mcp'].post.summary).toContain('MCP');
     expect(doc.components.securitySchemes.BearerKey).toMatchObject({ type: 'http', scheme: 'bearer' });
     expect(doc.info.description).toContain('docs/mcp-setup.md');
+  });
+});
+
+describe('GET /api/v1/mcp-docs (the portal MCP page)', () => {
+  it('serves the setup guide and one row per live tool, without a login', async () => {
+    const res = await request(app).get('/api/v1/mcp-docs');
+    expect(res.status).toBe(200);
+    const { setup, intro, tools } = res.body.data;
+    expect(setup).toBe(read('docs/mcp-setup.md'));
+    const live = await getTools();
+    expect(tools).toHaveLength(live.length);
+    expect(intro).toContain(`${live.length} tools.`);
+    expect(tools.find((t: any) => t.name === 'upload_asset')).toMatchObject({ scope: 'creatives:write', kind: 'write', idempotencyKey: true });
+    expect(tools.find((t: any) => t.name === 'whoami')).toMatchObject({ scope: null, kind: 'read only', required: [], optional: [] });
+    expect(tools.find((t: any) => t.name === 'find_client_by_ad_account').required).toEqual(['platform', 'accountId']);
   });
 });

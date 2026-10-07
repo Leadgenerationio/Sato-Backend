@@ -33,6 +33,8 @@ import { adminCleanupRoutes } from './admin-cleanup.routes.js';
 import { webhookEndpointRoutes } from './webhook-endpoint.routes.js';
 import { apiKeyRoutes } from './api-key.routes.js';
 import { buildOpenApi, docsHtml } from '../docs/openapi.js';
+import { mcpSetupGuide, toolDocs, toolsIntro } from '../docs/mcp-docs.js';
+import { getTools } from '../mcp/tools/registry.js';
 import { requireSection } from '../middleware/section.middleware.js';
 import { SECTIONS } from '../config/sections.js';
 export const router: RouterType = Router();
@@ -51,6 +53,18 @@ router.get('/docs', (_req, res) => {
   // helmet's default CSP blocks the CDN script the reference page needs.
   res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'self' https://cdn.jsdelivr.net https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net data:; img-src 'self' data: https:; connect-src 'self'");
   res.type('html').send(docsHtml('/api/v1/openapi.json'));
+});
+
+// The MCP setup guide and the tool table, for the portal's MCP page (t23 / p07). Public like /docs: nothing in it is secret.
+router.get('/mcp-docs', async (_req, res) => {
+  const setup = mcpSetupGuide();
+  if (setup === null) {
+    res.status(503).json({ status: 'error', message: 'The MCP setup guide is missing from this deployment' });
+    return;
+  }
+  const tools = await getTools();
+  res.setHeader('Cache-Control', 'public, max-age=300');
+  res.json({ status: 'success', data: { setup, intro: toolsIntro(tools), tools: toolDocs(tools) } });
 });
 
 router.use('/auth', authRoutes);
