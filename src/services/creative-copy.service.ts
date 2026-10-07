@@ -6,7 +6,7 @@ import { AppError } from '../utils/errors.js';
 import { isUniqueViolation } from '../utils/pg-errors.js';
 import { logger } from '../utils/logger.js';
 import { domainEvents } from './events.js';
-import { campaignInBusiness, clientInBusiness, ensureLandingPage } from './creative-library.service.js';
+import { campaignInBusiness, clientInBusiness, creativeBelongsToBusiness, ensureLandingPage } from './creative-library.service.js';
 
 // Copy-only assets (spec v1.0, Sam's decision: "Copy-only assets: yes"). Ad copy with no file: type 'copy', headline and/or
 // body text, kept in `creatives` so approvals, ad links and history work as for any asset. The "file hash" that makes the same
@@ -49,6 +49,14 @@ export async function upsertCopyCreative(input: CopyInput): Promise<{ creative: 
   let existing: CreativeRow | undefined;
   if (input.platformCreativeId) {
     [existing] = await db.select().from(creatives).where(and(eq(creatives.platform, input.platform), eq(creatives.platformCreativeId, input.platformCreativeId), eq(creatives.isDeleted, false)));
+    // The same rules as the file path (upsertPlatformCreative): another business's id is never updated, and neither is
+    // another client's inside this business (that would silently file under a client the account does not belong to).
+    if (existing && !(await creativeBelongsToBusiness(existing, input.businessId))) {
+      throw new AppError(409, 'This platform creative id is already registered to another business');
+    }
+    if (existing && existing.clientId !== input.clientId) {
+      throw new AppError(409, 'This platform creative id is already registered to another client');
+    }
   }
   if (!existing) {
     [existing] = await db.select().from(creatives).where(and(eq(creatives.sha256, sha256), eq(creatives.clientId, input.clientId), eq(creatives.isDeleted, false)));

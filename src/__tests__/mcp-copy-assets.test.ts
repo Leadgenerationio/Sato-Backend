@@ -11,7 +11,8 @@ import { campaigns } from '../db/schema/campaigns.js';
 import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { apiKeys } from '../db/schema/api-keys.js';
 import { apiAuditLog } from '../db/schema/api-audit-log.js';
-import { copyHash } from '../services/creative-copy.service.js';
+import { copyHash, upsertCopyCreative } from '../services/creative-copy.service.js';
+import { businesses } from '../db/schema/businesses.js';
 
 // Copy-only assets (Sam's decision): ad copy with no file, kept in creatives so approvals, ad links and history work.
 const BIZ = '26d6b2b4-c867-460e-8473-eca2b1ffd232';
@@ -161,5 +162,46 @@ describe('the portal and the library show the copy', () => {
     const rows = (compliance.body.data.compliance ?? compliance.body.data ?? []) as Array<{ creatives: any[] }>;
     const inCompliance = (Array.isArray(rows) ? rows : []).flatMap((c) => c.creatives).find((c: any) => c.id === id);
     expect(inCompliance).toMatchObject({ type: 'copy', headline: `Portal ${tag}`, bodyText: 'Portal body' });
+  });
+});
+
+// Review of #97: a copy upsert by platformCreativeId must not touch another business's or another client's creative.
+describe('copy upsert by platformCreativeId is scoped', () => {
+  let biz2 = ''; let c2 = ''; const pid = `copy-scope-${tag}`;
+  beforeAll(async () => {
+    biz2 = (await db.insert(businesses).values({ name: `Yash Test COPY biz2 ${tag}`, slug: `yash-test-copy-${tag}` }).returning())[0]!.id;
+    c2 = (await db.insert(clients).values({ businessId: biz2, companyName: `Yash Test COPY other ${tag}`, status: 'active' }).returning())[0]!.id;
+  });
+  afterAll(async () => {
+    await db.delete(creatives).where(eq(creatives.platformCreativeId, pid));
+    await db.delete(clients).where(eq(clients.id, c2));
+    await db.delete(businesses).where(eq(businesses.id, biz2));
+  });
+  it('another business filing the same platformCreativeId is refused and the first headline survives', async () => {
+    const theirs = await upsertCopyCreative({ businessId: biz2, clientId: c2, platform: 'meta', platformCreativeId: pid, headline: `Their secret headline ${tag}` });
+    await expect(upsertCopyCreative({ businessId: BIZ, clientId: A, platform: 'meta', platformCreativeId: pid, headline: `Overwritten by business 1 ${tag}` }))
+      .rejects.toMatchObject({ statusCode: 409 });
+    const after = await rowOf(theirs.creative.id);
+    expect(after.headline).toBe(`Their secret headline ${tag}`);
+    expect(after.clientId).toBe(c2);
+  });
+  it('another client of the same business is refused too', async () => {
+    const pidB = `${pid}-b`;
+    const first = await upsertCopyCreative({ businessId: BIZ, clientId: B, platform: 'meta', platformCreativeId: pidB, headline: `B headline ${tag}` });
+    await expect(upsertCopyCreative({ businessId: BIZ, clientId: A, platform: 'meta', platformCreativeId: pidB, headline: `Hijacked ${tag}` }))
+      .rejects.toMatchObject({ statusCode: 409 });
+    const after = await rowOf(first.creative.id);
+    expect(after.headline).toBe(`B headline ${tag}`);
+    expect(after.clientId).toBe(B);
+    await db.delete(creatives).where(eq(creatives.platformCreativeId, pidB));
+  });
+  it('the same client sending the same platformCreativeId still updates its own copy', async () => {
+    const pidC = `${pid}-c`;
+    const first = await upsertCopyCreative({ businessId: BIZ, clientId: A, platform: 'meta', platformCreativeId: pidC, headline: `One ${tag}` });
+    const again = await upsertCopyCreative({ businessId: BIZ, clientId: A, platform: 'meta', platformCreativeId: pidC, headline: `Two ${tag}` });
+    expect(again.created).toBe(false);
+    expect(again.creative.id).toBe(first.creative.id);
+    expect((await rowOf(first.creative.id)).headline).toBe(`Two ${tag}`);
+    await db.delete(creatives).where(eq(creatives.platformCreativeId, pidC));
   });
 });
