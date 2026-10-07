@@ -23,6 +23,7 @@ export default defineTool({
     campaignId: z.string().max(100).optional().describe('The STATO campaign (UUID, or the LeadByte number). Needed only when the ad account feeds several campaigns and the asset has none.'),
     platformCampaignId: z.string().max(100).optional().describe('The ad platform\'s own campaign ID.'),
     platformCampaignName: z.string().max(255).optional(),
+    campaignName: z.string().max(255).optional().describe('The ad platform\'s own campaign name (same as platformCampaignName).'),
     adsetId: z.string().max(100).optional().describe('Meta ad set, Google ad group or Performance Max asset group, TikTok ad group. Taboola has none.'),
     adsetName: z.string().max(255).optional(),
     adId: z.string().max(100).optional(),
@@ -36,9 +37,10 @@ export default defineTool({
   annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
   scope: 'ad_links:write',
   handler: async (rawArgs, ctx) => {
-    const { idempotencyKey, ...args } = rawArgs;
+    const { idempotencyKey, campaignName, ...rest } = rawArgs;
+    const args = { ...rest, platformCampaignName: rest.platformCampaignName ?? campaignName };
+    // The key's request is the arguments as sent (campaignName folded into platformCampaignName).
     return withToolResult(ctx.apiKey.id, idempotencyKey, 'link_ad_platform_ids', args, async () => {
-
     const res = await linkAdPlatformIds(
       { businessId: ctx.businessId, userId: realUserId(ctx.userId), keyId: ctx.apiKey.id, source: 'mcp' },
       args as Parameters<typeof linkAdPlatformIds>[1],

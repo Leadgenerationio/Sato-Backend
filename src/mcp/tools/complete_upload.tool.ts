@@ -10,7 +10,7 @@ export default defineTool({
   title: 'Finish a direct file upload',
   description:
     'Tell Stato the file is uploaded. For a multipart upload send parts: the partNumber and ETag of every part. Stato checks the real size and the real file type from the first bytes (an .exe renamed .mp4 is refused and removed) and computes the SHA-256. ' +
-    'status "ready" means you can call upload_asset with the uploadId. status "processing" (very large files) means call complete_upload again with the same uploadId until it is ready. Safe to repeat.',
+    'status "ready" means you can call upload_asset with the uploadId. status "processing" (very large files) means call complete_upload again with the same uploadId until it is ready. Safe to repeat. The same call also reports a file Stato is copying from a big sourceUrl (upload_asset answers upload_incomplete with that uploadId). IDs are strings.',
   inputSchema: {
     idempotencyKey: z.string().max(100).optional().describe('Optional. Repeating the same call with the same key returns the first answer instead of doing it twice.'),
     uploadId: uuidShape(),
@@ -18,7 +18,7 @@ export default defineTool({
   },
   outputSchema: {
     uploadId: z.string(),
-    status: z.enum(['ready', 'processing']),
+    status: z.enum(['ready', 'processing', 'error']).describe('ready, or processing (call again). error when the call failed: see code and hint.'),
     sizeBytes: z.number(),
     contentType: z.string(),
     sha256: z.string().nullable(),

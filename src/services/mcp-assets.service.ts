@@ -7,6 +7,7 @@ import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { creativeAdLinks } from '../db/schema/creative-ad-links.js';
 import { landingPages } from '../db/schema/landing-pages.js';
 import { getSignedDownloadUrl, objectExists } from '../integrations/r2/r2-client.js';
+import { apiAuditLog } from '../db/schema/api-audit-log.js';
 import { normaliseAccountId } from '../utils/catchr-platform.js';
 import { ApiError } from '../utils/api-error.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
@@ -124,6 +125,8 @@ export interface AssetDetail {
   expiresAt: string | null;
   adLinks: AdLinkDto[];
   landingPage: { id: string; url: string; title: string | null } | null;
+  /** The latest API-key calls that touched this asset, newest first (at most 10). */
+  history: Array<{ at: string; tool: string | null; by: string | null; transport: string; result: string }>;
 }
 
 /** One asset, a signed download link (default 60 minutes, at most 24 hours) and its ad links. */
@@ -163,5 +166,14 @@ export async function getAsset(businessId: string, creativeId: string, downloadU
     expiresAt,
     adLinks: links.map(toAdLinkDto),
     landingPage: cr.landingPageId && r.lpUrl ? { id: cr.landingPageId, url: r.lpUrl, title: r.lpTitle ?? null } : null,
+    history: await recentHistory(businessId, cr.id),
   };
+}
+
+async function recentHistory(businessId: string, creativeId: string): Promise<AssetDetail['history']> {
+  const rows = await db.select({ at: apiAuditLog.at, tool: apiAuditLog.tool, agent: apiAuditLog.agent, keyName: apiAuditLog.keyName, transport: apiAuditLog.transport, errorCode: apiAuditLog.errorCode })
+    .from(apiAuditLog)
+    .where(and(eq(apiAuditLog.businessId, businessId), sql`${apiAuditLog.recordsTouched} @> ${JSON.stringify([{ type: 'creative', id: creativeId }])}::jsonb`))
+    .orderBy(desc(apiAuditLog.at)).limit(10);
+  return rows.map((r) => ({ at: r.at.toISOString(), tool: r.tool, by: r.agent ?? r.keyName ?? null, transport: r.transport, result: r.errorCode ?? 'ok' }));
 }
