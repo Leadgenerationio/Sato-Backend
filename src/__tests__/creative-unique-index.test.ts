@@ -140,11 +140,17 @@ describe('the code survives the index: a request that loses the race gets the ex
     expect(await r2.objectExists('creatives', winner!.r2Key!)).toBe(true);
   }, 60_000);
   it('copy-only: 6 of the same text at once: one creative, every call gets it back (the same index)', async () => {
+    // Own setup, so this test does not depend on the order of the ones above.
+    await sql.unsafe(`create unique index concurrently if not exists ${REAL_INDEX} on creatives (client_id, sha256) where sha256 is not null and client_id is not null and is_deleted = false and client_id = '${client}'`);
+    const warn = vi.spyOn(logger, 'warn');
     const text = `Race copy ${tag}`;
     const results = await Promise.all(Array.from({ length: 6 }, () => upsertCopyCreative({ businessId: BIZ, clientId: client, platform: 'meta', headline: text })));
+    const raced = warn.mock.calls.some((c) => String(c[1] ?? c[0]).includes('copy-only asset for the same text was refused by the unique index'));
+    warn.mockRestore();
     expect(new Set(results.map((r) => r.creative.id)).size).toBe(1);
     expect(results.filter((r) => r.created)).toHaveLength(1);
     expect(await db.select({ id: creatives.id }).from(creatives).where(and(eq(creatives.clientId, client), eq(creatives.type, 'copy')))).toHaveLength(1);
+    expect(raced).toBe(true); // the race really happened and the handler ran, not six calls one after another
   }, 60_000);
   it('a violation of some OTHER unique index is not answered as a duplicate (it stays an error)', async () => {
     const OTHER = `creatives_other_${tag}_uq`;

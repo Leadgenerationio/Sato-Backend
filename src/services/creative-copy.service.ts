@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { db } from '../config/database.js';
-import { creatives, CREATIVE_CLIENT_SHA_INDEX } from '../db/schema/creatives.js';
+import { creatives } from '../db/schema/creatives.js';
 import { AppError } from '../utils/errors.js';
-import { isUniqueViolation, uniqueViolationConstraint } from '../utils/pg-errors.js';
+import { isCreativeShaRace } from '../utils/pg-errors.js';
 import { logger } from '../utils/logger.js';
 import { domainEvents } from './events.js';
 import { campaignUsableBy, clientInBusiness, creativeBelongsToBusiness, ensureLandingPage } from './creative-library.service.js';
@@ -104,7 +104,7 @@ export async function upsertCopyCreative(input: CopyInput): Promise<{ creative: 
     return { creative: row!, created: true };
   } catch (err) {
     // The same copy for the same client raced in (the unique index on client + hash): return the one that won.
-    if (!isUniqueViolation(err) || uniqueViolationConstraint(err) !== CREATIVE_CLIENT_SHA_INDEX) throw err;
+    if (!isCreativeShaRace(err)) throw err;
     const [winner] = await db.select().from(creatives).where(and(eq(creatives.sha256, sha256), eq(creatives.clientId, input.clientId), eq(creatives.isDeleted, false)));
     if (!winner) throw err;
     logger.warn({ creativeId: winner.id }, 'A second copy-only asset for the same text was refused by the unique index; returning the existing one');
