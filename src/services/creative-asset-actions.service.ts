@@ -5,6 +5,7 @@ import { clients } from '../db/schema/clients.js';
 import { landingPages } from '../db/schema/landing-pages.js';
 import { creativeAdLinks } from '../db/schema/creative-ad-links.js';
 import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
+import { copyHash } from './creative-copy.service.js';
 import { ApiError, accountClientMismatch, campaignClientMismatch, moveRequiresConfirm } from '../utils/api-error.js';
 import { creativeBelongsToBusiness, type CreativeRow } from './creative-library.service.js';
 import { assertCampaignBelongsToClient, resolveCampaignRef, type Caller } from './ad-account-rules.service.js';
@@ -45,6 +46,18 @@ export async function updateAsset(caller: Caller, input: UpdateAssetInput): Prom
   if (input.name !== undefined && input.name !== row.name) mark('name', 'name', input.name);
   if (input.headline !== undefined && input.headline !== (row.headline ?? '')) mark('headline', 'headline', input.headline);
   if (input.bodyText !== undefined && input.bodyText !== (row.bodyText ?? '')) mark('bodyText', 'bodyText', input.bodyText);
+  // A copy-only asset is identified by the hash of its text: keep the hash in step with an edit, and refuse an edit that would
+  // make it the same copy as another live asset of the client (one creative per client and content).
+  if (row.type === 'copy' && changed.some((f) => f === 'headline' || f === 'bodyText')) {
+    const headline = (set.headline ?? row.headline ?? '') as string; const bodyText = (set.bodyText ?? row.bodyText ?? '') as string;
+    if (!headline.trim() && !bodyText.trim()) throw new ApiError('validation_failed', 'A copy-only asset needs a headline or bodyText.', { fields: [{ field: 'headline', message: 'Cannot leave both empty' }] });
+    const sha = copyHash(headline, bodyText);
+    if (row.clientId) {
+      const [other] = await db.select({ id: creatives.id }).from(creatives).where(and(eq(creatives.sha256, sha), eq(creatives.clientId, row.clientId), eq(creatives.isDeleted, false), ne(creatives.id, row.id)));
+      if (other) throw new ApiError('duplicate', `Another asset of this client already has this exact copy (${other.id}).`, { hint: 'Use that asset, or change the text.', details: { creativeId: other.id } });
+    }
+    set.sha256 = sha;
+  }
   if (input.tags !== undefined) {
     const next = [...new Set(input.tags.map((t) => t.trim()).filter(Boolean))].sort();
     if (JSON.stringify(next) !== JSON.stringify([...row.tags].sort())) mark('tags', 'tags', next);

@@ -222,6 +222,9 @@ export interface PortalCompliance {
     type: string;
     uploadedAt: string;
     fileUrl: string;
+    /** Ad copy. A copy-only asset (type 'copy') has no file: this is what the buyer reviews. */
+    headline: string | null;
+    bodyText: string | null;
     /** Sam (jam-video #3, 29-May-2026): "you have to open it up in a brand
      *  new tab, so it's not very user-friendly." A fresh 1-hour R2 signed
      *  URL ready to drop into <img>/<video> at render time — saves an
@@ -1290,6 +1293,8 @@ export async function getCompliance(requester: AuthPayload): Promise<PortalCompl
           uploadedAt: (cr.createdAt ?? new Date()).toISOString(),
           // Copy-only creatives (migration 0055) have no file: keep the field a string for the portal.
           fileUrl: cr.fileUrl ?? '',
+          headline: cr.headline ?? null,
+          bodyText: cr.bodyText ?? null,
           signedUrl: signedUrlByCreativeId.get(cr.id) ?? null,
           approval: {
             status: state?.status ?? 'pending',
@@ -1320,6 +1325,9 @@ export interface PortalCreative {
   name: string;
   type: string;
   fileUrl: string;
+  /** Ad copy. A copy-only asset (type 'copy') has no file: this is what the buyer reviews. */
+  headline: string | null;
+  bodyText: string | null;
   // R2 object key (e.g. 'creatives/<uuid>.png'). Surfaced so the portal can
   // ask for a fresh signed download URL on each open — fileUrl was the
   // upload-time presigned URL, which expires (R2 returns the `ExpiredRequest`
@@ -1369,6 +1377,8 @@ export async function getCreativesBySection(requester: AuthPayload): Promise<Por
       name: creatives.name,
       type: creatives.type,
       fileUrl: creatives.fileUrl,
+      headline: creatives.headline,
+      bodyText: creatives.bodyText,
       r2Key: creatives.r2Key,
       section: creatives.section,
       createdAt: creatives.createdAt,
@@ -1429,6 +1439,8 @@ export async function getCreativesBySection(requester: AuthPayload): Promise<Por
       name: r.name,
       type: r.type ?? 'unknown',
       fileUrl: r.fileUrl ?? '',
+      headline: r.headline ?? null,
+      bodyText: r.bodyText ?? null,
       r2Key: r.r2Key,
       signedUrl: signedUrlByCreativeId.get(r.id) ?? null,
       uploadedAt: (r.createdAt ?? new Date()).toISOString(),

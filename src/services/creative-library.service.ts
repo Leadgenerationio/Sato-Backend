@@ -59,13 +59,13 @@ export interface UpsertPlatformCreativeInput {
 
 // ─── Scoping ───
 
-async function clientInBusiness(clientId: string, businessId: string): Promise<boolean> {
+export async function clientInBusiness(clientId: string, businessId: string): Promise<boolean> {
   const [row] = await db.select({ id: clients.id }).from(clients)
     .where(and(eq(clients.id, clientId), eq(clients.businessId, businessId)));
   return Boolean(row);
 }
 
-async function campaignInBusiness(campaignId: string, businessId: string): Promise<boolean> {
+export async function campaignInBusiness(campaignId: string, businessId: string): Promise<boolean> {
   const [row] = await db.select({ id: campaigns.id }).from(campaigns)
     .where(and(eq(campaigns.id, campaignId), sql`(
       exists (select 1 from ${clients} c where c.id = ${campaigns.clientId} and c.business_id = ${businessId})
@@ -83,7 +83,7 @@ async function campaignInBusiness(campaignId: string, businessId: string): Promi
  * its campaign's buyers, so on an unbought campaign it would belong to nobody and then to whoever buys it first.
  * Ownership of an existing creative still uses the stricter campaignInBusiness.
  */
-async function campaignUsableBy(campaignId: string, businessId: string, resultingClientId: string | null): Promise<boolean> {
+export async function campaignUsableBy(campaignId: string, businessId: string, resultingClientId: string | null): Promise<boolean> {
   if (await campaignInBusiness(campaignId, businessId)) return true;
   if (!resultingClientId) return false;
   const [row] = await db.select({ id: campaigns.id }).from(campaigns)

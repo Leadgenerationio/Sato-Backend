@@ -6,6 +6,7 @@ import { clients } from '../db/schema/clients.js';
 import { normaliseAccountId } from '../utils/catchr-platform.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
 import { toApiError } from '../utils/to-api-error.js';
+import { upsertCopyCreative } from './creative-copy.service.js';
 import { env } from '../config/env.js';
 import { AppError } from '../utils/errors.js';
 import { startUrlUpload } from './mcp-url-uploads.service.js';
@@ -22,9 +23,10 @@ import { claimUploadForFiling, getReadyUpload, linkUploadToCreative, releaseUplo
 
 export interface UploadAssetInput {
   /** Optional with uploadId (the real type comes from the file); must match it when sent. */
-  mediaType?: 'image' | 'video';
+  /** 'copy' = a copy-only asset: ad copy (headline and/or bodyText) with no file. */
+  mediaType?: 'image' | 'video' | 'copy';
   name?: string;
-  /** Exactly one of sourceUrl or uploadId. */
+  /** Exactly one of sourceUrl or uploadId (a copy-only asset sends neither). */
   sourceUrl?: string;
   uploadId?: string;
   clientId?: string;
@@ -56,7 +58,15 @@ export interface UploadAssetResult {
 }
 
 export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput): Promise<UploadAssetResult> {
-  if (Boolean(input.sourceUrl) === Boolean(input.uploadId)) {
+  const isCopy = input.mediaType === 'copy';
+  if (isCopy) {
+    if (input.sourceUrl || input.uploadId) {
+      throw new ApiError('validation_failed', 'A copy-only asset (mediaType copy) has no file: send neither sourceUrl nor uploadId.', { fields: [{ field: input.sourceUrl ? 'sourceUrl' : 'uploadId', message: 'Leave out for mediaType copy' }] });
+    }
+    if (!input.headline?.trim() && !input.bodyText?.trim()) {
+      throw new ApiError('validation_failed', 'A copy-only asset needs a headline or bodyText.', { fields: [{ field: 'headline', message: 'Send headline and/or bodyText' }] });
+    }
+  } else if (Boolean(input.sourceUrl) === Boolean(input.uploadId)) {
     throw new ApiError('validation_failed', 'Send exactly one of sourceUrl or uploadId.', {
       fields: [{ field: input.sourceUrl ? 'uploadId' : 'sourceUrl', message: 'Send either sourceUrl (a public file up to 50 MB) or uploadId (from create_upload and complete_upload)' }],
     });
@@ -150,9 +160,13 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
   }
   try {
     if (replayOf) up = { creative: replayOf, created: false } as Awaited<ReturnType<typeof upsertPlatformCreative>>;
+    else if (isCopy) up = await upsertCopyCreative({
+      businessId: caller.businessId, clientId: client.id, campaignId, platform, platformAccountId: hasAccount ? accountId : undefined, platformCreativeId,
+      headline: input.headline, bodyText: input.bodyText, landingPageUrl: input.landingPageUrl, name: input.name, uploadedBy: caller.userId,
+    });
     else up = await upsertPlatformCreative({
       businessId: caller.businessId, clientId: client.id, campaignId, platform: platform as 'meta', platformAccountId: hasAccount ? accountId : undefined,
-      platformCreativeId, mediaType: verified?.mediaType ?? input.mediaType!, sourceUrl: input.sourceUrl, r2Key: uploadRow?.r2Key, verified, headline: input.headline, bodyText: input.bodyText,
+      platformCreativeId, mediaType: verified?.mediaType ?? (input.mediaType as 'image' | 'video'), sourceUrl: input.sourceUrl, r2Key: uploadRow?.r2Key, verified, headline: input.headline, bodyText: input.bodyText,
       landingPageUrl: input.landingPageUrl, name: input.name, uploadedBy: caller.userId,
     });
     if (uploadRow && !replayOf) await linkUploadToCreative(uploadRow.id, up.creative.id);
