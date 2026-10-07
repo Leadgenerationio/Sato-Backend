@@ -169,9 +169,11 @@ describe('the code survives the index: a request that loses the race gets the ex
                values (${client}, ${'Winner'}, 'copy', 'copy_lp', 'meta', ${text}, ${copyHash(text, '')}, 'ready', 'text/plain')`;
       loser = upsertCopyCreative({ businessId: BIZ, clientId: client, platform: 'meta', headline: text, landingPageUrl: lp, name: `Loser name ${tag}` });
       loser.catch(() => undefined);
-      // Commit only once the loser's INSERT is really waiting on the winner's uncommitted row (not a fixed sleep).
+      // Commit only once something is really blocked by THIS winner transaction (its pid), i.e. the loser's INSERT is waiting on the
+      // uncommitted row. Scoped to our own backend, so an unrelated waiting insert from a parallel test file cannot trigger it.
+      const [{ pid: winnerPid }] = await tx`select pg_backend_pid() as pid`;
       for (let i = 0; i < 100; i++) {
-        const waiting = await sql`select 1 from pg_stat_activity where wait_event_type = 'Lock' and query like 'insert into "creatives"%'`;
+        const waiting = await sql`select 1 from pg_stat_activity where ${winnerPid} = any(pg_blocking_pids(pid))`;
         if (waiting.length) break;
         await new Promise((r) => setTimeout(r, 50));
       }
