@@ -2,6 +2,7 @@ import { and, desc, eq, gte, isNotNull, isNull, lte, sql, type SQL } from 'drizz
 import { db } from '../config/database.js';
 import { apiAuditLog, type ApiAuditRow } from '../db/schema/api-audit-log.js';
 import { users } from '../db/schema/users.js';
+import { csvCell } from '../utils/csv.js';
 
 // Settings → API keys → Activity (MCP spec v1.0 §3, spec test 16): every
 // API-key call with the bot name, the tool, the result and the records it
@@ -17,6 +18,8 @@ export interface ActivityFilters {
   transport?: 'rest' | 'mcp';
   outcome?: 'ok' | 'error';
   errorCode?: string;
+  /** Only calls that touched this creative (records_touched, GIN index 0057). */
+  creativeId?: string;
   from?: Date;
   to?: Date;
   limit?: number;
@@ -72,7 +75,10 @@ const toRow = (r: ApiAuditRow, owner: string | null): ActivityRow => ({
 
 /** One page of the business's API activity. Arguments were redacted when the row was written. */
 export async function listApiActivity(businessId: string, f: ActivityFilters = {}): Promise<{ items: ActivityRow[]; nextCursor: string | null }> {
-  const limit = Math.min(Math.max(f.limit ?? 50, 1), ACTIVITY_MAX_LIMIT);
+  return queryActivity(businessId, f, Math.min(Math.max(f.limit ?? 50, 1), ACTIVITY_MAX_LIMIT));
+}
+
+async function queryActivity(businessId: string, f: ActivityFilters, limit: number): Promise<{ items: ActivityRow[]; nextCursor: string | null }> {
   const where: SQL[] = [eq(apiAuditLog.businessId, businessId)];
   if (f.keyId) where.push(eq(apiAuditLog.apiKeyId, f.keyId));
   if (f.tool) where.push(eq(apiAuditLog.tool, f.tool));
@@ -80,6 +86,7 @@ export async function listApiActivity(businessId: string, f: ActivityFilters = {
   if (f.outcome === 'ok') where.push(isNull(apiAuditLog.errorCode));
   if (f.outcome === 'error') where.push(isNotNull(apiAuditLog.errorCode));
   if (f.errorCode) where.push(eq(apiAuditLog.errorCode, f.errorCode));
+  if (f.creativeId) where.push(sql`${apiAuditLog.recordsTouched} @> ${JSON.stringify([{ type: 'creative', id: f.creativeId }])}::jsonb`);
   if (f.from) where.push(gte(apiAuditLog.at, f.from));
   if (f.to) where.push(lte(apiAuditLog.at, f.to));
   if (f.cursor) {
@@ -101,4 +108,32 @@ export async function listApiActivity(businessId: string, f: ActivityFilters = {
     items: page.map((r) => toRow(r.row, r.owner ?? null)),
     nextCursor: rows.length > limit ? `${page[page.length - 1]!.atMicros}.${page[page.length - 1]!.row.id}` : null,
   };
+}
+
+// CSV export (spec D9): the same filters as the list, newest first, one sheet.
+export const ACTIVITY_EXPORT_LIMIT = 10_000;
+
+const CSV_COLUMNS: Array<[string, (r: ActivityRow) => string | number]> = [
+  ['Time (UTC)', (r) => r.at],
+  ['Key', (r) => r.keyName ?? ''],
+  ['Key owner', (r) => r.owner ?? ''],
+  ['Bot', (r) => r.agent ?? ''],
+  ['Transport', (r) => r.transport],
+  ['Tool', (r) => r.tool ?? ''],
+  ['Method', (r) => r.method ?? ''],
+  ['Path', (r) => r.path ?? ''],
+  ['HTTP status', (r) => r.status ?? ''],
+  ['Result', (r) => r.errorCode ?? 'ok'],
+  ['Records touched', (r) => (Array.isArray(r.recordsTouched) ? (r.recordsTouched as Array<{ type: string; id: string }>).map((t) => `${t.type}:${t.id}`).join(' ') : '')],
+  ['Duration (ms)', (r) => r.durationMs ?? ''],
+  ['Request ID', (r) => r.requestId ?? ''],
+  ['IP', (r) => r.ip ?? ''],
+];
+
+/** Arguments and before/after stay out of the sheet: they are JSON, and open in the Activity view. */
+export async function exportApiActivityCsv(businessId: string, f: Omit<ActivityFilters, 'limit' | 'cursor'> = {}): Promise<{ csv: string; count: number; truncated: boolean }> {
+  const { items, nextCursor } = await queryActivity(businessId, f, ACTIVITY_EXPORT_LIMIT);
+  const lines = [CSV_COLUMNS.map(([h]) => csvCell(h)).join(',')];
+  for (const r of items) lines.push(CSV_COLUMNS.map(([, get]) => csvCell(get(r))).join(','));
+  return { csv: lines.join('\r\n') + '\r\n', count: items.length, truncated: nextCursor !== null };
 }

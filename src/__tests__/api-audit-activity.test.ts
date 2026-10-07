@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import app from '../index.js';
 import { db } from '../config/database.js';
 import { apiKeys } from '../db/schema/api-keys.js';
@@ -11,6 +11,7 @@ import { purgeApiHousekeeping } from '../services/retention.service.js';
 // Activity and kept 12 months.
 const BIZ = '26d6b2b4-c867-460e-8473-eca2b1ffd232';
 const tag = `${Date.now() % 1e9}`;
+const CREATIVE = '6f1c2b8e-4d0a-4c3e-9b1f-0a7e5d2c9b41';
 const daysAgo = (d: number) => new Date(Date.now() - d * 86_400_000);
 let owner = '';
 let ops = '';
@@ -39,6 +40,8 @@ beforeAll(async () => {
     row(keyA.id, { tool: 'upload_asset', status: 200, errorCode: 'account_not_linked', result: { outcome: 'error', code: 'account_not_linked' } }),
     row(keyA.id, { transport: 'rest', tool: null, method: 'GET', path: '/api/v1/clients/lookup', status: 404, errorCode: 'not_found' }),
     row(keyB.id, { tool: 'whoami' }),
+    row(keyB.id, { tool: 'update_asset', agent: '=Formula Bot', recordsTouched: [{ type: 'creative', id: CREATIVE }, { type: 'client', id: 'cl1' }] }),
+    row(keyB.id, { tool: 'add_landing_page', recordsTouched: [{ type: 'landing_page', id: CREATIVE }] }),
   ]);
 });
 afterAll(async () => {
@@ -86,10 +89,38 @@ describe('GET /api-keys/activity', () => {
     expect((await activity({ cursor: `1791280933475123.${'9'.repeat(16)}` })).status).toBe(400);
   });
 
+  it('filters to the calls that touched one creative (not another record type with the same id)', async () => {
+    const res = await activity({ creativeId: CREATIVE });
+    expect(res.status).toBe(200);
+    expect(res.body.data.items.map((i: any) => i.tool)).toEqual(['update_asset']);
+    expect((await activity({ creativeId: 'c1' })).status).toBe(400);
+  });
+
+  it('the creative filter has a GIN index to use', async () => {
+    const idx = await db.execute(sql`select indexdef from pg_indexes where indexname = 'api_audit_log_records_touched_idx'`);
+    expect(JSON.stringify(idx)).toMatch(/USING gin \(records_touched jsonb_path_ops\)/);
+  });
+
+  it('exports the filtered list as CSV, newest first, safe to open in a spreadsheet', async () => {
+    const res = await request(app).get('/api/v1/api-keys/activity.csv').query({ keyId: keyB.id, transport: 'mcp' }).set('Authorization', `Bearer ${owner}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/csv/);
+    expect(res.headers['content-disposition']).toMatch(/attachment; filename="api-activity-\d{4}-\d{2}-\d{2}\.csv"/);
+    expect(res.headers['x-row-count']).toBe('3');
+    const lines = res.text.replace(/^\uFEFF/, '').trim().split('\r\n');
+    expect(lines[0]).toBe('Time (UTC),Key,Key owner,Bot,Transport,Tool,Method,Path,HTTP status,Result,Records touched,Duration (ms),Request ID,IP');
+    expect(lines.slice(1).map((l) => l.split(',')[5])).toEqual(['add_landing_page', 'update_asset', 'whoami']);
+    expect(lines[2]).toContain(`'=Formula Bot`);
+    expect(lines[2]).toContain(`creative:${CREATIVE} client:cl1`);
+    const byCreative = await request(app).get('/api/v1/api-keys/activity.csv').query({ creativeId: CREATIVE }).set('Authorization', `Bearer ${owner}`);
+    expect(byCreative.headers['x-row-count']).toBe('1');
+    expect((await request(app).get('/api/v1/api-keys/activity.csv').set('Authorization', `Bearer ${ops}`)).status).toBe(403);
+  });
+
   it('per key: only that key, and a key from nowhere is not found', async () => {
     const res = await request(app).get(`/api/v1/api-keys/${keyB.id}/activity`).set('Authorization', `Bearer ${owner}`);
     expect(res.status).toBe(200);
-    expect(res.body.data.items.map((i: any) => i.keyId)).toEqual([keyB.id]);
+    expect(new Set(res.body.data.items.map((i: any) => i.keyId))).toEqual(new Set([keyB.id]));
     const missing = await request(app).get('/api/v1/api-keys/00000000-0000-0000-0000-00000000dead/activity').set('Authorization', `Bearer ${owner}`);
     expect(missing.status).toBe(404);
   });

@@ -6,7 +6,7 @@ import { validate } from '../middleware/validate.middleware.js';
 import { uuidShape } from '../utils/zod-helpers.js';
 import { AppError } from '../utils/errors.js';
 import * as keys from '../services/api-key.service.js';
-import { listApiActivity, ACTIVITY_MAX_LIMIT } from '../services/api-audit-activity.service.js';
+import { listApiActivity, exportApiActivityCsv, ACTIVITY_MAX_LIMIT } from '../services/api-audit-activity.service.js';
 import { db } from '../config/database.js';
 import { apiKeys } from '../db/schema/api-keys.js';
 import { and, eq } from 'drizzle-orm';
@@ -42,6 +42,7 @@ export const activityQuerySchema = z.object({
   transport: z.enum(['rest', 'mcp']).optional(),
   outcome: z.enum(['ok', 'error']).optional(),
   errorCode: z.string().trim().min(1).max(60).optional(),
+  creativeId: uuidShape().optional(),
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
   limit: z.coerce.number().int().min(1).max(ACTIVITY_MAX_LIMIT).optional(),
@@ -57,6 +58,20 @@ apiKeyRoutes.get('/activity', validate(z.object({ query: activityQuerySchema }))
   const q = activityQuerySchema.parse(req.query);
   res.setHeader('Cache-Control', 'no-store');
   res.json({ status: 'success', data: await listApiActivity(businessOf(req), activityFilters(q)) });
+});
+
+// The same list as a CSV (spec D9), every matching row up to ACTIVITY_EXPORT_LIMIT.
+const exportQuerySchema = activityQuerySchema.omit({ limit: true, cursor: true });
+apiKeyRoutes.get('/activity.csv', validate(z.object({ query: exportQuerySchema })), async (req: Request, res: Response) => {
+  const q = exportQuerySchema.parse(req.query);
+  const { csv, count, truncated } = await exportApiActivityCsv(businessOf(req), activityFilters(q));
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="api-activity-${new Date().toISOString().slice(0, 10)}.csv"`);
+  res.setHeader('X-Row-Count', String(count));
+  if (truncated) res.setHeader('X-Truncated', 'true');
+  // BOM so Excel reads names with accents correctly.
+  res.send('\uFEFF' + csv);
 });
 
 apiKeyRoutes.get('/', async (req: Request, res: Response) => {
