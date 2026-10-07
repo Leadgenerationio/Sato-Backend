@@ -31,7 +31,10 @@ export function createStatoMcpServer(ctx: ToolContext, tools: StatoTool[], onAud
   for (const t of tools) {
     server.registerTool(
       t.name,
-      { title: t.title, description: t.description, inputSchema: t.inputSchema, outputSchema: t.outputSchema, annotations: t.annotations },
+      // Every output field is optional (and extras are allowed) because a tool error comes back in the same structuredContent,
+      // as the shared error body. The official SDK client validates structuredContent against outputSchema even when isError is
+      // true, so a strict schema made it throw "does not match the tool's output schema" and hide the code and hint.
+      { title: t.title, description: t.description, inputSchema: t.inputSchema, outputSchema: z.object(t.outputSchema).partial().loose(), annotations: t.annotations },
       async (args: Record<string, unknown>): Promise<ToolResult> => {
         try {
           if (t.scope && !ctx.apiKey.scopes.includes(t.scope)) {
