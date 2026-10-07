@@ -11,7 +11,7 @@ import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { creatives } from '../db/schema/creatives.js';
 import { creativeAdLinks } from '../db/schema/creative-ad-links.js';
 import { landingPages } from '../db/schema/landing-pages.js';
-import { apiKeys } from '../db/schema/api-keys.js';
+import { apiKeys, idempotencyKeys } from '../db/schema/api-keys.js';
 import { callWithinClientScope, TOOLS_WITH_CLIENT_RULES } from '../mcp/client-scope.js';
 import { getTools } from '../mcp/tools/registry.js';
 import type { StatoTool, ToolContext } from '../mcp/types.js';
@@ -28,7 +28,7 @@ const ALL_SCOPES = ['clients:read', 'campaigns:read', 'ad_accounts:read', 'ad_ac
 let owner = '';
 let limited = ''; let open = '';
 const keyIds: string[] = [];
-const ids = {} as Record<'clientA' | 'clientB' | 'otherBiz' | 'otherClient' | 'campA' | 'campB' | 'crA' | 'crB' | 'lpA' | 'lpB' | 'linkB', string>;
+const ids = {} as Record<'clientA' | 'clientB' | 'otherBiz' | 'otherClient' | 'campA' | 'campB' | 'campShared' | 'crA' | 'crB' | 'crSharedA' | 'crSharedB' | 'lpA' | 'lpB' | 'linkB', string>;
 const acct = (n: 'A' | 'B') => `act_77${tag}${n === 'A' ? 1 : 2}`;
 
 async function call(k: string, name: string, args: Record<string, unknown> = {}) {
@@ -60,6 +60,14 @@ beforeAll(async () => {
     const [lp] = await db.insert(landingPages).values({ clientId: c!.id, url: `https://scope-${n.toLowerCase()}-${tag}.example.com/` }).returning();
     ids[`lp${n}`] = lp!.id;
   }
+  // A campaign both clients buy, with one asset each (issue #94: the count must not include B's).
+  const [sh] = await db.insert(campaigns).values({ name: `Hari Test SCOPE shared ${tag}` }).returning();
+  ids.campShared = sh!.id;
+  for (const n of ['A', 'B'] as const) {
+    await db.insert(clientCampaigns).values({ clientId: ids[`client${n}`], campaignId: sh!.id });
+    const [c] = await db.insert(creatives).values({ name: `Hari Test SCOPE shared asset ${n} ${tag}`, clientId: ids[`client${n}`], campaignId: sh!.id, type: 'image', platform: 'meta', source: 'mcp' }).returning();
+    ids[`crShared${n}`] = c!.id;
+  }
   const [l] = await db.insert(creativeAdLinks).values({ businessId: BIZ, creativeId: ids.crB, clientId: ids.clientB, platform: 'meta', platformAccountId: acct('B').replace('act_', ''), platformAdId: `9${tag}2` }).returning();
   ids.linkB = l!.id;
   const [b] = await db.insert(businesses).values({ name: `Hari Test other ${tag}`, slug: `hari-test-other-${tag}` }).returning();
@@ -76,10 +84,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await db.delete(creativeAdLinks).where(inArray(creativeAdLinks.creativeId, [ids.crA, ids.crB]));
-  await db.delete(creatives).where(inArray(creatives.id, [ids.crA, ids.crB]));
+  await db.delete(creatives).where(inArray(creatives.id, [ids.crA, ids.crB, ids.crSharedA, ids.crSharedB]));
   await db.delete(landingPages).where(inArray(landingPages.id, [ids.lpA, ids.lpB]));
-  await db.delete(clientCampaigns).where(inArray(clientCampaigns.campaignId, [ids.campA, ids.campB]));
-  await db.delete(campaigns).where(inArray(campaigns.id, [ids.campA, ids.campB]));
+  await db.delete(clientCampaigns).where(inArray(clientCampaigns.campaignId, [ids.campA, ids.campB, ids.campShared]));
+  await db.delete(campaigns).where(inArray(campaigns.id, [ids.campA, ids.campB, ids.campShared]));
   await db.delete(clientAdAccounts).where(inArray(clientAdAccounts.clientId, [ids.clientA, ids.clientB]));
   if (keyIds.length) await db.delete(apiKeys).where(inArray(apiKeys.id, keyIds));
   await db.delete(clients).where(inArray(clients.id, [ids.clientA, ids.clientB, ids.otherClient]));
@@ -155,6 +163,13 @@ describe('a key limited to client A', () => {
     expect(await db.select().from(creativeAdLinks).where(inArray(creativeAdLinks.platformAdId, [`9${tag}3`, `9${tag}4`]))).toHaveLength(0);
   });
 
+  it("counts only its clients' assets on a campaign shared with client B (#94)", async () => {
+    const limitedView = await call(limited, 'get_campaign', { campaignId: ids.campShared });
+    expect(limitedView.structuredContent.creativeCount).toBe(1);
+    expect(limitedView.structuredContent.linkedClients.map((c: any) => c.clientId)).toEqual([ids.clientA]);
+    expect((await call(open, 'get_campaign', { campaignId: ids.campShared })).structuredContent.creativeCount).toBe(2);
+  });
+
   it('must name a client when uploading, and send platform with an account', async () => {
     expect(codeOf(await call(limited, 'upload_asset', { sourceUrl: 'https://scope.invalid/a.png', name: 'x', platform: 'meta' }))).toBe('validation_failed');
     const r = await call(limited, 'upload_asset', { sourceUrl: 'https://scope.invalid/a.png', name: 'x', platformAccountId: acct('B') });
@@ -195,7 +210,12 @@ describe('setting the limit', () => {
     expect(listed.allowedClients).toEqual([{ id: ids.clientA, name: `Hari Test SCOPE A ${tag}` }]);
     expect(codeOf(await call(k, 'get_client', { clientId: ids.clientB }))).toBe('not_found');
     expect((await request(app).patch(`/api/v1/api-keys/${id}`).set('Authorization', `Bearer ${owner}`).send({ allowedClientIds: [ids.otherClient] })).status).toBe(422);
+    // Stored idempotencyKey answers do not outlive a change of limit (#94): a replay could name a client the key no longer sees.
+    await db.insert(idempotencyKeys).values({ owner: `mcp:key:${id}`, key: `k-${tag}`, requestHash: 'a'.repeat(64), status: 200, response: { clientId: ids.clientB } });
+    await request(app).patch(`/api/v1/api-keys/${id}`).set('Authorization', `Bearer ${owner}`).send({ agentLabel: 'only the label' }).expect(200);
+    expect(await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.owner, `mcp:key:${id}`))).toHaveLength(1);
     await request(app).patch(`/api/v1/api-keys/${id}`).set('Authorization', `Bearer ${owner}`).send({ allowedClientIds: null }).expect(200);
+    expect(await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.owner, `mcp:key:${id}`))).toHaveLength(0);
     expect(codeOf(await call(k, 'get_client', { clientId: ids.clientB }))).toBe('ok');
   });
 });
