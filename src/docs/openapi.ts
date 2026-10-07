@@ -46,6 +46,8 @@ export function buildOpenApi(serverUrl: string): Json {
         '',
         '**Auth:** send `X-API-Key: stk_…`. Keys are created and revoked by the Owner in Settings → API keys; each key has limited scopes, every call is logged, and each key is limited to 120 requests a minute.',
         '',
+        '**MCP:** the same keys also work on `POST /mcp` for AI assistants: send `Authorization: Bearer stk_…`. See the setup guide (docs/mcp-setup.md) and the tool list (docs/mcp-tools.md).',
+        '',
         '**Matching is on IDs, never names:** a creative finds its client from `(platform, platformAccountId)` via the ad-account links (`POST /clients/{id}/ad-accounts`).',
       ].join('\n'),
     },
@@ -53,6 +55,7 @@ export function buildOpenApi(serverUrl: string): Json {
     components: {
       securitySchemes: {
         ApiKey: { type: 'apiKey', in: 'header', name: 'X-API-Key', description: `Scopes: ${API_SCOPES.join(', ')}` },
+        BearerKey: { type: 'http', scheme: 'bearer', description: 'The same key as `Authorization: Bearer stk_…` (used by MCP clients).' },
       },
       responses: {
         ValidationError: { description: 'Invalid input — `errors[]` lists each field.' },
@@ -63,6 +66,15 @@ export function buildOpenApi(serverUrl: string): Json {
       },
     },
     paths: {
+      '/mcp': {
+        post: {
+          summary: 'MCP endpoint (Streamable HTTP, stateless)',
+          description: 'JSON-RPC 2.0 messages for the Model Context Protocol: `initialize`, `tools/list`, `tools/call`. 22 tools; each tool needs its own scope. A tool error is a normal 200 JSON-RPC result with `isError: true` and the shared error body (`code`, `message`, `hint`, `fields`, `retryable`, `requestId`). Over the limit (120 a minute per key) the answer is 429 with `retryAfter`. Only POST is accepted. Optional header `X-Stato-Agent` names the bot in the Activity screen.',
+          security: [{ BearerKey: [] }, { ApiKey: [] }],
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['jsonrpc', 'method'], properties: { jsonrpc: { const: '2.0' }, id: { type: ['string', 'integer'] }, method: { type: 'string', examples: ['tools/list', 'tools/call'] }, params: { type: 'object' } } } } } },
+          responses: { 200: ok('The JSON-RPC result (a tool error is a result with isError true).'), 401: { $ref: '#/components/responses/Unauthorized' }, 405: { description: 'Only POST is accepted.' }, 429: { $ref: '#/components/responses/RateLimited' } },
+        },
+      },
       '/whoami': {
         get: {
           summary: 'Which key, business and scopes this connection is using',

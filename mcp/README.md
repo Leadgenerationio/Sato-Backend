@@ -1,5 +1,7 @@
 # Stato MCP server
 
+> **Superseded.** Stato now serves MCP itself at `/mcp` (22 tools, Streamable HTTP, the same API keys). Use that: see [docs/mcp-setup.md](../docs/mcp-setup.md) and [docs/mcp-tools.md](../docs/mcp-tools.md). This folder is the older stdio wrapper over the REST API and is kept only for clients that cannot use HTTP.
+
 This lets an AI assistant (Claude Desktop, Claude Code, or any MCP client) file Meta and Taboola creatives under the right client in Stato. It is phase 4 of `docs/creative-library-and-api-plan.md`: a thin wrapper over the Stato public API.
 
 The server adds no rights of its own. Every call uses **your Stato API key**, so the assistant can do exactly what that key's scopes allow and nothing more.
