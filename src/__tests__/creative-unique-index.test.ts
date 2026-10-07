@@ -7,13 +7,14 @@ import { db } from '../config/database.js';
 import { clients } from '../db/schema/clients.js';
 import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { creatives } from '../db/schema/creatives.js';
+import { landingPages } from '../db/schema/landing-pages.js';
 import { creativeAdLinks } from '../db/schema/creative-ad-links.js';
 import { apiKeys } from '../db/schema/api-keys.js';
 import { logger } from '../utils/logger.js';
 import { ensureUniqueIndex, findDuplicateGroups, indexState, createIndexSql } from '../../scripts/lib/creative-unique-index.js';
 import * as r2 from '../integrations/r2/r2-client.js';
 import { uniqueViolationConstraint } from '../utils/pg-errors.js';
-import { upsertCopyCreative } from '../services/creative-copy.service.js';
+import { copyHash, upsertCopyCreative } from '../services/creative-copy.service.js';
 import { CREATIVE_CLIENT_SHA_INDEX } from '../db/schema/creatives.js';
 
 // One live creative per (client, file hash): the check script, the index script and the code that survives the index.
@@ -92,7 +93,9 @@ describe('the code survives the index: a request that loses the race gets the ex
   const real = globalThis.fetch;
   let spy: ReturnType<typeof vi.spyOn>;
   const REAL_INDEX = CREATIVE_CLIENT_SHA_INDEX; // the code only answers a violation of THIS index (scoped here to the test client)
+  let indexWasThere = false; // a test DB where the real index script already ran: use it, and never drop it
   beforeAll(async () => {
+    indexWasThere = (await indexState(sql)).exists;
     const login = await request(app).post('/api/v1/auth/login').send({ email: 'owner@stato.app', password: 'owner123' });
     owner = login.body.data.tokens.accessToken;
     const made = await request(app).post('/api/v1/api-keys').set('Authorization', `Bearer ${owner}`).send({ name: `Yash Test race ${tag}`, scopes: ['clients:read', 'ad_accounts:write', 'creatives:write', 'creatives:read'] });
@@ -107,16 +110,17 @@ describe('the code survives the index: a request that loses the race gets the ex
   });
   afterAll(async () => {
     spy.mockRestore();
-    await sql.unsafe(`drop index concurrently if exists ${REAL_INDEX}`);
+    if (!indexWasThere) await sql.unsafe(`drop index concurrently if exists ${REAL_INDEX}`);
     const ids = (await db.select({ id: creatives.id }).from(creatives).where(eq(creatives.clientId, client))).map((r) => r.id);
     if (ids.length) await db.delete(creativeAdLinks).where(inArray(creativeAdLinks.creativeId, ids));
     await db.delete(creatives).where(eq(creatives.clientId, client));
+    await db.delete(landingPages).where(eq(landingPages.clientId, client));
     await db.delete(clientAdAccounts).where(eq(clientAdAccounts.clientId, client));
     await db.delete(clients).where(eq(clients.id, client));
     await db.delete(apiKeys).where(inArray(apiKeys.id, keyIds));
   });
   it('8 uploads of the same new file at once: one creative, every call answers created or duplicate with that id', async () => {
-    await sql.unsafe(`create unique index concurrently ${REAL_INDEX} on creatives (client_id, sha256) where sha256 is not null and client_id is not null and is_deleted = false and client_id = '${client}'`);
+    await sql.unsafe(`create unique index concurrently if not exists ${REAL_INDEX} on creatives (client_id, sha256) where sha256 is not null and client_id is not null and is_deleted = false and client_id = '${client}'`);
     const warn = vi.spyOn(logger, 'warn');
     const del = vi.spyOn(r2, 'deleteFile');
     const calls = Array.from({ length: 8 }, (_, i) => request(app).post('/mcp').set('Authorization', `Bearer ${key}`).set('Accept', 'application/json, text/event-stream')
@@ -151,6 +155,37 @@ describe('the code survives the index: a request that loses the race gets the ex
     expect(results.filter((r) => r.created)).toHaveLength(1);
     expect(await db.select({ id: creatives.id }).from(creatives).where(and(eq(creatives.clientId, client), eq(creatives.type, 'copy')))).toHaveLength(1);
     expect(raced).toBe(true); // the race really happened and the handler ran, not six calls one after another
+  }, 60_000);
+  it('copy-only: the call that loses the race still gets its landing page and name onto the winner (no orphan page)', async () => {
+    await sql.unsafe(`create unique index concurrently if not exists ${REAL_INDEX} on creatives (client_id, sha256) where sha256 is not null and client_id is not null and is_deleted = false and client_id = '${client}'`);
+    // Deterministic race: the winner is inserted in a transaction that is not committed yet, so the call's lookup sees nothing,
+    // its insert waits on the unique index, and loses once the winner commits.
+    const text = `Race copy lp ${tag}`;
+    const lp = `https://offers.example.com/copy-race-${tag}`;
+    let loser!: ReturnType<typeof upsertCopyCreative>;
+    await sql.begin(async (tx) => {
+      await tx`insert into creatives (client_id, name, type, section, platform, headline, sha256, file_status, content_type)
+               values (${client}, ${'Winner'}, 'copy', 'copy_lp', 'meta', ${text}, ${copyHash(text, '')}, 'ready', 'text/plain')`;
+      loser = upsertCopyCreative({ businessId: BIZ, clientId: client, platform: 'meta', headline: text, landingPageUrl: lp, name: `Loser name ${tag}` });
+      loser.catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 600)); // the loser is now waiting on the winner's uncommitted row
+    });
+    const result = await loser;
+    expect(result.created).toBe(false);
+    const rows = await db.select().from(creatives).where(and(eq(creatives.clientId, client), eq(creatives.headline, text)));
+    expect(rows).toHaveLength(1);
+    const page = (await db.select().from(landingPages).where(eq(landingPages.clientId, client))).find((p) => p.url.includes(`copy-race-${tag}`));
+    expect(page).toBeTruthy();
+    expect(rows[0]!.landingPageId).toBe(page!.id); // the page is linked to the winner, not left unlinked
+    expect(rows[0]!.name).toBe(`Loser name ${tag}`);
+  }, 60_000);
+  it('copy-only: new text that another asset of this client already has is a 409 and changes nothing (not a raw 500)', async () => {
+    await sql.unsafe(`create unique index concurrently if not exists ${REAL_INDEX} on creatives (client_id, sha256) where sha256 is not null and client_id is not null and is_deleted = false and client_id = '${client}'`);
+    const pid = `copy-upd-${tag}`;
+    const a = await upsertCopyCreative({ businessId: BIZ, clientId: client, platform: 'meta', platformCreativeId: pid, headline: `Upd one ${tag}` });
+    await upsertCopyCreative({ businessId: BIZ, clientId: client, platform: 'meta', headline: `Upd two ${tag}` });
+    await expect(upsertCopyCreative({ businessId: BIZ, clientId: client, platform: 'meta', platformCreativeId: pid, headline: `Upd two ${tag}` })).rejects.toMatchObject({ statusCode: 409 });
+    expect((await db.select().from(creatives).where(eq(creatives.id, a.creative.id)))[0]!.headline).toBe(`Upd one ${tag}`);
   }, 60_000);
   it('a violation of some OTHER unique index is not answered as a duplicate (it stays an error)', async () => {
     const OTHER = `creatives_other_${tag}_uq`;

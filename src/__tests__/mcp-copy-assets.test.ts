@@ -217,3 +217,13 @@ describe('copy on a shared campaign', () => {
     expect((await rowOf(r.structuredContent.creativeId)).campaignId).toBe(shared);
   });
 });
+
+describe('the same platformCreativeId sent at the same moment', () => {
+  const pidR = `copy-conc-${tag}`;
+  afterAll(async () => { await db.delete(creatives).where(eq(creatives.platformCreativeId, pidR)); });
+  it('files one creative for that id, whatever the texts', async () => {
+    await Promise.all(Array.from({ length: 8 }, (_, i) => upsertCopyCreative({ businessId: BIZ, clientId: A, platform: 'meta', platformCreativeId: pidR, headline: `Conc ${i} ${tag}` })));
+    const rows = await db.select().from(creatives).where(and(eq(creatives.platform, 'meta'), eq(creatives.platformCreativeId, pidR)));
+    expect(rows).toHaveLength(1);
+  });
+});
