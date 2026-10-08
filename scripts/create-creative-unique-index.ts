@@ -1,4 +1,5 @@
 /**
+ * @runs-in-image (run inside the production container: only files the Dockerfile copies may be imported; see src/__tests__/scripts-in-image.test.ts)
  * Creates the unique index "one live creative per (client, file hash)". NOT part of auto-migrate: CREATE INDEX CONCURRENTLY
  * cannot run in a transaction.
  *   npx tsx scripts/create-creative-unique-index.ts --host=<the DATABASE_URL host> [--dry-run]

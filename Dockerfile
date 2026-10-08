@@ -27,8 +27,8 @@ COPY --from=build /app/src/db/migrations ./src/db/migrations
 # The scripts copied below import this one file from src (the index name); see scripts/lib/creative-unique-index.ts.
 COPY --from=build /app/src/db/creative-index.ts ./src/db/creative-index.ts
 COPY --from=build /app/scripts ./scripts
-# The MCP setup guide, served by GET /api/v1/mcp-docs.
-COPY --from=build /app/docs ./docs
+# The MCP setup guide, served by GET /api/v1/mcp-docs. Only this one file: docs/ also holds internal runbooks that do not belong in the image.
+COPY --from=build /app/docs/mcp-setup.md ./docs/mcp-setup.md
 COPY --from=build /app/drizzle.config.ts ./
 
 EXPOSE 3001

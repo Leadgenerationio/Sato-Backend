@@ -1,4 +1,5 @@
 /**
+ * @runs-in-image (run inside the production container: only files the Dockerfile copies may be imported; see src/__tests__/scripts-in-image.test.ts)
  * Staging only: give the "MCP TEST - DO NOT BILL" client two test campaigns,
  * because LeadByte is in mock mode on staging and list_campaigns would be empty.
  *
