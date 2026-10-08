@@ -8,6 +8,7 @@ export default defineTool({
   title: 'Find campaigns',
   description:
     'List or search campaigns, optionally only those one client buys (clientId). Each has a Stato campaignId (a UUID, the one to use everywhere) and the LeadByte number as leadbyteId. ' +
+    'These are the campaigns in Stato\'s own records (LeadByte campaigns are copied in every 2 minutes), so a campaign LeadByte created a moment ago may not be listed yet. ' +
     'Results are paged: pass nextCursor back. IDs are strings.',
   inputSchema: {
     clientId: uuidShape().optional().describe('Only campaigns this client buys.'),
