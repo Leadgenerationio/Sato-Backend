@@ -98,8 +98,8 @@ See [mcp-tools.md](./mcp-tools.md) for all of them with scope and inputs. It is 
 
 | Size | How |
 | --- | --- |
-| Up to 50 MB, public URL | `upload_asset` with `sourceUrl` |
-| 50 MB to 1 GB, public URL | `upload_asset` with `sourceUrl` answers `upload_incomplete` with an `uploadId`. Stato copies the file in the background. Call `complete_upload` with that `uploadId` until `status` is `ready`, then call `upload_asset` again with the `uploadId` |
+| Up to 50 MB (images up to 30 MB), public URL | `upload_asset` with `sourceUrl` |
+| Videos from 50 MB to 1 GB, public URL | `upload_asset` with `sourceUrl` answers `upload_incomplete` with an `uploadId`. Stato copies the file in the background. Call `complete_upload` with that `uploadId` until `status` is `ready`, then call `upload_asset` again with the `uploadId` |
 | Any file you hold, up to 30 MB (images) or 4 GB (videos) | `create_upload` (it says single `uploadUrl` or a list of parts), `PUT` the bytes, `complete_upload`, then `upload_asset` with the `uploadId` |
 
 The file type is read from the first bytes, not the name: an `.exe` renamed `.mp4` is refused. A `sourceUrl` must be a public address; Stato follows up to 3 redirects and checks every hop. Videos get a poster and a duration in the background (`fileStatus` goes from `processing` to `ready`).

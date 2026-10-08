@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { SNIFF_BYTES, sniffMedia } from './sniff-media.js';
+import { IMAGE_MAX_BYTES, SNIFF_BYTES, sniffMedia } from './sniff-media.js';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { lookup as dnsLookupCb } from 'node:dns';
 import { Agent, fetch as undiciFetch } from 'undici';
@@ -15,6 +15,7 @@ import { AppError, MediaSourceError } from './errors.js';
 // Same 50 MB ceiling as the presign route (upload.routes.ts).
 
 export const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
+const IMAGE_TOO_LARGE = 'File too large: images are up to 30 MB (videos up to 50 MB this way, more by URL copy or create_upload)';
 
 export interface FetchedMedia {
   buffer: Buffer;
@@ -162,14 +163,21 @@ export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps 
   if (!mediaType && !isGenericBinary(contentType)) throw new MediaSourceError(422, `sourceUrl must be an image or video, got "${contentType || 'unknown'}"`, 'unsupported_type');
   const declared = Number(res.headers.get('content-length') ?? 0);
   if (declared > MAX_MEDIA_BYTES) throw new AppError(413, 'File too large: max 50 MB');
+  if (mediaType === 'image' && declared > IMAGE_MAX_BYTES) throw new AppError(413, IMAGE_TOO_LARGE);
 
   const chunks: Buffer[] = [];
   let total = 0;
+  let checkedImage = false;
   if (res.body) {
     for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
       total += chunk.length;
       if (total > MAX_MEDIA_BYTES) throw new AppError(413, 'File too large: max 50 MB');
       chunks.push(Buffer.from(chunk));
+      // Images are up to 30 MB, whatever the header said: stop as soon as what has arrived is over that and is an image.
+      if (!checkedImage && total > IMAGE_MAX_BYTES) {
+        checkedImage = true;
+        if (sniffMedia(Buffer.concat(chunks).subarray(0, SNIFF_BYTES))?.mediaType === 'image') throw new AppError(413, IMAGE_TOO_LARGE);
+      }
     }
   }
   const buffer = Buffer.concat(chunks);

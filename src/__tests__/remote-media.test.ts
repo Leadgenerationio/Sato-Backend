@@ -52,3 +52,21 @@ describe('fetchRemoteMedia', () => {
     expect(seen?.get('user-agent')).toMatch(/Stato/);
   });
 });
+
+describe('fetchRemoteMedia image limit (spec: images up to 30 MB)', () => {
+  const pngOf = (n: number) => { const b = Buffer.alloc(n, 7); Buffer.from('89504e470d0a1a0a', 'hex').copy(b, 0); return b; };
+  const mp4Of = (n: number) => { const b = Buffer.alloc(n, 0); b.writeUInt32BE(24, 0); b.write('ftyp', 4, 'ascii'); b.write('isom', 8, 'ascii'); return b; };
+  const MiB = 1024 * 1024;
+  it('refuses a 31 MB image', async () => {
+    await expect(fetchRemoteMedia('https://cdn.example.com/a.png', { lookup: publicLookup, fetchImpl: fakeFetch(pngOf(31 * MiB), { 'content-type': 'image/png' }) }))
+      .rejects.toMatchObject({ statusCode: 413 });
+  });
+  it('refuses a big image that is served without a size or as a video type (the real type is read from the bytes)', async () => {
+    await expect(fetchRemoteMedia('https://cdn.example.com/a.mp4', { lookup: publicLookup, fetchImpl: fakeFetch(pngOf(40 * MiB), { 'content-type': 'video/mp4' }) }))
+      .rejects.toMatchObject({ statusCode: 413, message: expect.stringContaining('30 MB') });
+  });
+  it('still takes a 29 MB image and a 40 MB video', async () => {
+    expect((await fetchRemoteMedia('https://cdn.example.com/a.png', { lookup: publicLookup, fetchImpl: fakeFetch(pngOf(29 * MiB), { 'content-type': 'image/png' }) })).mediaType).toBe('image');
+    expect((await fetchRemoteMedia('https://cdn.example.com/a.mp4', { lookup: publicLookup, fetchImpl: fakeFetch(mp4Of(40 * MiB), { 'content-type': 'video/mp4' }) })).mediaType).toBe('video');
+  });
+});

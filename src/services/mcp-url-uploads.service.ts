@@ -6,7 +6,7 @@ import { abortMultipart, completeMultipart, createMultipart, uploadPart, type Co
 import { isR2Configured } from '../integrations/r2/r2-client.js';
 import { isGenericBinary, openPublicUrl, type RemoteMediaDeps } from '../utils/remote-media.js';
 import { MediaSourceError } from '../utils/errors.js';
-import { SNIFF_BYTES, sniffMedia } from '../utils/sniff-media.js';
+import { IMAGE_MAX_BYTES, SNIFF_BYTES, sniffMedia } from '../utils/sniff-media.js';
 import { ApiError } from '../utils/api-error.js';
 import { logger } from '../utils/logger.js';
 import type { Caller } from './ad-account-rules.service.js';
@@ -55,6 +55,11 @@ export async function startUrlUpload(caller: Caller, sourceUrl: string, deps: Re
   if (declared > URL_UPLOAD_MAX_BYTES) {
     throw new ApiError('file_too_large', `The file at sourceUrl is ${declared} bytes; a URL upload takes up to ${URL_UPLOAD_MAX_BYTES} bytes (1 GB).`, {
       hint: 'For anything over 1 GB use create_upload and send the file in parts (up to 4 GB).',
+    });
+  }
+  if (type.startsWith('image/') && declared > IMAGE_MAX_BYTES) {
+    throw new ApiError('file_too_large', `The image at sourceUrl is ${declared} bytes; images are up to ${IMAGE_MAX_BYTES} bytes (30 MB).`, {
+      hint: 'Make the image smaller. The 1 GB URL copy is for videos.',
     });
   }
   const name = decodeURIComponent(finalUrl.pathname.split('/').filter(Boolean).pop() ?? 'file');
@@ -109,6 +114,8 @@ export async function runUrlUpload(uploadId: string, sourceUrl: string, deps: Re
       const buf = Buffer.from(chunk);
       total += buf.length;
       if (total > URL_UPLOAD_MAX_BYTES) return await fail('The file is larger than 1 GB');
+      // Images are up to 30 MB whatever the headers said (only videos may be up to 1 GB by URL): the real type is known after the first bytes.
+      if (sniffed?.mediaType === 'image' && total > IMAGE_MAX_BYTES) return await fail('Images are up to 30 MB');
       hash.update(buf);
       if (headLen < SNIFF_BYTES) headLen += buf.copy(head, headLen, 0, Math.min(buf.length, SNIFF_BYTES - headLen));
       let offset = 0;
@@ -121,8 +128,10 @@ export async function runUrlUpload(uploadId: string, sourceUrl: string, deps: Re
       if (sniffed === undefined && headLen >= SNIFF_BYTES) {
         sniffed = sniffMedia(head);
         if (!sniffed) return await fail('The file content is not a jpg, png, webp, gif, mp4 or mov, whatever its name says');
+        if (sniffed.mediaType === 'image' && total > IMAGE_MAX_BYTES) return await fail('Images are up to 30 MB');
       }
     }
+    if (sniffed?.mediaType === 'image' && total > IMAGE_MAX_BYTES) return await fail('Images are up to 30 MB');
     if (sniffed === undefined) {
       sniffed = sniffMedia(head.subarray(0, headLen));
       if (!sniffed) return await fail('The file content is not a jpg, png, webp, gif, mp4 or mov, whatever its name says');
