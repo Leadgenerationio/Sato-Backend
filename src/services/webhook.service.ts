@@ -218,37 +218,50 @@ export function registerWebhookSubscriber(): void {
 
 export interface PostResult { status?: number; error?: string }
 
-/** POST with a hard timeout, no redirects, and the SSRF guard on the connection. */
-export function postSigned(rawUrl: string, body: string, headers: Record<string, string>, policy: UrlPolicy = defaultPolicy()): Promise<PostResult> {
+/**
+ * POST with a hard TOTAL deadline (lookup, connect, TLS, the request and the answer's status line), no redirects, and the
+ * SSRF guard on the connection. `timeout` on the request is only an idle timer that every byte resets, so an endpoint
+ * that drips bytes could hold a delivery for minutes; the deadline below cannot be reset. The answer is the status line:
+ * as soon as it arrives the result is known and the rest of the body is dropped (it is never stored).
+ */
+export function postSigned(rawUrl: string, body: string, headers: Record<string, string>, policy: UrlPolicy = defaultPolicy(), timeoutMs: number = REQUEST_TIMEOUT_MS): Promise<PostResult> {
   return new Promise((resolve) => {
+    let settled = false;
+    let deadline: NodeJS.Timeout | undefined;
+    const settle = (r: PostResult) => {
+      if (settled) return;
+      settled = true;
+      if (deadline) clearTimeout(deadline);
+      resolve(r);
+    };
     let url: URL;
     try {
       url = new URL(rawUrl);
     } catch {
-      return resolve({ error: 'Invalid URL' });
+      return settle({ error: 'Invalid URL' });
     }
     if (url.protocol !== 'https:' && !(url.protocol === 'http:' && !policy.production)) {
-      return resolve({ error: 'Webhook addresses must use https' });
+      return settle({ error: 'Webhook addresses must use https' });
     }
     // Node skips `lookup` for IP-literal hosts, so check those here.
     const host = url.hostname.replace(/^\[|\]$/g, '');
-    if (isIP(host) && isBlockedAddress(host, policy)) return resolve({ error: `Blocked webhook destination ${host}` });
+    if (isIP(host) && isBlockedAddress(host, policy)) return settle({ error: `Blocked webhook destination ${host}` });
     const mod = url.protocol === 'https:' ? https : http;
     const req = mod.request(url, {
       method: 'POST',
       headers: { ...headers, 'Content-Length': Buffer.byteLength(body).toString() },
-      timeout: REQUEST_TIMEOUT_MS,
+      timeout: timeoutMs,
       lookup: guardedLookup(policy) as unknown as typeof import('node:dns').lookup,
     }, (res) => {
-      // Drain (bounded) so the socket is released; the body isn't stored.
-      let seen = 0;
-      res.on('data', (chunk: Buffer) => { seen += chunk.length; if (seen > 64 * 1024) res.destroy(); });
-      res.on('end', () => resolve({ status: res.statusCode }));
-      res.on('close', () => resolve({ status: res.statusCode }));
-      res.on('error', () => resolve({ status: res.statusCode }));
+      settle({ status: res.statusCode });
+      res.destroy(); // the body is not stored; do not wait for a slow one
     });
-    req.on('timeout', () => req.destroy(new Error(`No response within ${REQUEST_TIMEOUT_MS / 1000}s`)));
-    req.on('error', (err) => resolve({ error: err.message }));
+    deadline = setTimeout(() => {
+      settle({ error: `No response within ${timeoutMs / 1000}s` });
+      req.destroy();
+    }, timeoutMs);
+    req.on('timeout', () => req.destroy(new Error(`No response within ${timeoutMs / 1000}s`)));
+    req.on('error', (err) => settle({ error: err.message }));
     req.end(body);
   });
 }
