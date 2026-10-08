@@ -10,12 +10,23 @@ import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { creatives } from '../db/schema/creatives.js';
 import { landingPages } from '../db/schema/landing-pages.js';
 import { domainEvents, type DomainEventPayload } from '../services/events.js';
+import { uploadFile, deleteFile } from '../integrations/r2/r2-client.js';
 
 // Creative library (Sam feedback round 1, M2): creatives filed under a client,
 // found from the ad account, deduped, with landing pages as their own records.
 
 const BIZ = '26d6b2b4-c867-460e-8473-eca2b1ffd232';
 const tag = `m2-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+
+// The library checks that a registered r2Key really exists in storage, so when storage is configured (a local run with moto, or
+// the real bucket) these tests put real files at the keys they register. With no storage configured (R2 mock mode) the puts
+// are skipped by uploadFile and the check is skipped by the service, so the tests pass in both setups.
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==', 'base64');
+const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom'), Buffer.from([0, 0, 2, 0]), Buffer.from('isomiso2'), Buffer.from(`lib-${tag}`)]);
+const SEEDED: Array<{ key: string; body: Buffer; contentType: string }> = [
+  ...[1, 2, 3, 4, 5].map((n) => ({ key: `${tag}-${n}.png`, body: PNG, contentType: 'image/png' })),
+  { key: `${tag}-v.mp4`, body: MP4, contentType: 'video/mp4' },
+];
 
 let owner: string;
 let finance: string;
@@ -31,6 +42,7 @@ async function login(email: string, password: string): Promise<string> {
 const auth = (t: string) => ({ Authorization: `Bearer ${t}` });
 
 beforeAll(async () => {
+  await Promise.all(SEEDED.map((f) => uploadFile({ folder: 'creatives', key: f.key, body: f.body, contentType: f.contentType })));
   [owner, finance] = await Promise.all([login('owner@stato.app', 'owner123'), login('finance@stato.app', 'finance123')]);
   const [a, b, s] = await db.insert(clients).values([
     { businessId: BIZ, companyName: `Yash Test Buyer A ${tag}`, status: 'active' },
@@ -46,6 +58,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await Promise.all(SEEDED.map((f) => deleteFile('creatives', f.key).catch(() => undefined)));
   const ids = [buyerA, buyerB, solo];
   await db.delete(creatives).where(inArray(creatives.clientId, ids));
   await db.delete(creatives).where(eq(creatives.campaignId, shared));
