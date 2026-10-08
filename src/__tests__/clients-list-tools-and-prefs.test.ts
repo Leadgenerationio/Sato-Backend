@@ -243,6 +243,7 @@ describe('S14 / N2 / S12 — HTTP', () => {
     const auth = { Authorization: `Bearer ${ownerToken}` };
     const statsBefore = await request(app).get('/api/v1/dashboard/stats').set(auth);
     const pnlBefore = await request(app).get('/api/v1/reports/pnl-summary?days=30').set(auth);
+    const overviewBefore = await request(app).get('/api/v1/reports/financial-overview').set(auth);
     const recent = new Date(Date.now() - 2 * 86_400_000);
     await makePaid(cId, 'EUR', '34860.00', { invoiceDate: recent, dueDate: recent, xeroInvoiceId: `xero-${tag}-eur` });
 
@@ -262,7 +263,15 @@ describe('S14 / N2 / S12 — HTTP', () => {
 
     const overview = await request(app).get('/api/v1/reports/financial-overview').set(auth);
     expect(overview.status).toBe(200);
-    const withEur = overview.body.data.report.filter((r: { otherCurrencyRevenue: Record<string, number> }) => (r.otherCurrencyRevenue?.EUR ?? 0) >= 34860);
-    expect(withEur.length).toBe(1);
+    // Compare with the same report taken before this test's invoice, so EUR invoices already in the database (other tests, real
+    // data in a shared test database) cannot change the answer: exactly one month gains exactly the new EUR, and no month's GBP
+    // revenue moves.
+    type Month = { revenue: number; otherCurrencyRevenue: Record<string, number> };
+    const before: Month[] = overviewBefore.body.data.report;
+    const after: Month[] = overview.body.data.report;
+    expect(after.length).toBe(before.length);
+    const eurGain = after.map((m, i) => (m.otherCurrencyRevenue?.EUR ?? 0) - (before[i]!.otherCurrencyRevenue?.EUR ?? 0));
+    expect(eurGain.filter((g) => g !== 0)).toEqual([34860]);
+    expect(after.map((m) => m.revenue)).toEqual(before.map((m) => m.revenue));
   });
 });
