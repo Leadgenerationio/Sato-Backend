@@ -308,6 +308,36 @@ describe('storage is bounded', () => {
     await db.insert(uploads).values(rows);
     await expect(createUpload({ businessId: otherBiz, userId: null, keyId: keyIds[0]! }, { filename: 'x.jpg', contentType: 'image/jpeg', sizeBytes: 10 })).rejects.toMatchObject({ code: 'rate_limited' });
   });
+  it("the sweeper never removes the file of an upload a live creative already points at (filing failed halfway)", async () => {
+    const file = jpeg(5000, 'halfway');
+    const up = await upload(file);
+    await call(key, 'complete_upload', { uploadId: up.uploadId });
+    const [row] = await db.select().from(uploads).where(eq(uploads.id, up.uploadId));
+    // the creative was made from this file, but the upload was never marked used
+    const [cr] = await db.insert(creatives).values({ name: `Yash HARD halfway ${tag}`, fileUrl: `r2://stato/creatives/${row!.r2Key}`, r2Key: row!.r2Key, type: 'image', clientId: clientA, source: 'mcp' }).returning();
+    try {
+      await db.update(uploads).set({ updatedAt: new Date(Date.now() - 25 * 60 * 60 * 1000) }).where(eq(uploads.id, up.uploadId));
+      await sweepUploads();
+      expect(await objectExists('creatives', row!.r2Key)).toBe(true); // the creative's file is still there
+    } finally {
+      await db.delete(creatives).where(eq(creatives.id, cr!.id));
+      await db.update(uploads).set({ status: 'failed' }).where(eq(uploads.id, up.uploadId));
+      await r2.deleteFile('creatives', row!.r2Key).catch(() => undefined);
+    }
+  });
+  it('the sweeper does not fail an upload that is still waiting in the queue, but fails one that is not', async () => {
+    const file = jpeg(5000, 'queued');
+    const up = await upload(file);
+    await call(key, 'complete_upload', { uploadId: up.uploadId });
+    const [row] = await db.select().from(uploads).where(eq(uploads.id, up.uploadId));
+    await db.update(uploads).set({ status: 'processing', updatedAt: new Date(Date.now() - 60 * 60 * 1000) }).where(eq(uploads.id, up.uploadId));
+    await sweepUploads(new Date(), { queuedUploadIds: async () => new Set([up.uploadId]) });
+    expect((await db.select().from(uploads).where(eq(uploads.id, up.uploadId)))[0]).toMatchObject({ status: 'processing' });
+    expect(await objectExists('creatives', row!.r2Key)).toBe(true);
+    await sweepUploads(new Date(), { queuedUploadIds: async () => new Set() });
+    expect((await db.select().from(uploads).where(eq(uploads.id, up.uploadId)))[0]).toMatchObject({ status: 'failed', error: 'Processing timed out' });
+    expect(await objectExists('creatives', row!.r2Key)).toBe(false);
+  });
   it('the sweeper removes a ready upload nobody used, and settles a stuck video as ready', async () => {
     const file = jpeg(5000, 'unused');
     const up = await upload(file);
