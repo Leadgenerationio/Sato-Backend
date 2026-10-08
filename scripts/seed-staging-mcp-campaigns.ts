@@ -11,12 +11,17 @@
  * It refuses to run unless --host names the host this DATABASE_URL really points
  * at (so a production URL cannot be used by mistake: you have to type its host
  * on purpose), and when the client does not exist. Never prints the connection string.
+ *
+ * Add --dummy-client to test before Sam has created his client: it creates (once) a client named
+ * "Yash MCP TEST (dummy) - DO NOT BILL" in the first business and seeds the campaigns on that one.
+ * Sam's real client is never created or touched by this flag.
  */
 
 import 'dotenv/config';
 import postgres from 'postgres';
 
 const CLIENT_NAME = 'MCP TEST - DO NOT BILL';
+const DUMMY_CLIENT_NAME = 'Yash MCP TEST (dummy) - DO NOT BILL';
 const CAMPAIGNS = [
   { leadbyteId: 'MCPTEST-1', name: 'MCP TEST - Solar', vertical: 'Solar' },
   { leadbyteId: 'MCPTEST-2', name: 'MCP TEST - Boilers', vertical: 'Boilers' },
@@ -37,9 +42,18 @@ async function main() {
   }
   const sql = postgres(url, { max: 1 });
   try {
-    const [client] = await sql<{ id: string }[]>`select id from clients where company_name = ${CLIENT_NAME} limit 1`;
+    const dummy = process.argv.includes('--dummy-client');
+    const name = dummy ? DUMMY_CLIENT_NAME : CLIENT_NAME;
+    let [client] = await sql<{ id: string }[]>`select id from clients where company_name = ${name} limit 1`;
+    if (!client && dummy) {
+      const [biz] = await sql<{ id: string }[]>`select id from businesses order by created_at limit 1`;
+      if (!biz) { console.error('No business exists to attach the dummy client to.'); process.exit(2); }
+      [client] = await sql<{ id: string }[]>`
+        insert into clients (business_id, company_name, status) values (${biz.id}, ${name}, 'active') returning id`;
+      console.log(`created client "${name}"`);
+    }
     if (!client) {
-      console.error(`No client named "${CLIENT_NAME}" yet. Create it in the portal first, then run this again.`);
+      console.error(`No client named "${CLIENT_NAME}" yet. Create it in the portal first (or pass --dummy-client to test with a dummy one), then run this again.`);
       process.exit(2);
     }
     for (const c of CAMPAIGNS) {
