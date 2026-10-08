@@ -15,7 +15,7 @@ Revoke it in the same screen. A revoked key stops working at once (the next call
 
 ## 2. Point the assistant at Stato
 
-- **Endpoint:** `https://<your Stato API host>/mcp` (staging: `https://sato-backend-staging-staging.up.railway.app/mcp`)
+- **Endpoint:** `https://<your Stato API host>/mcp`
 - **Auth:** `Authorization: Bearer stk_...` (the header `X-API-Key: stk_...` also works)
 - **Transport:** Streamable HTTP, stateless (POST only)
 - **Optional:** `X-Stato-Agent: <bot name>` so the Activity screen names the bot

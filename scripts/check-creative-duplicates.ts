@@ -1,4 +1,5 @@
 /**
+ * @runs-in-image (run inside the production container: only files the Dockerfile copies may be imported; see src/__tests__/scripts-in-image.test.ts)
  * Read-only: lists live creatives that share (client, file hash). Run it before creating the unique index.
  *   npx tsx scripts/check-creative-duplicates.ts [--json]
  * Exit code 0 = none, 1 = duplicates found.
