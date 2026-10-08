@@ -16,11 +16,14 @@ function drainOrClose(res: Response) {
  * ending a short file as if it were whole would be silent data loss, and without the log nobody would know it happened.
  */
 export async function streamCsv(res: Response, chunks: AsyncIterable<string>, what = 'CSV export'): Promise<void> {
-  res.write('﻿');
+  res.write('\uFEFF');
   try {
     for await (const chunk of chunks) {
       if (res.destroyed) return;
-      if (!res.write(chunk)) await drainOrClose(res);
+      if (!res.write(chunk)) {
+        await drainOrClose(res);
+        if (res.destroyed) return; // the client left while we waited: do not pull another chunk (another database page)
+      }
     }
     res.end();
   } catch (err) {
