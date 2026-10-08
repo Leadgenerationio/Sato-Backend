@@ -24,7 +24,7 @@ describe('streamCsv', () => {
     const app = appWith(async function* () { yield 'a,b\r\n'; yield '1,2\r\n'; yield '3,4\r\n'; });
     const res = await request(app).get('/x.csv').buffer(true).parse((r, cb) => { let s = ''; r.setEncoding('utf8'); r.on('data', (c) => (s += c)); r.on('end', () => cb(null, s)); });
     expect(res.status).toBe(200);
-    expect(res.body).toBe('﻿a,b\r\n1,2\r\n3,4\r\n');
+    expect(res.body).toBe('\uFEFFa,b\r\n1,2\r\n3,4\r\n');
   });
 
   it('a failure after the headers are sent is LOGGED and cuts the download short instead of ending it as if complete', async () => {
@@ -51,9 +51,12 @@ describe('streamCsv', () => {
     await new Promise<void>((r) => server.listen(0, r));
     const port = (server.address() as { port: number }).port;
     await new Promise<void>((resolve) => {
-      const req = http.get({ port, path: '/x.csv' }, (res) => { res.once('data', () => { req.destroy(); setTimeout(resolve, 400); }); });
+      const req = http.get({ port, path: '/x.csv' }, (res) => { res.once('data', () => { req.destroy(); resolve(); }); });
       req.on('error', () => undefined);
     });
+    // wait for the event itself (source closed), not a fixed sleep; 10s is only the failure bound
+    const deadline = Date.now() + 10_000;
+    while (!closed && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
     server.close();
     expect(produced).toBeLessThan(1000); // it did not keep generating the whole file for a reader that left
     expect(closed).toBe(true); // the source (the database paging) was closed, not left suspended
