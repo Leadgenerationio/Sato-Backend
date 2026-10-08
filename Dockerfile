@@ -24,6 +24,8 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./
 COPY --from=build /app/src/db/migrations ./src/db/migrations
+# The scripts copied below import this one file from src (the index name); see scripts/lib/creative-unique-index.ts.
+COPY --from=build /app/src/db/creative-index.ts ./src/db/creative-index.ts
 COPY --from=build /app/scripts ./scripts
 # The MCP setup guide, served by GET /api/v1/mcp-docs.
 COPY --from=build /app/docs ./docs
