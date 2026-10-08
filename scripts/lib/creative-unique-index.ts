@@ -1,5 +1,5 @@
 import type postgres from 'postgres';
-import { CREATIVE_CLIENT_SHA_INDEX } from '../../src/db/schema/creatives.js';
+import { CREATIVE_CLIENT_SHA_INDEX } from '../../src/db/creative-index.js';
 
 // The same file for the same client is one creative (spec v1.0 section 2.1). The code checks it; this makes the database
 // enforce it too. CREATE INDEX CONCURRENTLY cannot run inside a transaction, so it is a script, not a migration, and it
