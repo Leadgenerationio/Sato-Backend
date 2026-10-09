@@ -142,6 +142,19 @@ export async function seedDefaultUsers(): Promise<void> {
       .onConflictDoNothing();
   }
 
+  // The insert above never updates a row that already exists, so a database seeded before the primary-owner flag was
+  // set (staging was) kept it false for everyone, and then nobody could create an Owner user ("Only the primary owner
+  // can create Owner users"). If NO user is the primary owner, make the seed owner one. It touches nothing else (the
+  // password stays whatever it was changed to) and does nothing once any primary owner exists.
+  const [anyPrimary] = await db.select({ id: users.id }).from(users).where(eq(users.isPrimaryOwner, true)).limit(1);
+  if (!anyPrimary) {
+    const seedOwner = seed.find((u) => u.isPrimaryOwner);
+    if (seedOwner) {
+      const healed = await db.update(users).set({ isPrimaryOwner: true }).where(eq(users.email, seedOwner.email)).returning({ id: users.id });
+      if (healed.length) logger.warn({ email: seedOwner.email }, 'No primary owner existed: marked the seed owner as the primary owner');
+    }
+  }
+
   logger.info({ count: seed.length }, 'Seeded default users (dev only)');
 }
 
