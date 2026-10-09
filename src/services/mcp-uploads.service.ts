@@ -114,6 +114,13 @@ async function loadUpload(caller: Caller, uploadId: string): Promise<UploadRow> 
 async function discardObject(row: UploadRow): Promise<void> {
   try {
     if (row.multipartUploadId) await abortMultipart('creatives', row.r2Key, row.multipartUploadId);
+    // A live creative may already point at this file (filing it failed after the creative was made, before the upload
+    // was marked used): that file is the creative's now and is never removed here.
+    const [inUse] = await db.select({ id: creatives.id }).from(creatives).where(and(eq(creatives.r2Key, row.r2Key), eq(creatives.isDeleted, false))).limit(1);
+    if (inUse) {
+      logger.warn({ uploadId: row.id, creativeId: inUse.id }, 'Kept the file of an upload: a creative uses it');
+      return;
+    }
     await deleteFile('creatives', row.r2Key);
   } catch (err) {
     logger.warn({ err, uploadId: row.id }, 'Could not remove a refused upload from storage');
@@ -305,14 +312,33 @@ export async function failUploadById(uploadId: string, message: string): Promise
 }
 
 /** Run by a repeating job: expire abandoned uploads (aborting any multipart upload so no parts are kept) and fail jobs stuck on processing. */
-export async function sweepUploads(now: Date = new Date()): Promise<{ expired: number; failed: number }> {
+/** Uploads whose processing job is still in the queue (waiting, delayed or running): a backlog is not a stuck job. */
+async function queuedUploadIds(): Promise<Set<string>> {
+  const ids = new Set<string>();
+  try {
+    const { mediaQueue } = await import('../jobs/queue.js');
+    const jobs = await mediaQueue?.getJobs(['waiting', 'delayed', 'active', 'prioritized'], 0, 999) ?? [];
+    for (const j of jobs) { const id = (j?.data as { uploadId?: unknown } | undefined)?.uploadId; if (typeof id === 'string') ids.add(id); }
+  } catch (err) {
+    logger.warn({ err }, 'Could not read the media queue; treating no upload as queued');
+  }
+  return ids;
+}
+
+export async function sweepUploads(now: Date = new Date(), opts: { queuedUploadIds?: () => Promise<Set<string>> } = {}): Promise<{ expired: number; failed: number }> {
   const stale = await db.select().from(uploads).where(and(inArray(uploads.status, ['created', 'uploading']), lt(uploads.expiresAt, now)));
   for (const row of stale) {
     await discardObject(row);
     await db.update(uploads).set({ status: 'expired', error: 'Not completed in time', updatedAt: now }).where(and(eq(uploads.id, row.id), inArray(uploads.status, ['created', 'uploading'])));
   }
   const stuck = await db.select().from(uploads).where(and(eq(uploads.status, 'processing'), lt(uploads.updatedAt, new Date(now.getTime() - PROCESSING_TIMEOUT_MS))));
-  for (const row of stuck) await failUpload(row, 'Processing timed out');
+  const queued = stuck.length ? await (opts.queuedUploadIds ?? queuedUploadIds)() : new Set<string>();
+  let failed = 0;
+  for (const row of stuck) {
+    if (queued.has(row.id)) continue; // still waiting its turn: its clock has not started
+    await failUpload(row, 'Processing timed out');
+    failed++;
+  }
   // Verified but never used by upload_asset: do not keep the file forever.
   const unused = await db.select().from(uploads).where(and(eq(uploads.status, 'ready'), isNull(uploads.creativeId), lt(uploads.updatedAt, new Date(now.getTime() - READY_UNUSED_TTL_MS))));
   for (const row of unused) {
@@ -337,6 +363,6 @@ export async function sweepUploads(now: Date = new Date()): Promise<{ expired: n
   // A verified video whose poster job never ran or ran out of attempts: the file itself is checked, so settle it as ready.
   await db.update(creatives).set({ fileStatus: 'ready' })
     .where(and(eq(creatives.fileStatus, 'processing'), eq(creatives.source, 'mcp'), lt(creatives.updatedAt, new Date(now.getTime() - PROCESSING_TIMEOUT_MS))));
-  return { expired: stale.length + unused.length, failed: stuck.length };
+  return { expired: stale.length + unused.length, failed };
 }
 
