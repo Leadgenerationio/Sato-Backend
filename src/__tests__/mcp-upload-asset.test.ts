@@ -176,6 +176,19 @@ describe('upload_asset with adLink in the same call', () => {
     expect(again.structuredContent).toMatchObject({ result: 'updated', creativeId: r.structuredContent.creativeId });
     expect(await db.select().from(creatives).where(eq(creatives.platformCreativeId, `pc${tag}`))).toHaveLength(1);
   });
+  it("never takes over another client's asset through its platform creative ID (nothing changes, nothing saved)", async () => {
+    files.set(url('own-a'), { bytes: png('own-a'), type: 'image/png' });
+    files.set(url('own-b'), { bytes: png('own-b-different'), type: 'image/png' });
+    const mine = await call(key, base('own-a', { adLink: { adId: `adx${tag}`, platformCreativeId: `pcx${tag}` } }));
+    expect(mine.structuredContent.result).toBe('created');
+    const [before] = await db.select().from(creatives).where(eq(creatives.id, mine.structuredContent.creativeId));
+    // client B's account sends client A's Meta creative ID with its own file
+    const theirs = await call(key, base('own-b', { platformAccountId: `act_${ACC}2`, name: `Yash UP stolen ${tag}`, adLink: { adId: `ady${tag}`, platformCreativeId: `pcx${tag}` } }));
+    expect(theirs.isError).toBe(true);
+    const [after] = await db.select().from(creatives).where(eq(creatives.id, before!.id));
+    expect(after).toMatchObject({ clientId: clientA, campaignId: before!.campaignId, name: before!.name, r2Key: before!.r2Key, sha256: before!.sha256 });
+    expect(await db.select().from(creatives).where(eq(creatives.platformCreativeId, `pcx${tag}`))).toHaveLength(1);
+  });
   it('keeps the asset when the ad is already linked elsewhere, and says so', async () => {
     files.set(url('ad2'), { bytes: png('ad2'), type: 'image/png' });
     const r = await call(key, base('ad2', { adLink: { adId: `ad${tag}`, platformCreativeId: `pc2${tag}` } }));

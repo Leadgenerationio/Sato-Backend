@@ -503,6 +503,11 @@ export async function upsertPlatformCreative(
     if (existing && !(await creativeBelongsToBusiness(existing, businessId))) {
       throw new AppError(409, 'This platform creative id is already registered to another business');
     }
+    // The same rule as the copy path (creative-copy.service): another client's creative inside this business is never
+    // overwritten here. Moving an asset between clients is update_asset with confirmMove, not a side effect of an upload or a sync.
+    if (existing && existing.clientId && clientId && existing.clientId !== clientId) {
+      throw new AppError(409, 'This platform creative id is already registered to another client');
+    }
   }
   // With an r2Key the server hashes the stored object below and dedupes on
   // that instead of the client-supplied hash.
