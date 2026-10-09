@@ -55,16 +55,23 @@ export function isApiKeyRequest(req: Request): boolean {
 }
 
 /**
- * The per-IP limit for people using the portal. Key traffic is limited per key instead (120 a minute, apiKeyRateLimit):
- * this per-IP cap works out at 100 a minute, so a bot allowed 120 a minute would have been stopped by it after about
- * 12 minutes, and several bots behind one address would share it.
+ * Only /mcp is exempt from the per-IP limit below: it takes API keys only, and every call there is limited per key
+ * (120 a minute, apiKeyRateLimit). Anywhere else a key-shaped header proves nothing (any junk value would do), so
+ * those routes keep the per-IP limit whatever headers they carry.
+ */
+export const isKeyOnlyRoute = (req: Request): boolean => { const path = req.originalUrl.split('?')[0]!; return path === '/mcp' || path === '/mcp/'; };
+
+/**
+ * The per-IP limit for people using the portal. The 1,500 per 15 minutes works out at 100 a minute, so a bot allowed
+ * 120 a minute on /mcp would have been stopped by it after about 12 minutes, and several bots behind one address
+ * would share it; /mcp is therefore limited per key instead.
  */
 export const createGeneralLimiter = (max: number = GENERAL_LIMIT_MAX) => rateLimit({
   windowMs: RATE_LIMIT_WINDOW_MS,
   max,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: isApiKeyRequest,
+  skip: (req) => isKeyOnlyRoute(req) && isApiKeyRequest(req),
   handler: rateLimitedHandler('Too many requests, please try again later', 'Wait retryAfter seconds, then try again.'),
 });
 export const generalLimiter = createGeneralLimiter();

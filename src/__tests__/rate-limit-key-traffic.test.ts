@@ -14,7 +14,8 @@ function appWith(general: number, failures: number) {
   app.set('trust proxy', false);
   app.use(createGeneralLimiter(general));
   app.use(createKeyFailureLimiter(failures));
-  app.post('/ok', (_req, res) => { res.json({ ok: true }); });
+  app.post('/mcp', (_req, res) => { res.json({ ok: true }); });
+  app.post('/other', (_req, res) => { res.json({ ok: true }); });
   app.post('/refused', (_req, res) => { res.status(401).json({ no: true }); });
   app.post('/missing', (_req, res) => { res.status(404).json({ no: true }); });
   return app;
@@ -33,17 +34,24 @@ describe('per-IP limit and API-key traffic', () => {
   });
   it('a bot sending more calls than the per-IP cap is not stopped by it; a portal user still is', async () => {
     const app = appWith(5, 100);
-    for (let i = 0; i < 20; i++) expect((await request(app).post('/ok').set('Authorization', KEY)).status).toBe(200);
-    for (let i = 0; i < 20; i++) expect((await request(app).post('/ok').set('X-API-Key', 'stk_abc')).status).toBe(200);
-    for (let i = 0; i < 5; i++) expect((await request(app).post('/ok').set('Authorization', 'Bearer jwt.token.here')).status).toBe(200);
-    const stopped = await request(app).post('/ok').set('Authorization', 'Bearer jwt.token.here');
+    for (let i = 0; i < 20; i++) expect((await request(app).post('/mcp').set('Authorization', KEY)).status).toBe(200);
+    for (let i = 0; i < 20; i++) expect((await request(app).post('/mcp?x=1').set('X-API-Key', 'stk_abc')).status).toBe(200);
+    for (let i = 0; i < 5; i++) expect((await request(app).post('/other').set('Authorization', 'Bearer jwt.token.here')).status).toBe(200);
+    const stopped = await request(app).post('/other').set('Authorization', 'Bearer jwt.token.here');
     expect(stopped.status).toBe(429);
     expect(stopped.body).toMatchObject({ code: 'rate_limited', retryable: true });
+  });
+  it('a junk key-shaped header does NOT lift the per-IP cap anywhere but /mcp (review of #117)', async () => {
+    const app = appWith(4, 1000);
+    for (let i = 0; i < 4; i++) expect((await request(app).post('/other').set('Authorization', KEY)).status).toBe(200);
+    const blocked = await request(app).post('/other').set('X-API-Key', 'junk');
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.code).toBe('rate_limited');
   });
   it('wrong-key guessing is stopped per IP, but answers like not_found never count', async () => {
     const app = appWith(1000, 3);
     for (let i = 0; i < 50; i++) expect((await request(app).post('/missing').set('Authorization', KEY)).status).toBe(404);
-    for (let i = 0; i < 50; i++) expect((await request(app).post('/ok').set('Authorization', KEY)).status).toBe(200);
+    for (let i = 0; i < 50; i++) expect((await request(app).post('/mcp').set('Authorization', KEY)).status).toBe(200);
     for (let i = 0; i < 3; i++) expect((await request(app).post('/refused').set('Authorization', KEY)).status).toBe(401);
     const guessing = await request(app).post('/refused').set('Authorization', KEY);
     expect(guessing.status).toBe(429);
