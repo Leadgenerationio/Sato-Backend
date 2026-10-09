@@ -67,3 +67,42 @@ describe('connect-time guard', () => {
     expect(r.error).toMatch(/https/);
   });
 });
+
+// One slow endpoint must not hold a delivery slot: the deadline is TOTAL, and bytes that keep trickling in do not extend it.
+describe('postSigned deadline', () => {
+  const DEVP = { production: false };
+  it('gives up on an endpoint that trickles its answer headers, within the deadline', async () => {
+    const { createServer } = await import('node:net');
+    const server = createServer((sock) => {
+      sock.on('data', () => undefined);
+      sock.write('HTTP/1.1 200 OK\r\n'); // a status line, then headers that never end
+      const t = setInterval(() => sock.write('X-Pad: a\r\n'), 50); // never finishes the headers; each byte resets an idle timer
+      sock.on('close', () => clearInterval(t));
+      sock.on('error', () => undefined);
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    const t0 = Date.now();
+    const r = await postSigned(`http://127.0.0.1:${port}/hook`, '{}', {}, DEVP, 500);
+    const took = Date.now() - t0;
+    server.close();
+    expect(r.error).toMatch(/No response within/);
+    expect(took).toBeLessThan(2000);
+  });
+  it('a 2xx status line is the answer: a slow body is not waited for', async () => {
+    const http = await import('node:http');
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      const t = setInterval(() => res.write('x'), 50);
+      res.on('close', () => clearInterval(t));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    const t0 = Date.now();
+    const r = await postSigned(`http://127.0.0.1:${port}/hook`, '{}', {}, DEVP, 5000);
+    const took = Date.now() - t0;
+    server.close();
+    expect(r).toEqual({ status: 200 });
+    expect(took).toBeLessThan(1500);
+  });
+});
