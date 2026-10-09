@@ -18,6 +18,8 @@ export const REDACTED = '[redacted]';
 /** Field names whose values are never stored. */
 const SECRET_FIELD = /pass(word)?|secret|token|api[-_]?key|authori[sz]ation|signature|cookie|credential|private[-_]?key/i;
 /** Query parameters that make a URL a credential (presigned R2/S3/GCS links, signed webhooks, key-in-URL APIs). */
+/** Extra query-parameter names that are credentials (not field names: a field called `code` is an error code). */
+const QUERY_SECRET = /^(pwd|code|session|sessionid|sid|otp|passwd)$/i;
 const SIGNED_PARAM = /^(x-amz-.*|x-goog-.*|sig|signature|token|access_token|id_token|key|apikey|api_key|auth|jwt|expires|googleaccessid|client_secret)$/i;
 /** A Stato key anywhere in a string: a pasted note, `Bearer stk_…`, a URL. */
 const KEY_ANYWHERE = new RegExp(`${KEY_MARKER}[A-Za-z0-9_-]{20,}`, 'g');
@@ -34,9 +36,9 @@ function redactString(s: string): string {
     try {
       const u = new URL(s);
       // user:password@host is a credential too, and the audit rows are kept for 12 months.
-      if (u.username || u.password) { u.username = REDACTED; u.password = ''; }
+      if (u.username || u.password) { u.username = 'redacted'; u.password = ''; }
       // A query parameter is a credential when its NAME looks like one (password, secret, refresh_token, ...) or is a known signed-URL one.
-      for (const name of [...u.searchParams.keys()]) if (SIGNED_PARAM.test(name) || SECRET_FIELD.test(name)) u.searchParams.set(name, REDACTED);
+      for (const name of [...u.searchParams.keys()]) if (SIGNED_PARAM.test(name) || SECRET_FIELD.test(name) || QUERY_SECRET.test(name)) u.searchParams.set(name, REDACTED);
       s = u.toString();
     } catch { /* not a URL after all */ }
   }

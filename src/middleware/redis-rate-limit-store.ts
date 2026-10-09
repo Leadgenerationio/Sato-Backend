@@ -48,6 +48,10 @@ export class RedisRateLimitStore implements Store {
    */
   private readonly fallback = new Map<string, { hits: number; resetAt: number }>();
   private downSince: number | null = null;
+  /** While Redis is failing, skip it for this long before trying again, so a hung Redis does not cost every request its timeout. */
+  private skipRedisUntil = 0;
+  private static readonly COOLDOWN_MS = 5_000;
+  private static readonly MAX_LOCAL_KEYS = 50_000;
 
   constructor(private readonly client: Redis, prefix = 'rl:') {
     this.prefix = prefix;
@@ -60,6 +64,8 @@ export class RedisRateLimitStore implements Store {
   private localIncrement(key: string): IncrementResponse {
     const now = Date.now();
     if (this.fallback.size > 10_000) for (const [k, e] of this.fallback) if (e.resetAt <= now) this.fallback.delete(k);
+    // A burst of distinct live keys cannot grow the map without limit: past the cap the oldest entries go first.
+    while (this.fallback.size >= RedisRateLimitStore.MAX_LOCAL_KEYS) { const oldest = this.fallback.keys().next().value; if (oldest === undefined) break; this.fallback.delete(oldest); }
     let e = this.fallback.get(key);
     if (!e || e.resetAt <= now) { e = { hits: 0, resetAt: now + this.windowMs }; this.fallback.set(key, e); }
     e.hits += 1;
@@ -67,12 +73,14 @@ export class RedisRateLimitStore implements Store {
   }
 
   async increment(key: string): Promise<IncrementResponse> {
+    if (Date.now() < this.skipRedisUntil) return this.localIncrement(key);
     try {
       const res = await withTimeout(this.client.eval(INCR_SCRIPT, 1, this.prefix + key, String(this.windowMs))) as [number, number];
       if (!Array.isArray(res)) throw new Error('Unexpected Redis reply for rate-limit increment');
       this.downSince = null;
       return { totalHits: Number(res[0]), resetTime: new Date(Date.now() + Number(res[1])) };
     } catch (err) {
+      this.skipRedisUntil = Date.now() + RedisRateLimitStore.COOLDOWN_MS;
       if (this.downSince === null) {
         this.downSince = Date.now();
         logger.warn({ err: (err as Error).message }, 'Rate-limit Redis unavailable: counting per process until it is back');
@@ -84,18 +92,27 @@ export class RedisRateLimitStore implements Store {
   async decrement(key: string): Promise<void> {
     const e = this.fallback.get(key);
     if (e && e.hits > 0) e.hits -= 1;
+    if (Date.now() < this.skipRedisUntil) return;
     await withTimeout(this.client.eval(DECR_SCRIPT, 1, this.prefix + key)).catch(() => undefined);
   }
 
   async resetKey(key: string): Promise<void> {
     this.fallback.delete(key);
+    if (Date.now() < this.skipRedisUntil) return;
     await withTimeout(this.client.del(this.prefix + key)).catch(() => undefined);
   }
 
   async get(key: string): Promise<ClientRateLimitInfo | undefined> {
-    const k = this.prefix + key;
-    const [hits, ttl] = await withTimeout(Promise.all([this.client.get(k), this.client.pttl(k)]));
-    if (hits === null) return undefined;
-    return { totalHits: Number(hits), resetTime: new Date(Date.now() + Math.max(ttl, 0)) };
+    const local = this.fallback.get(key);
+    const fromLocal = (): ClientRateLimitInfo | undefined => (local && local.resetAt > Date.now() ? { totalHits: local.hits, resetTime: new Date(local.resetAt) } : undefined);
+    if (Date.now() < this.skipRedisUntil) return fromLocal();
+    try {
+      const k = this.prefix + key;
+      const [hits, ttl] = await withTimeout(Promise.all([this.client.get(k), this.client.pttl(k)]));
+      if (hits === null) return undefined;
+      return { totalHits: Number(hits), resetTime: new Date(Date.now() + Math.max(ttl, 0)) };
+    } catch {
+      return fromLocal();
+    }
   }
 }

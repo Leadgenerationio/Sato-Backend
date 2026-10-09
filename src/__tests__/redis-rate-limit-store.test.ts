@@ -111,4 +111,22 @@ describe('RedisRateLimitStore while Redis is down', () => {
     for (let i = 0; i < 5; i++) codes.push((await request(app).get('/')).status);
     expect(codes).toEqual([200, 200, 200, 429, 429]);
   });
+
+  it('after a failure it skips Redis for a cooldown, so a hung Redis does not cost every request its timeout', async () => {
+    let calls = 0;
+    const slow = { eval: async () => { calls++; throw new Error('timeout'); }, del: async () => undefined, get: async () => { calls++; throw new Error('timeout'); }, pttl: async () => 0 } as unknown as Redis;
+    const store = new RedisRateLimitStore(slow);
+    store.init({ windowMs: 60_000 } as never);
+    for (let i = 0; i < 20; i++) await store.increment('k');
+    expect(calls).toBe(1); // only the first call tried Redis
+    expect((await store.increment('k')).totalHits).toBe(21);
+  });
+
+  it('get() answers from the local count while Redis is down instead of throwing', async () => {
+    const store = new RedisRateLimitStore(deadRedis());
+    store.init({ windowMs: 60_000 } as never);
+    await store.increment('g'); await store.increment('g');
+    expect((await store.get('g'))?.totalHits).toBe(2);
+    expect(await store.get('never-seen')).toBeUndefined();
+  });
 });

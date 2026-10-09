@@ -253,6 +253,7 @@ export function postSigned(rawUrl: string, body: string, headers: Record<string,
       timeout: timeoutMs,
       lookup: guardedLookup(policy) as unknown as typeof import('node:dns').lookup,
     }, (res) => {
+      res.on('error', () => undefined); // an IncomingMessage 'error' with no listener would crash the process
       settle({ status: res.statusCode });
       res.destroy(); // the body is not stored; do not wait for a slow one
     });

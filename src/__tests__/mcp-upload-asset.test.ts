@@ -189,6 +189,18 @@ describe('upload_asset with adLink in the same call', () => {
     expect(after).toMatchObject({ clientId: clientA, campaignId: before!.campaignId, name: before!.name, r2Key: before!.r2Key, sha256: before!.sha256 });
     expect(await db.select().from(creatives).where(eq(creatives.platformCreativeId, `pcx${tag}`))).toHaveLength(1);
   });
+  it("a campaign-only call (no client, no account) cannot overwrite another client's creative either", async () => {
+    files.set(url('co-a'), { bytes: png('co-a'), type: 'image/png' });
+    files.set(url('co-b'), { bytes: png('co-b-different'), type: 'image/png' });
+    const mine = await call(key, base('co-a', { adLink: { adId: `adco${tag}`, platformCreativeId: `pcco${tag}` } }));
+    expect(mine.structuredContent.result).toBe('created');
+    const [before] = await db.select().from(creatives).where(eq(creatives.id, mine.structuredContent.creativeId));
+    const { upsertPlatformCreative } = await import('../services/creative-library.service.js');
+    await expect(upsertPlatformCreative({ businessId: BIZ, platform: 'meta', platformCreativeId: `pcco${tag}`, campaignId: c2, name: `Yash UP campaign-only ${tag}`, sourceUrl: url('co-b') } as never))
+      .rejects.toMatchObject({ statusCode: 409 });
+    const [after] = await db.select().from(creatives).where(eq(creatives.id, before!.id));
+    expect(after).toMatchObject({ clientId: before!.clientId, campaignId: before!.campaignId, name: before!.name, r2Key: before!.r2Key, sha256: before!.sha256 });
+  });
   it('keeps the asset when the ad is already linked elsewhere, and says so', async () => {
     files.set(url('ad2'), { bytes: png('ad2'), type: 'image/png' });
     const r = await call(key, base('ad2', { adLink: { adId: `ad${tag}`, platformCreativeId: `pc2${tag}` } }));
