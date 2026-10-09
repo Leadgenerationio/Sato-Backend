@@ -114,6 +114,21 @@ describe('refusals', () => {
     expect(await objectExists('creatives', row!.r2Key)).toBe(false);
     expect((await call(key, 'complete_upload', { uploadId })).structuredContent.code).toBe('upload_incomplete');
   }, 120_000);
+  it('a big image is refused: by its header at once, and by its real bytes when it claims to be a video (images are up to 30 MB)', async () => {
+    const png = (n: number) => { const b = Buffer.alloc(n, 3); Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').copy(b, 0); b.write(`big-${tag}`, 32); return b; };
+    files.set(u('huge.png'), { body: png(60 * MiB), type: 'image/png' });
+    const direct = await call(key, 'upload_asset', { sourceUrl: u('huge.png'), mediaType: 'image', platform: 'meta', platformAccountId: `act_44${tag}1` });
+    expect(direct.structuredContent.code).toBe('file_too_large');
+    files.set(u('liar.mp4'), { body: png(60 * MiB), type: 'video/mp4' }); // says video, is a PNG
+    const first = await upload('liar.mp4');
+    expect(first.structuredContent.code).toBe('upload_incomplete');
+    const uploadId = first.structuredContent.details.uploadId as string;
+    expect(await runUrlUpload(uploadId, u('liar.mp4'))).toBe('failed');
+    const [row] = await db.select().from(uploads).where(eq(uploads.id, uploadId));
+    expect(row).toMatchObject({ status: 'failed', multipartUploadId: null });
+    expect(row!.error).toContain('30 MB');
+    expect(await objectExists('creatives', row!.r2Key)).toBe(false);
+  }, 120_000);
   it('a page that is not media is unsupported_type', async () => {
     files.set(u('page.html'), { body: Buffer.from('<html></html>'), type: 'text/html' });
     expect((await upload('page.html')).structuredContent.code).toBe('unsupported_type');

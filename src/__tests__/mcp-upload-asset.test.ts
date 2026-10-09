@@ -236,8 +236,10 @@ describe('upload_asset refusals (test 11, the parts that run today)', () => {
     expect(await db.select().from(creatives).where(eq(creatives.name, `Yash UP big ${tag}`))).toHaveLength(0);
   });
   it('a file declared between 50 MB and 1 GB is copied in the background: upload_incomplete with an uploadId, nothing filed yet', async () => {
-    files.set(url('mid'), { bytes: png('mid'), type: 'image/png', length: String(60 * 1024 * 1024) });
-    const r = await call(key, base('mid'));
+    // a video: images are up to 30 MB, so only a video can be this big
+    const mp4 = Buffer.alloc(64, 0); mp4.writeUInt32BE(24, 0); mp4.write('ftyp', 4, 'ascii'); mp4.write('isom', 8, 'ascii');
+    files.set(url('mid'), { bytes: mp4, type: 'video/mp4', length: String(60 * 1024 * 1024) });
+    const r = await call(key, base('mid', { mediaType: 'video' }));
     expect(r.structuredContent).toMatchObject({ code: 'upload_incomplete', retryable: true });
     expect(r.structuredContent.details.uploadId).toBeTruthy();
     expect(await db.select().from(creatives).where(eq(creatives.name, `Yash UP mid ${tag}`))).toHaveLength(0);

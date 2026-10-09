@@ -13,14 +13,14 @@ export default defineTool({
   name: 'upload_asset',
   title: 'Add an image, video or ad copy to Stato',
   description:
-    'File an image, a video or a piece of ad copy under the right client and campaign. For ad copy only (no file) send mediaType "copy" with headline and/or bodyText and no sourceUrl or uploadId: it is kept as an asset like any other (approvals, ad links and history work the same), and the same copy for the same client returns "duplicate". For an image or video send either a public sourceUrl (up to 50 MB at once; a bigger file up to 1 GB is copied in the background, and this call answers upload_incomplete with an uploadId to poll with complete_upload) or an uploadId: for bigger files (up to 4 GB) call create_upload, send the file to the returned URLs, call complete_upload until status is ready, then call this with the uploadId. ' +
+    'File an image, a video or a piece of ad copy under the right client and campaign. For ad copy only (no file) send mediaType "copy" with headline and/or bodyText and no sourceUrl or uploadId: it is kept as an asset like any other (approvals, ad links and history work the same), and the same copy for the same client returns "duplicate". For an image or video send either a public sourceUrl (up to 50 MB at once; a bigger video up to 1 GB is copied in the background, and this call answers upload_incomplete with an uploadId to poll with complete_upload) or an uploadId: for bigger files (up to 4 GB) call create_upload, send the file to the returned URLs, call complete_upload until status is ready, then call this with the uploadId. ' +
     'Call find_client_by_ad_account first. Send platform and platformAccountId and Stato picks the client from the ad account; clientId is only a cross-check and a mismatch is rejected (account_client_mismatch) with nothing saved. ' +
     'An unlinked account is account_not_linked: stop and ask the owner. If the account feeds several campaigns you must send campaignId. ' +
     'Optionally send adLink to record the ad in the same call (the IDs the platform returned; all strings). ' +
     'Safe to repeat: the same file for the same client returns result "duplicate" with the existing creativeId; the same idempotencyKey replays the first answer for 24 hours. IDs are strings.',
   inputSchema: {
     mediaType: z.enum(['image', 'video', 'copy']).optional().describe('Required with sourceUrl. With uploadId it is read from the file. "copy" is ad copy with no file: send headline and/or bodyText.'),
-    sourceUrl: z.string().min(1).max(2000).optional().describe('Public http(s) URL of a file up to 50 MB. Private and internal addresses are blocked. Send this or uploadId.'),
+    sourceUrl: z.string().min(1).max(2000).optional().describe('Public http(s) URL of a file up to 50 MB (images up to 30 MB). Private and internal addresses are blocked. Send this or uploadId.'),
     uploadId: uuidShape().optional().describe('From create_upload, after complete_upload reports ready. Send this or sourceUrl.'),
     name: z.string().max(255).optional(),
     platform: z.string().max(50).optional().describe('meta, google, tiktok or taboola. With platformAccountId, the ad account decides the client.'),
