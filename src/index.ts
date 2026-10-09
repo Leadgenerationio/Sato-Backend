@@ -3,7 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { env } from './config/env.js';
 import { logger } from './utils/logger.js';
-import { generalLimiter } from './middleware/rate-limit.middleware.js';
+import { generalLimiter, keyFailureLimiter } from './middleware/rate-limit.middleware.js';
 import { errorHandler } from './middleware/error.middleware.js';
 import { requestId } from './middleware/request-id.middleware.js';
 import { mcpRoutes } from './routes/mcp.routes.js';
@@ -98,6 +98,7 @@ app.use(express.json({ limit: '1mb' }));
 
 // Rate limiting
 app.use(generalLimiter);
+app.use(keyFailureLimiter);
 
 // Request logging
 app.use((req, _res, next) => {

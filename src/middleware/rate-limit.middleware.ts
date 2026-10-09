@@ -49,13 +49,49 @@ export const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 export const GENERAL_LIMIT_MAX = 1500;
 export const AUTH_LIMIT_MAX = 20;
 
-export const generalLimiter = rateLimit({
+/** A request that carries an API key (`X-API-Key`, or `Authorization: Bearer stk_…` as MCP clients send it). */
+export function isApiKeyRequest(req: Request): boolean {
+  return Boolean(req.get('x-api-key')) || /^Bearer\s+stk_/i.test(req.get('authorization') ?? '');
+}
+
+/**
+ * Only /mcp is exempt from the per-IP limit below: it takes API keys only, and every call there is limited per key
+ * (120 a minute, apiKeyRateLimit). Anywhere else a key-shaped header proves nothing (any junk value would do), so
+ * those routes keep the per-IP limit whatever headers they carry.
+ */
+export const isKeyOnlyRoute = (req: Request): boolean => { const path = req.originalUrl.split('?')[0]!; return path === '/mcp' || path === '/mcp/'; };
+
+/**
+ * The per-IP limit for people using the portal. The 1,500 per 15 minutes works out at 100 a minute, so a bot allowed
+ * 120 a minute on /mcp would have been stopped by it after about 12 minutes, and several bots behind one address
+ * would share it; /mcp is therefore limited per key instead.
+ */
+export const createGeneralLimiter = (max: number = GENERAL_LIMIT_MAX) => rateLimit({
   windowMs: RATE_LIMIT_WINDOW_MS,
-  max: GENERAL_LIMIT_MAX,
+  max,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => isKeyOnlyRoute(req) && isApiKeyRequest(req),
   handler: rateLimitedHandler('Too many requests, please try again later', 'Wait retryAfter seconds, then try again.'),
 });
+export const generalLimiter = createGeneralLimiter();
+
+/**
+ * What stands in for the per-IP limit on key traffic: guessing keys. Only calls refused as 401 (a key that is wrong,
+ * expired or revoked) count, so a busy, well-behaved bot is never slowed down by this.
+ */
+export const KEY_FAILURE_LIMIT_MAX = 300;
+export const createKeyFailureLimiter = (max: number = KEY_FAILURE_LIMIT_MAX) => rateLimit({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => !isApiKeyRequest(req),
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: (_req, res) => res.statusCode !== 401,
+  handler: rateLimitedHandler('Too many requests with a wrong API key, please try again later', 'Check the key (it may be revoked or expired), then wait retryAfter seconds.'),
+});
+export const keyFailureLimiter = createKeyFailureLimiter();
 
 export const authLimiter = rateLimit({
   windowMs: RATE_LIMIT_WINDOW_MS,
