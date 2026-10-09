@@ -69,6 +69,22 @@ describe('redaction', () => {
     expect(out.list).toEqual([{ secret: REDACTED }]);
   });
 
+  it('masks the password in user:pass@host URLs and secret-looking query parameters, and keeps the harmless ones', () => {
+    const out = redact({
+      a: 'https://alice:s3cr3tpw@files.example.com/video.mp4',
+      b: 'https://files.example.com/v.mp4?password=hunter2&refresh_token=rt-123&secret=abc&client_secret=cs&width=640&utm_campaign=ch',
+      c: 'https://bob@files.example.com/v.mp4?x=1',
+    }) as Record<string, string>;
+    expect(out.a).not.toContain('s3cr3tpw');
+    expect(out.a).not.toContain('alice');
+    expect(out.a).toContain('files.example.com/video.mp4');
+    for (const secret of ['hunter2', 'rt-123', '=abc', 'cs&']) expect(out.b).not.toContain(secret);
+    expect(out.b).toContain('width=640');
+    expect(out.b).toContain('utm_campaign=ch');
+    expect(out.c).not.toContain('bob');
+    expect(out.c).toContain('x=1');
+  });
+
   it('keeps the size of file bytes and long strings, not their content', () => {
     const base64 = 'A'.repeat(50_000);
     expect(redact(base64)).toBe('[50000 characters]');

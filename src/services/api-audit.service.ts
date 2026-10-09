@@ -30,10 +30,13 @@ const MAX_JSON_BYTES = 16 * 1024;
 function redactString(s: string): string {
   if (s.startsWith(KEY_MARKER)) return REDACTED;
   s = s.replace(KEY_ANYWHERE, REDACTED);
-  if (/^https?:\/\//i.test(s) && s.includes('?')) {
+  if (/^https?:\/\//i.test(s)) {
     try {
       const u = new URL(s);
-      for (const name of [...u.searchParams.keys()]) if (SIGNED_PARAM.test(name)) u.searchParams.set(name, REDACTED);
+      // user:password@host is a credential too, and the audit rows are kept for 12 months.
+      if (u.username || u.password) { u.username = REDACTED; u.password = ''; }
+      // A query parameter is a credential when its NAME looks like one (password, secret, refresh_token, ...) or is a known signed-URL one.
+      for (const name of [...u.searchParams.keys()]) if (SIGNED_PARAM.test(name) || SECRET_FIELD.test(name)) u.searchParams.set(name, REDACTED);
       s = u.toString();
     } catch { /* not a URL after all */ }
   }
