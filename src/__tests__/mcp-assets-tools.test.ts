@@ -96,6 +96,40 @@ describe('list_assets', () => {
   });
 });
 
+describe('list_assets paging while the bot links what it lists (Workflow B)', () => {
+  it('visits every unlinked asset exactly once even though each page is linked before the next is asked for', async () => {
+    const [cC] = await db.insert(clients).values({ businessId: BIZ, companyName: `Yash Test AST C ${tag}`, status: 'active' }).returning();
+    const acct = `act_23${tag}1`;
+    await request(app).post(`/api/v1/clients/${cC!.id}/ad-accounts`).set('X-API-Key', key).send({ platform: 'meta', accountId: acct, accountName: 'AST C' }).expect(201);
+    const made = await db.insert(creatives).values(Array.from({ length: 7 }, (_, n) => ({ name: `Yash AST page ${n} ${tag}`, fileUrl: 'x', type: 'image', clientId: cC!.id }))).returning();
+    const ids = made.map((m) => m.id);
+    try {
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      for (let guard = 0; guard < 10; guard++) {
+        const page = await call(key, 'list_assets', { clientId: cC!.id, hasAdLink: false, limit: 3, ...(cursor ? { cursor } : {}) });
+        const got = page.structuredContent.items.map((i: { creativeId: string }) => i.creativeId);
+        seen.push(...got);
+        for (const id of got) await call(key, 'link_ad_platform_ids', { creativeId: id, platform: 'meta', accountId: acct, adId: `pg${id.slice(0, 8)}${tag}` }); // links it, so it leaves the list
+        cursor = page.structuredContent.nextCursor ?? undefined;
+        if (!cursor) break;
+      }
+      expect(seen.sort()).toEqual([...ids].sort()); // none skipped, none twice
+      expect((await call(key, 'list_assets', { clientId: cC!.id, hasAdLink: false })).structuredContent.items).toEqual([]);
+    } finally {
+      await db.delete(creativeAdLinks).where(inArray(creativeAdLinks.creativeId, ids));
+      await db.delete(creatives).where(inArray(creatives.id, ids));
+      await db.delete(clientAdAccounts).where(eq(clientAdAccounts.clientId, cC!.id));
+      await db.delete(clients).where(eq(clients.id, cC!.id));
+    }
+  });
+  it('sorting by name keeps its place too, and a cursor from another sort is refused', async () => {
+    const p1 = await call(readKey, 'list_assets', { clientId: cA, limit: 1, sort: 'name' });
+    const wrong = await call(readKey, 'list_assets', { clientId: cA, limit: 1, cursor: p1.structuredContent.nextCursor });
+    expect(wrong.structuredContent.code).toBe('validation_failed');
+  });
+});
+
 describe('get_asset', () => {
   it('returns detail, a signed download link with the asked lifetime, ad links and approval status', async () => {
     const r = await call(readKey, 'get_asset', { creativeId: a1, downloadUrlMinutes: 1440 });

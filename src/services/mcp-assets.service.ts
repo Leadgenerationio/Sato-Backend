@@ -22,13 +22,22 @@ import { clientColumnInScope } from './key-client-scope.service.js';
 
 export interface Page<T> { items: T[]; nextCursor: string | null }
 
-function cursorOffset(cursor: string | undefined): number {
-  if (!cursor) return 0;
+const badCursor = () => new ApiError('validation_failed', 'cursor is not valid.', { fields: [{ field: 'cursor', message: 'Use the nextCursor from the previous page, unchanged' }] });
+
+/**
+ * The cursor is the sort key of the last row sent (not a row count), so the next page starts right after it even when
+ * the bot changes assets between pages: linking the assets of a "not yet linked" list removes them from that list, and
+ * a row offset would then skip the next 25 unseen assets.
+ */
+interface AssetCursor { s: 'created' | 'name'; k: string; i: string }
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function parseCursor(cursor: string | undefined, sort: 'created' | 'name'): AssetCursor | null {
+  if (!cursor) return null;
   try {
-    const o = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { o?: unknown };
-    if (typeof o.o === 'number' && Number.isInteger(o.o) && o.o >= 0) return o.o;
+    const c = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as Partial<AssetCursor>;
+    if (c.s === sort && typeof c.k === 'string' && c.k.length <= 300 && typeof c.i === 'string' && UUID_RE.test(c.i)) return c as AssetCursor;
   } catch { /* fall through */ }
-  throw new ApiError('validation_failed', 'cursor is not valid.', { fields: [{ field: 'cursor', message: 'Use the nextCursor from the previous page, unchanged' }] });
+  throw badCursor();
 }
 
 export interface AssetListItem {
@@ -53,7 +62,8 @@ export interface ListAssetsFilters {
 
 export async function listAssets(businessId: string, f: ListAssetsFilters): Promise<Page<AssetListItem>> {
   const limit = Math.min(100, Math.max(1, f.limit ?? 25));
-  const offset = cursorOffset(f.cursor);
+  const sort = f.sort === 'name' ? 'name' : 'created';
+  const after = parseCursor(f.cursor, sort);
   const where: SQL[] = [eq(creatives.isDeleted, false), creativeInBusiness(businessId)];
   if (!f.includeArchived) where.push(isNull(creatives.archivedAt));
   const inScope = clientColumnInScope(creatives.clientId); // a key limited to some clients lists only their assets
@@ -85,11 +95,19 @@ export async function listAssets(businessId: string, f: ListAssetsFilters): Prom
     const like = `%${f.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
     where.push(or(ilike(creatives.name, like), ilike(creatives.headline, like), ilike(creatives.bodyText, like), ilike(creatives.platformAdId, like), ilike(creatives.platformCreativeId, like))!);
   }
-  const order = f.sort === 'name' ? [asc(creatives.name), asc(creatives.id)] : [desc(creatives.createdAt), desc(creatives.id)];
+  // Rows with no creation time sort as the oldest, so the sort key is never null and the cursor can compare on it.
+  const createdKey = sql`coalesce(${creatives.createdAt}, 'epoch'::timestamp)`;
+  const order = sort === 'name' ? [asc(creatives.name), asc(creatives.id)] : [desc(createdKey), desc(creatives.id)];
+  if (after) {
+    where.push(sort === 'name'
+      ? sql`(${creatives.name}, ${creatives.id}) > (${after.k}, ${after.i}::uuid)`
+      : sql`(${createdKey}, ${creatives.id}) < (${after.k}::timestamp, ${after.i}::uuid)`);
+  }
 
   const rows = await db
     .select({
       cr: creatives,
+      sortKey: sort === 'name' ? sql<string>`${creatives.name}` : sql<string>`${createdKey}::text`,
       clientName: clients.companyName,
       campaignName: campaigns.name,
       // Written out by hand: inside a select list Drizzle drops the table name.
@@ -98,7 +116,7 @@ export async function listAssets(businessId: string, f: ListAssetsFilters): Prom
     .from(creatives)
     .leftJoin(clients, eq(clients.id, creatives.clientId))
     .leftJoin(campaigns, eq(campaigns.id, creatives.campaignId))
-    .where(and(...where)).orderBy(...order).limit(limit + 1).offset(offset);
+    .where(and(...where)).orderBy(...order).limit(limit + 1);
 
   const page = rows.slice(0, limit);
   const items = await Promise.all(page.map(async (r): Promise<AssetListItem> => ({
@@ -114,7 +132,8 @@ export async function listAssets(businessId: string, f: ListAssetsFilters): Prom
     archivedAt: r.cr.archivedAt ? r.cr.archivedAt.toISOString() : null,
     createdAt: r.cr.createdAt ? r.cr.createdAt.toISOString() : null,
   })));
-  return { items, nextCursor: rows.length > limit ? Buffer.from(JSON.stringify({ o: offset + limit })).toString('base64url') : null };
+  const last = page[page.length - 1];
+  return { items, nextCursor: rows.length > limit && last ? Buffer.from(JSON.stringify({ s: sort, k: last.sortKey, i: last.cr.id } satisfies AssetCursor)).toString('base64url') : null };
 }
 
 export interface AssetDetail {
