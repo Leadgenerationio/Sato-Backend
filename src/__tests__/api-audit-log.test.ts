@@ -85,6 +85,19 @@ describe('redaction', () => {
     expect(out.c).toContain('x=1');
   });
 
+  it('also masks pwd, code, session and otp in a URL, keeps an error-code FIELD, and writes the userinfo without brackets', () => {
+    const out = redact({
+      url: 'https://x.example.com/cb?pwd=p1&code=oauth-123&session=s-9&otp=424242&keep=1',
+      code: 'file_too_large',
+      userinfo: 'https://carol:pw@x.example.com/',
+      malformed: 'https://[not a url',
+    }) as Record<string, string>;
+    for (const secret of ['p1', 'oauth-123', 's-9', '424242']) expect(out.url).not.toContain(secret);
+    expect(out.url).toContain('keep=1');
+    expect(out.code).toBe('file_too_large');
+    expect(out.userinfo).toBe('https://redacted@x.example.com/');
+    expect(out.malformed).toBe('https://[not a url');
+  });
   it('keeps the size of file bytes and long strings, not their content', () => {
     const base64 = 'A'.repeat(50_000);
     expect(redact(base64)).toBe('[50000 characters]');

@@ -123,6 +123,11 @@ describe('list_assets paging while the bot links what it lists (Workflow B)', ()
       await db.delete(clients).where(eq(clients.id, cC!.id));
     }
   });
+  it('a tampered cursor (a key that is not a timestamp) is a clean validation_failed, not a 500', async () => {
+    const bad = Buffer.from(JSON.stringify({ s: 'created', k: 'garbage', i: a1 })).toString('base64url');
+    const r = await call(readKey, 'list_assets', { clientId: cA, cursor: bad });
+    expect(r.structuredContent.code).toBe('validation_failed');
+  });
   it('sorting by name keeps its place too, and a cursor from another sort is refused', async () => {
     const p1 = await call(readKey, 'list_assets', { clientId: cA, limit: 1, sort: 'name' });
     const wrong = await call(readKey, 'list_assets', { clientId: cA, limit: 1, cursor: p1.structuredContent.nextCursor });

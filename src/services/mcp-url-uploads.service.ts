@@ -58,7 +58,7 @@ export async function startUrlUpload(caller: Caller, sourceUrl: string, deps: Re
     });
   }
   if (type.startsWith('image/') && declared > IMAGE_MAX_BYTES) {
-    throw new ApiError('file_too_large', `The image at sourceUrl is ${declared} bytes; images are up to ${IMAGE_MAX_BYTES} bytes (30 MB).`, {
+    throw new ApiError('file_too_large', `The image at sourceUrl is ${declared} bytes; images are up to ${IMAGE_MAX_BYTES} bytes (${IMAGE_MAX_BYTES / (1024 * 1024)} MB).`, {
       hint: 'Make the image smaller. The 1 GB URL copy is for videos.',
     });
   }
@@ -115,7 +115,7 @@ export async function runUrlUpload(uploadId: string, sourceUrl: string, deps: Re
       total += buf.length;
       if (total > URL_UPLOAD_MAX_BYTES) return await fail('The file is larger than 1 GB');
       // Images are up to 30 MB whatever the headers said (only videos may be up to 1 GB by URL): the real type is known after the first bytes.
-      if (sniffed?.mediaType === 'image' && total > IMAGE_MAX_BYTES) return await fail('Images are up to 30 MB');
+      if (sniffed?.mediaType === 'image' && total > IMAGE_MAX_BYTES) return await fail(`Images are up to ${IMAGE_MAX_BYTES / (1024 * 1024)} MB`);
       hash.update(buf);
       if (headLen < SNIFF_BYTES) headLen += buf.copy(head, headLen, 0, Math.min(buf.length, SNIFF_BYTES - headLen));
       let offset = 0;
@@ -128,10 +128,10 @@ export async function runUrlUpload(uploadId: string, sourceUrl: string, deps: Re
       if (sniffed === undefined && headLen >= SNIFF_BYTES) {
         sniffed = sniffMedia(head);
         if (!sniffed) return await fail('The file content is not a jpg, png, webp, gif, mp4 or mov, whatever its name says');
-        if (sniffed.mediaType === 'image' && total > IMAGE_MAX_BYTES) return await fail('Images are up to 30 MB');
+        if (sniffed.mediaType === 'image' && total > IMAGE_MAX_BYTES) return await fail(`Images are up to ${IMAGE_MAX_BYTES / (1024 * 1024)} MB`);
       }
     }
-    if (sniffed?.mediaType === 'image' && total > IMAGE_MAX_BYTES) return await fail('Images are up to 30 MB');
+    if (sniffed?.mediaType === 'image' && total > IMAGE_MAX_BYTES) return await fail(`Images are up to ${IMAGE_MAX_BYTES / (1024 * 1024)} MB`);
     if (sniffed === undefined) {
       sniffed = sniffMedia(head.subarray(0, headLen));
       if (!sniffed) return await fail('The file content is not a jpg, png, webp, gif, mp4 or mov, whatever its name says');

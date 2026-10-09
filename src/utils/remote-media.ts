@@ -15,7 +15,7 @@ import { AppError, MediaSourceError } from './errors.js';
 // Same 50 MB ceiling as the presign route (upload.routes.ts).
 
 export const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
-const IMAGE_TOO_LARGE = 'File too large: images are up to 30 MB (videos up to 50 MB this way, more by URL copy or create_upload)';
+const IMAGE_TOO_LARGE = `File too large: images are up to ${IMAGE_MAX_BYTES / (1024 * 1024)} MB (videos up to 50 MB this way, more by URL copy or create_upload)`;
 
 export interface FetchedMedia {
   buffer: Buffer;
@@ -176,7 +176,7 @@ export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps 
       // Images are up to 30 MB, whatever the header said: stop as soon as what has arrived is over that and is an image.
       if (!checkedImage && total > IMAGE_MAX_BYTES) {
         checkedImage = true;
-        if (sniffMedia(Buffer.concat(chunks).subarray(0, SNIFF_BYTES))?.mediaType === 'image') throw new AppError(413, IMAGE_TOO_LARGE);
+        if (sniffMedia(chunks[0]!.subarray(0, SNIFF_BYTES))?.mediaType === 'image') throw new AppError(413, IMAGE_TOO_LARGE);
       }
     }
   }

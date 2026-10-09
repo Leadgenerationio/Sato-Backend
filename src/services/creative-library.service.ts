@@ -505,7 +505,7 @@ export async function upsertPlatformCreative(
     }
     // The same rule as the copy path (creative-copy.service): another client's creative inside this business is never
     // overwritten here. Moving an asset between clients is update_asset with confirmMove, not a side effect of an upload or a sync.
-    if (existing && existing.clientId && clientId && existing.clientId !== clientId) {
+    if (existing && existing.clientId && existing.clientId !== clientId) { // also when no client was sent: a campaign-only call cannot prove it owns the creative
       throw new AppError(409, 'This platform creative id is already registered to another client');
     }
   }

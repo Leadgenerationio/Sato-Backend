@@ -30,12 +30,14 @@ const badCursor = () => new ApiError('validation_failed', 'cursor is not valid.'
  * a row offset would then skip the next 25 unseen assets.
  */
 interface AssetCursor { s: 'created' | 'name'; k: string; i: string }
+const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d{1,6})?$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function parseCursor(cursor: string | undefined, sort: 'created' | 'name'): AssetCursor | null {
   if (!cursor) return null;
   try {
     const c = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as Partial<AssetCursor>;
-    if (c.s === sort && typeof c.k === 'string' && c.k.length <= 300 && typeof c.i === 'string' && UUID_RE.test(c.i)) return c as AssetCursor;
+    const keyOk = typeof c.k === 'string' && c.k.length <= 300 && (sort === 'name' || TIMESTAMP_RE.test(c.k));
+    if (c.s === sort && keyOk && typeof c.i === 'string' && UUID_RE.test(c.i)) return c as AssetCursor;
   } catch { /* fall through */ }
   throw badCursor();
 }

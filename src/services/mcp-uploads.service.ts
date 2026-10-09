@@ -313,11 +313,14 @@ export async function failUploadById(uploadId: string, message: string): Promise
 
 /** Run by a repeating job: expire abandoned uploads (aborting any multipart upload so no parts are kept) and fail jobs stuck on processing. */
 /** Uploads whose processing job is still in the queue (waiting, delayed or running): a backlog is not a stuck job. */
+/** How many queued jobs the sweep looks at. A longer backlog logs a warning (uploads beyond it could be failed as stuck). */
+const QUEUE_LOOKUP_MAX = 5000;
 async function queuedUploadIds(): Promise<Set<string>> {
   const ids = new Set<string>();
   try {
     const { mediaQueue } = await import('../jobs/queue.js');
-    const jobs = await mediaQueue?.getJobs(['waiting', 'delayed', 'active', 'prioritized'], 0, 999) ?? [];
+    const jobs = await mediaQueue?.getJobs(['waiting', 'delayed', 'active', 'prioritized'], 0, QUEUE_LOOKUP_MAX - 1) ?? [];
+    if (jobs.length >= QUEUE_LOOKUP_MAX) logger.warn({ max: QUEUE_LOOKUP_MAX }, 'The media queue is longer than the lookup: uploads beyond it may be failed as stuck');
     for (const j of jobs) { const id = (j?.data as { uploadId?: unknown } | undefined)?.uploadId; if (typeof id === 'string') ids.add(id); }
   } catch (err) {
     logger.warn({ err }, 'Could not read the media queue; treating no upload as queued');
