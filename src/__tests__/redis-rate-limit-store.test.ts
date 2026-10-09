@@ -69,3 +69,46 @@ describe('RedisRateLimitStore', () => {
     expect(await store.get('k')).toBeUndefined();
   });
 });
+
+describe('RedisRateLimitStore while Redis is down', () => {
+  const deadRedis = () => ({
+    eval: async () => { throw new Error('connection refused'); },
+    del: async () => { throw new Error('connection refused'); },
+    get: async () => { throw new Error('connection refused'); },
+    pttl: async () => { throw new Error('connection refused'); },
+  }) as unknown as Redis;
+
+  it('keeps counting per process, so the limit does not switch itself off', async () => {
+    const store = new RedisRateLimitStore(deadRedis());
+    store.init({ windowMs: 60_000 } as never);
+    expect((await store.increment('api-key:a')).totalHits).toBe(1);
+    expect((await store.increment('api-key:a')).totalHits).toBe(2);
+    expect((await store.increment('api-key:a')).totalHits).toBe(3);
+    expect((await store.increment('api-key:b')).totalHits).toBe(1);
+    await store.decrement('api-key:a');
+    expect((await store.increment('api-key:a')).totalHits).toBe(3);
+    await store.resetKey('api-key:a');
+    expect((await store.increment('api-key:a')).totalHits).toBe(1);
+  });
+
+  it('starts a new window when the old one has passed', async () => {
+    const store = new RedisRateLimitStore(deadRedis());
+    store.init({ windowMs: 30 } as never);
+    await store.increment('k'); await store.increment('k');
+    await new Promise((r) => setTimeout(r, 60));
+    expect((await store.increment('k')).totalHits).toBe(1);
+  });
+
+  it('a limiter on it still answers 429 past the limit', async () => {
+    const { default: express } = await import('express');
+    const { default: request } = await import('supertest');
+    const { default: rateLimit } = await import('express-rate-limit');
+    const store = new RedisRateLimitStore(deadRedis());
+    const app = express();
+    app.use(rateLimit({ windowMs: 60_000, max: 3, store, passOnStoreError: true, keyGenerator: () => 'k', standardHeaders: true, legacyHeaders: false }));
+    app.get('/', (_req, res) => { res.json({ ok: true }); });
+    const codes: number[] = [];
+    for (let i = 0; i < 5; i++) codes.push((await request(app).get('/')).status);
+    expect(codes).toEqual([200, 200, 200, 429, 429]);
+  });
+});

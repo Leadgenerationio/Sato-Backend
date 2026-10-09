@@ -1,3 +1,4 @@
+import { logger } from '../utils/logger.js';
 import type { Store, Options, IncrementResponse, ClientRateLimitInfo } from 'express-rate-limit';
 import type { Redis } from 'ioredis';
 
@@ -41,6 +42,12 @@ export class RedisRateLimitStore implements Store {
   /** Counters live in Redis, so every instance sees the same hits. */
   readonly localKeys = false;
   readonly prefix: string;
+  /**
+   * While Redis is down or too slow, calls are counted here instead (per process), so the limit still holds, at worst
+   * multiplied by the number of instances, rather than switching itself off. Entries die with their window.
+   */
+  private readonly fallback = new Map<string, { hits: number; resetAt: number }>();
+  private downSince: number | null = null;
 
   constructor(private readonly client: Redis, prefix = 'rl:') {
     this.prefix = prefix;
@@ -50,18 +57,39 @@ export class RedisRateLimitStore implements Store {
     this.windowMs = options.windowMs;
   }
 
+  private localIncrement(key: string): IncrementResponse {
+    const now = Date.now();
+    if (this.fallback.size > 10_000) for (const [k, e] of this.fallback) if (e.resetAt <= now) this.fallback.delete(k);
+    let e = this.fallback.get(key);
+    if (!e || e.resetAt <= now) { e = { hits: 0, resetAt: now + this.windowMs }; this.fallback.set(key, e); }
+    e.hits += 1;
+    return { totalHits: e.hits, resetTime: new Date(e.resetAt) };
+  }
+
   async increment(key: string): Promise<IncrementResponse> {
-    const res = await withTimeout(this.client.eval(INCR_SCRIPT, 1, this.prefix + key, String(this.windowMs))) as [number, number];
-    if (!Array.isArray(res)) throw new Error('Unexpected Redis reply for rate-limit increment');
-    return { totalHits: Number(res[0]), resetTime: new Date(Date.now() + Number(res[1])) };
+    try {
+      const res = await withTimeout(this.client.eval(INCR_SCRIPT, 1, this.prefix + key, String(this.windowMs))) as [number, number];
+      if (!Array.isArray(res)) throw new Error('Unexpected Redis reply for rate-limit increment');
+      this.downSince = null;
+      return { totalHits: Number(res[0]), resetTime: new Date(Date.now() + Number(res[1])) };
+    } catch (err) {
+      if (this.downSince === null) {
+        this.downSince = Date.now();
+        logger.warn({ err: (err as Error).message }, 'Rate-limit Redis unavailable: counting per process until it is back');
+      }
+      return this.localIncrement(key);
+    }
   }
 
   async decrement(key: string): Promise<void> {
-    await withTimeout(this.client.eval(DECR_SCRIPT, 1, this.prefix + key));
+    const e = this.fallback.get(key);
+    if (e && e.hits > 0) e.hits -= 1;
+    await withTimeout(this.client.eval(DECR_SCRIPT, 1, this.prefix + key)).catch(() => undefined);
   }
 
   async resetKey(key: string): Promise<void> {
-    await withTimeout(this.client.del(this.prefix + key));
+    this.fallback.delete(key);
+    await withTimeout(this.client.del(this.prefix + key)).catch(() => undefined);
   }
 
   async get(key: string): Promise<ClientRateLimitInfo | undefined> {
