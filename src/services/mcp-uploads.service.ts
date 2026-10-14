@@ -287,22 +287,25 @@ const FILING_STALE_MS = 10 * 60 * 1000;
  * Claim a ready, unused upload for filing, in the database, so two API instances cannot both file it. The marker lives
  * in `error` while the claim is held (a ready upload has no error); a claim older than 10 minutes is taken as dead.
  */
-export async function claimUploadForFiling(uploadId: string): Promise<boolean> {
+// businessId is part of every WHERE below so a wrong upload id can only ever touch a row in the caller's own business,
+// even though the caller already validated the upload via getReadyUpload — the tenant check lives in the query, not
+// only in the caller.
+export async function claimUploadForFiling(uploadId: string, businessId: string): Promise<boolean> {
   const [row] = await db.update(uploads).set({ error: FILING, updatedAt: new Date() }).where(and(
-    eq(uploads.id, uploadId), eq(uploads.status, 'ready'), isNull(uploads.creativeId),
+    eq(uploads.id, uploadId), eq(uploads.businessId, businessId), eq(uploads.status, 'ready'), isNull(uploads.creativeId),
     or(isNull(uploads.error), and(eq(uploads.error, FILING), lt(uploads.updatedAt, new Date(Date.now() - FILING_STALE_MS)))),
   )).returning({ id: uploads.id });
   return Boolean(row);
 }
 
 /** Give a claim back when filing failed, so the caller can try again. */
-export async function releaseUploadClaim(uploadId: string): Promise<void> {
-  await db.update(uploads).set({ error: null, updatedAt: new Date() }).where(and(eq(uploads.id, uploadId), eq(uploads.error, FILING), isNull(uploads.creativeId)));
+export async function releaseUploadClaim(uploadId: string, businessId: string): Promise<void> {
+  await db.update(uploads).set({ error: null, updatedAt: new Date() }).where(and(eq(uploads.id, uploadId), eq(uploads.businessId, businessId), eq(uploads.error, FILING), isNull(uploads.creativeId)));
 }
 
 /** Marks an upload as used and releases the claim. Only the first call counts: a used upload is never pointed at a second creative. */
-export async function linkUploadToCreative(uploadId: string, creativeId: string): Promise<void> {
-  await db.update(uploads).set({ creativeId, error: null, updatedAt: new Date() }).where(and(eq(uploads.id, uploadId), isNull(uploads.creativeId)));
+export async function linkUploadToCreative(uploadId: string, creativeId: string, businessId: string): Promise<void> {
+  await db.update(uploads).set({ creativeId, error: null, updatedAt: new Date() }).where(and(eq(uploads.id, uploadId), eq(uploads.businessId, businessId), isNull(uploads.creativeId)));
 }
 
 /** For the worker: an upload whose processing ran out of attempts fails with a clear reason (and its object is removed). */

@@ -6,6 +6,12 @@ const publicLookup = async () => [{ address: '93.184.216.34' }];
 function fakeFetch(body: Buffer, headers: Record<string, string>, status = 200): typeof fetch {
   return (async () => new Response(new Uint8Array(body), { status, headers })) as unknown as typeof fetch;
 }
+// Streams the body in the given chunks, so a test can make the first chunk shorter than the magic-byte window.
+function chunkedFetch(chunks: Buffer[], headers: Record<string, string>): typeof fetch {
+  return (async () => new Response(new ReadableStream({
+    start(ctrl) { for (const c of chunks) ctrl.enqueue(new Uint8Array(c)); ctrl.close(); },
+  }), { headers })) as unknown as typeof fetch;
+}
 
 describe('fetchRemoteMedia', () => {
   it('downloads an image and fingerprints it', async () => {
@@ -68,5 +74,13 @@ describe('fetchRemoteMedia image limit (spec: images up to 30 MB)', () => {
   it('still takes a 29 MB image and a 40 MB video', async () => {
     expect((await fetchRemoteMedia('https://cdn.example.com/a.png', { lookup: publicLookup, fetchImpl: fakeFetch(pngOf(29 * MiB), { 'content-type': 'image/png' }) })).mediaType).toBe('image');
     expect((await fetchRemoteMedia('https://cdn.example.com/a.mp4', { lookup: publicLookup, fetchImpl: fakeFetch(mp4Of(40 * MiB), { 'content-type': 'video/mp4' }) })).mediaType).toBe('video');
+  });
+  it('refuses a 31 MB image even when the first chunk is too small to sniff', async () => {
+    // The server splits the body so the first chunk is 4 bytes — shorter than the magic-byte window, so sniffing that
+    // chunk alone returns null. The accumulated head buffer and the post-stream backstop still catch the oversize image.
+    const img = pngOf(31 * MiB);
+    const chunks = [img.subarray(0, 4), img.subarray(4)];
+    await expect(fetchRemoteMedia('https://cdn.example.com/a.png', { lookup: publicLookup, fetchImpl: chunkedFetch(chunks, { 'content-type': 'image/png' }) }))
+      .rejects.toMatchObject({ statusCode: 413, message: expect.stringContaining('30 MB') });
   });
 });

@@ -167,16 +167,22 @@ export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps 
 
   const chunks: Buffer[] = [];
   let total = 0;
+  // The magic-byte window, accumulated across the first chunks: a server can split the response so the first TCP chunk
+  // is shorter than SNIFF_BYTES, and sniffing that chunk alone would miss the type. Capped at SNIFF_BYTES, so it stops
+  // growing after the first few KB.
+  let head = Buffer.alloc(0);
   let checkedImage = false;
   if (res.body) {
     for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-      total += chunk.length;
+      const buf = Buffer.from(chunk);
+      total += buf.length;
       if (total > MAX_MEDIA_BYTES) throw new AppError(413, 'File too large: max 50 MB');
-      chunks.push(Buffer.from(chunk));
+      chunks.push(buf);
+      if (head.length < SNIFF_BYTES) head = Buffer.concat([head, buf]).subarray(0, SNIFF_BYTES);
       // Images are up to 30 MB, whatever the header said: stop as soon as what has arrived is over that and is an image.
-      if (!checkedImage && total > IMAGE_MAX_BYTES) {
+      if (!checkedImage && total > IMAGE_MAX_BYTES && head.length >= SNIFF_BYTES) {
         checkedImage = true;
-        if (sniffMedia(chunks[0]!.subarray(0, SNIFF_BYTES))?.mediaType === 'image') throw new AppError(413, IMAGE_TOO_LARGE);
+        if (sniffMedia(head)?.mediaType === 'image') throw new AppError(413, IMAGE_TOO_LARGE);
       }
     }
   }
@@ -185,6 +191,9 @@ export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps 
   // (MCP spec v1.0: an .exe served as video/mp4 must be refused).
   const sniffed = sniffMedia(buffer.subarray(0, SNIFF_BYTES));
   if (!sniffed) throw new MediaSourceError(422, 'sourceUrl must be an image or video: the file content is not a jpg, png, webp, gif, mp4 or mov', 'unsupported_type');
+  // Backstop for the 30 MB image cap: if the stream was chunked so the mid-stream check above never ran, an oversize
+  // image is still caught here once the real type is known, whatever the chunk boundaries were.
+  if (sniffed.mediaType === 'image' && buffer.length > IMAGE_MAX_BYTES) throw new AppError(413, IMAGE_TOO_LARGE);
   return {
     buffer,
     contentType: sniffed.mime,

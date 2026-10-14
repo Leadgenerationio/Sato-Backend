@@ -155,7 +155,7 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
   let up: Awaited<ReturnType<typeof upsertPlatformCreative>>;
   // Claimed in the database, so it holds across API instances too.
   const lockId = replayOf ? null : uploadRow?.id ?? null;
-  if (lockId && !(await claimUploadForFiling(lockId))) {
+  if (lockId && !(await claimUploadForFiling(lockId, caller.businessId))) {
     throw new ApiError('rate_limited', 'This upload is being filed by another call, or was just used.', { retryable: true, details: { retryAfter: 2 }, hint: 'Wait a few seconds, then repeat the same call with the same arguments.' });
   }
   try {
@@ -169,7 +169,7 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
       platformCreativeId, mediaType: verified?.mediaType ?? (input.mediaType as 'image' | 'video'), sourceUrl: input.sourceUrl, r2Key: uploadRow?.r2Key, verified, headline: input.headline, bodyText: input.bodyText,
       landingPageUrl: input.landingPageUrl, name: input.name, uploadedBy: caller.userId,
     });
-    if (uploadRow && !replayOf) await linkUploadToCreative(uploadRow.id, up.creative.id);
+    if (uploadRow && !replayOf) await linkUploadToCreative(uploadRow.id, up.creative.id, caller.businessId);
   } catch (err) {
     // A sourceUrl bigger than the 50 MB direct limit: copy it in the background (up to 1 GB) and tell the caller to poll.
     if (input.sourceUrl && err instanceof AppError && err.statusCode === 413) {
@@ -182,7 +182,7 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
     }
     toApiError(err);
   } finally {
-    if (lockId) await releaseUploadClaim(lockId).catch(() => {});
+    if (lockId) await releaseUploadClaim(lockId, caller.businessId).catch(() => {});
   }
   const { creative, created } = up;
 

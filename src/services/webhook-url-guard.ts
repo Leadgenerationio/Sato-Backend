@@ -78,8 +78,10 @@ export function isBlockedAddress(ip: string, policy: UrlPolicy = defaultPolicy()
     const first = g[0];
     if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
     if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+    if ((first & 0xffc0) === 0xfec0) return true; // fec0::/10 site-local (deprecated, still routable on some hosts)
     if ((first & 0xff00) === 0xff00) return true; // ff00::/8 multicast
     if (first === 0x64 && g[1] === 0xff9b) return true; // 64:ff9b::/96 NAT64 reaches v4 internals
+    if (first === 0x2002) return isBlockedAddress(`${g[1] >> 8}.${g[1] & 0xff}.${g[2] >> 8}.${g[2] & 0xff}`, policy); // 6to4 wraps a v4 address, so check that
     return false;
   }
   return true; // not an IP at all — refuse

@@ -225,13 +225,14 @@ describe('an upload is claimed in the database, so it is filed once', () => {
   it('the claim is taken once, can be given back, and an old dead claim can be taken over', async () => {
     const up = await upload(jpeg(9400, 'claim'));
     await call(key, 'complete_upload', { uploadId: up.uploadId });
-    expect(await claimUploadForFiling(up.uploadId)).toBe(true);
-    expect(await claimUploadForFiling(up.uploadId)).toBe(false);
-    await releaseUploadClaim(up.uploadId);
-    expect(await claimUploadForFiling(up.uploadId)).toBe(true);
+    expect(await claimUploadForFiling(up.uploadId, otherBiz)).toBe(false); // another business can't claim it
+    expect(await claimUploadForFiling(up.uploadId, BIZ)).toBe(true);
+    expect(await claimUploadForFiling(up.uploadId, BIZ)).toBe(false);
+    await releaseUploadClaim(up.uploadId, BIZ);
+    expect(await claimUploadForFiling(up.uploadId, BIZ)).toBe(true);
     await db.update(uploads).set({ updatedAt: new Date(Date.now() - 11 * 60 * 1000) }).where(eq(uploads.id, up.uploadId));
-    expect(await claimUploadForFiling(up.uploadId)).toBe(true); // the holder is gone: taken over
-    await releaseUploadClaim(up.uploadId);
+    expect(await claimUploadForFiling(up.uploadId, BIZ)).toBe(true); // the holder is gone: taken over
+    await releaseUploadClaim(up.uploadId, BIZ);
   });
   it('a failed filing gives the claim back, so the call can be repeated', async () => {
     const up = await upload(jpeg(9600, 'release'));
