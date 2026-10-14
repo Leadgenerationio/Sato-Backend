@@ -104,7 +104,10 @@ const digits = (s: string) => s.replace(/^act_/i, '').replace(/-/g, '');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const sha256 = (b: Buffer | Uint8Array) => createHash('sha256').update(b).digest('hex');
 const SECRET_PATTERNS = [/stk_[A-Za-z0-9_-]+/g, /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g];
-const secrets = new Set<string>(PASSWORD ? [PASSWORD] : []);
+// Only redact a password long enough to be unambiguous: blanking a 1-3 char password would replace those characters
+// everywhere in the output and corrupt the evidence. The password is only ever sent in the login body, never echoed
+// into an observed string, so a very short one going unredacted is harmless.
+const secrets = new Set<string>(PASSWORD.length >= 6 ? [PASSWORD] : []);
 function redact(s: string): string {
   let out = s;
   for (const v of secrets) if (v) out = out.split(v).join('[redacted]');

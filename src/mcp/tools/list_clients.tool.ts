@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { defineTool } from '../types.js';
 import { listClients } from '../../services/mcp-reads.service.js';
 import { clientStatusEnum } from '../../db/schema/clients.js';
+import { CURSOR_MAX_LEN } from '../../utils/cursor.js';
 
 export default defineTool({
   name: 'list_clients',
@@ -12,7 +13,7 @@ export default defineTool({
     q: z.string().max(100).optional().describe('Part of the company name.'),
     status: z.enum(clientStatusEnum.enumValues).optional().describe('Client status.'),
     limit: z.number().int().min(1).max(100).optional().describe('Page size, default 25, at most 100.'),
-    cursor: z.string().max(200).optional().describe('The nextCursor from the previous page.'),
+    cursor: z.string().max(CURSOR_MAX_LEN).optional().describe('The nextCursor from the previous page.'),
   },
   outputSchema: {
     items: z.array(z.object({ clientId: z.string(), name: z.string(), status: z.string().nullable(), currency: z.string().nullable(), country: z.string().nullable(), adAccountCount: z.number() })),

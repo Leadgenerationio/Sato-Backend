@@ -10,6 +10,7 @@ import { getSignedDownloadUrl, objectExists } from '../integrations/r2/r2-client
 import { apiAuditLog } from '../db/schema/api-audit-log.js';
 import { normaliseAccountId } from '../utils/catchr-platform.js';
 import { ApiError } from '../utils/api-error.js';
+import { decodeCursor, encodeCursor, UUID_RE } from '../utils/cursor.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
 import { creativeInBusiness, SHARED_SHOWS_UNDER_EVERY_BUYER } from './creative-library.service.js';
 import { resolveR2Location } from './creative.service.js';
@@ -22,8 +23,6 @@ import { clientColumnInScope } from './key-client-scope.service.js';
 
 export interface Page<T> { items: T[]; nextCursor: string | null }
 
-const badCursor = () => new ApiError('validation_failed', 'cursor is not valid.', { fields: [{ field: 'cursor', message: 'Use the nextCursor from the previous page, unchanged' }] });
-
 /**
  * The cursor is the sort key of the last row sent (not a row count), so the next page starts right after it even when
  * the bot changes assets between pages: linking the assets of a "not yet linked" list removes them from that list, and
@@ -31,16 +30,12 @@ const badCursor = () => new ApiError('validation_failed', 'cursor is not valid.'
  */
 interface AssetCursor { s: 'created' | 'name'; k: string; i: string }
 const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d{1,6})?$/;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function parseCursor(cursor: string | undefined, sort: 'created' | 'name'): AssetCursor | null {
-  if (!cursor) return null;
-  try {
-    const c = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as Partial<AssetCursor>;
+const parseCursor = (cursor: string | undefined, sort: 'created' | 'name'): AssetCursor | null =>
+  decodeCursor(cursor, (raw) => {
+    const c = raw as Partial<AssetCursor>;
     const keyOk = typeof c.k === 'string' && c.k.length <= 300 && (sort === 'name' || TIMESTAMP_RE.test(c.k));
-    if (c.s === sort && keyOk && typeof c.i === 'string' && UUID_RE.test(c.i)) return c as AssetCursor;
-  } catch { /* fall through */ }
-  throw badCursor();
-}
+    return c.s === sort && keyOk && typeof c.i === 'string' && UUID_RE.test(c.i) ? (c as AssetCursor) : null;
+  });
 
 export interface AssetListItem {
   creativeId: string;
@@ -135,7 +130,7 @@ export async function listAssets(businessId: string, f: ListAssetsFilters): Prom
     createdAt: r.cr.createdAt ? r.cr.createdAt.toISOString() : null,
   })));
   const last = page[page.length - 1];
-  return { items, nextCursor: rows.length > limit && last ? Buffer.from(JSON.stringify({ s: sort, k: last.sortKey, i: last.cr.id } satisfies AssetCursor)).toString('base64url') : null };
+  return { items, nextCursor: rows.length > limit && last ? encodeCursor({ s: sort, k: last.sortKey, i: last.cr.id } satisfies AssetCursor) : null };
 }
 
 export interface AssetDetail {

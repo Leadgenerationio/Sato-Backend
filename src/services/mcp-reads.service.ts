@@ -8,6 +8,7 @@ import { creatives } from '../db/schema/creatives.js';
 import { landingPages } from '../db/schema/landing-pages.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
 import { ApiError } from '../utils/api-error.js';
+import { decodeCursor, encodeCursor, UUID_RE } from '../utils/cursor.js';
 import { campaignVisible, resolveCampaignRef, trafficSourceAccountsSql } from './ad-account-rules.service.js';
 import { campaignInScope, clientColumnInScope } from './key-client-scope.service.js';
 
@@ -24,18 +25,15 @@ const clampLimit = (limit: number | undefined): number => Math.min(Math.max(limi
 // Keyset pagination by (name, id): the cursor is the name and id of the last row sent, so the next page starts right
 // after it. Unlike a row offset, a client/campaign added or linked between pages can't make the next page skip or
 // repeat rows — the same reason list_assets moved off offsets (issue #114). Both lists order by (name asc, id asc) and
-// name is NOT NULL, so the sort key is never null and the tuple compares cleanly.
+// name is NOT NULL, so the sort key is never null and the tuple compares cleanly. The cursor can be up to ~name+id
+// long, so the tools accept a cursor up to CURSOR_MAX_LEN (list_clients/list_campaigns .tool.ts).
 interface NameCursor { k: string; i: string }
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function parseNameCursor(cursor: string | undefined): NameCursor | null {
-  if (!cursor) return null;
-  try {
-    const c = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as Partial<NameCursor>;
-    if (typeof c.k === 'string' && c.k.length <= 300 && typeof c.i === 'string' && UUID_RE.test(c.i)) return c as NameCursor;
-  } catch { /* fall through */ }
-  throw new ApiError('validation_failed', 'cursor is not valid.', { fields: [{ field: 'cursor', message: 'Use the nextCursor from the previous page, unchanged' }] });
-}
-const encodeNameCursor = (name: string, id: string): string => Buffer.from(JSON.stringify({ k: name, i: id } satisfies NameCursor)).toString('base64url');
+const parseNameCursor = (cursor: string | undefined): NameCursor | null =>
+  decodeCursor(cursor, (raw) => {
+    const c = raw as Partial<NameCursor>;
+    return typeof c.k === 'string' && c.k.length <= 300 && typeof c.i === 'string' && UUID_RE.test(c.i) ? (c as NameCursor) : null;
+  });
+const encodeNameCursor = (name: string, id: string): string => encodeCursor({ k: name, i: id } satisfies NameCursor);
 
 const like = (q: string) => `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 

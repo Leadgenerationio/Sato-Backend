@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { defineTool } from '../types.js';
-import { listAdAccounts, adAccountSortKey, compareAdAccountSortKey, type AdAccountSortKey } from '../../services/ad-account-links.service.js';
+import { listAdAccounts } from '../../services/ad-account-links.service.js';
 import { toSpecPlatform } from '../../utils/platform-names.js';
-import { ApiError } from '../../utils/api-error.js';
+import { decodeCursor, encodeCursor, CURSOR_MAX_LEN } from '../../utils/cursor.js';
 
 export default defineTool({
   name: 'list_ad_accounts',
@@ -17,7 +17,7 @@ export default defineTool({
     linked: z.boolean().optional().describe('true = linked to a client, false = not linked yet.'),
     q: z.string().max(100).optional().describe('Part of the account ID (with or without act_) or the account name.'),
     limit: z.number().int().min(1).max(200).optional(),
-    cursor: z.string().max(200).optional(),
+    cursor: z.string().max(CURSOR_MAX_LEN).optional(),
   },
   outputSchema: {
     items: z.array(z.object({
@@ -31,25 +31,23 @@ export default defineTool({
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   scope: 'ad_accounts:read',
   handler: async ({ limit, cursor, ...filters }, ctx) => {
-    // Keyset by the account's place in the list (unlinked first, then spend, then platform+accountId): the cursor is
-    // the sort position of the last account sent, so the next page resumes right after it. Unlike a row offset, an
-    // account added, removed or linked between pages can't make the next page skip or repeat one.
-    let after: AdAccountSortKey | null = null;
-    if (cursor) {
-      try {
-        const c = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as Partial<AdAccountSortKey>;
-        if (typeof c.linked !== 'boolean' || typeof c.spend !== 'number' || typeof c.platform !== 'string' || typeof c.accountId !== 'string') throw new Error('bad');
-        after = c as AdAccountSortKey;
-      } catch { throw new ApiError('validation_failed', 'cursor is not valid.', { fields: [{ field: 'cursor', message: 'Use the nextCursor from the previous page, unchanged' }] }); }
-    }
+    // Page by the account's stable identity (platform, accountId) — immutable per account — so linking an account or a
+    // 30-day-spend change between pages can't move a row across the cursor and make the page skip or repeat it. (The
+    // portal screen keeps the unlinked-first/spend order; a bot wanting that can sort client-side on spend30d.)
+    const after = decodeCursor(cursor, (raw) => {
+      const c = raw as { p?: unknown; a?: unknown };
+      return typeof c.p === 'string' && typeof c.a === 'string' ? { p: c.p, a: c.a } : null;
+    });
     const size = limit ?? 100;
     const all = await listAdAccounts(ctx.auth, 30, { ...filters, businessOnly: true });
+    const sorted = [...all.accounts].sort((x, y) => x.platform.localeCompare(y.platform) || x.accountId.localeCompare(y.accountId));
     // The first account that sorts strictly after the cursor. findIndex returns -1 when none remain (cursor was the
-    // last row, or every later row is gone) — then the page is empty and there is no next cursor.
-    const startIdx = after ? all.accounts.findIndex((a) => compareAdAccountSortKey(after!, adAccountSortKey(a)) < 0) : 0;
-    const page = startIdx < 0 ? [] : all.accounts.slice(startIdx, startIdx + size);
+    // last row, or every later row is gone) — then the page is empty and there is no next cursor. A deleted cursor
+    // account is handled too: we resume at the next (platform, accountId), not restart.
+    const startIdx = after ? sorted.findIndex((a) => (a.platform.localeCompare(after.p) || a.accountId.localeCompare(after.a)) > 0) : 0;
+    const page = startIdx < 0 ? [] : sorted.slice(startIdx, startIdx + size);
     const last = page[page.length - 1];
-    const hasMore = startIdx >= 0 && startIdx + size < all.accounts.length;
+    const hasMore = startIdx >= 0 && startIdx + size < sorted.length;
     return {
       summary: `${all.summary.total} ad accounts (${all.summary.linked} linked, ${all.summary.unlinked} not linked); showing ${page.length}.`,
       data: {
@@ -57,7 +55,7 @@ export default defineTool({
           platform: toSpecPlatform(a.platform), accountId: a.accountId, accountName: a.accountName, clientId: a.link?.clientId ?? null, clientName: a.link?.clientName ?? null,
           campaignId: a.link?.campaignId ?? null, campaignName: a.link?.campaignName ?? null, campaigns: a.campaigns, spend30d: a.spend, currency: a.currency,
         })),
-        nextCursor: hasMore && last ? Buffer.from(JSON.stringify(adAccountSortKey(last))).toString('base64url') : null,
+        nextCursor: hasMore && last ? encodeCursor({ p: last.platform, a: last.accountId }) : null,
         summary: { total: all.summary.total, linked: all.summary.linked, unlinked: all.summary.unlinked },
       },
     };

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import app from '../index.js';
 import { db } from '../config/database.js';
 import { businesses } from '../db/schema/businesses.js';
@@ -126,6 +126,7 @@ describe('list_clients', () => {
       if (!cursor) break;
     }
     for (const n of names) expect(seen.filter((s) => s === n)).toHaveLength(1); // every original seen exactly once
+    await db.delete(clients).where(and(eq(clients.businessId, BIZ), sql`${clients.companyName} like ${`${q}%`}`)); // this test's own rows only
   });
   it('a bad cursor is validation_failed; a key without clients:read is refused', async () => {
     const bad = await call(key, 'list_clients', { cursor: 'not-a-cursor' });

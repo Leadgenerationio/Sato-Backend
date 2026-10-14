@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { defineTool } from '../types.js';
 import { uuidShape } from '../../utils/zod-helpers.js';
 import { listAssets } from '../../services/mcp-assets.service.js';
+import { CURSOR_MAX_LEN } from '../../utils/cursor.js';
 
 export default defineTool({
   name: 'list_assets',
@@ -21,7 +22,7 @@ export default defineTool({
     to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Created on or before, YYYY-MM-DD.'),
     includeArchived: z.boolean().optional(),
     sort: z.enum(['created', 'name']).optional(),
-    limit: z.number().int().min(1).max(100).optional(), cursor: z.string().max(200).optional(),
+    limit: z.number().int().min(1).max(100).optional(), cursor: z.string().max(CURSOR_MAX_LEN).optional(),
   },
   outputSchema: {
     items: z.array(z.object({
