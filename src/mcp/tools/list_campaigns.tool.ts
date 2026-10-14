@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { defineTool } from '../types.js';
 import { uuidShape } from '../../utils/zod-helpers.js';
 import { listCampaignsForMcp } from '../../services/mcp-reads.service.js';
+import { CURSOR_MAX_LEN } from '../../utils/cursor.js';
 
 export default defineTool({
   name: 'list_campaigns',
@@ -16,7 +17,7 @@ export default defineTool({
     vertical: z.string().max(100).optional(),
     q: z.string().max(100).optional().describe('Part of the name, or the exact LeadByte number.'),
     limit: z.number().int().min(1).max(100).optional(),
-    cursor: z.string().max(200).optional(),
+    cursor: z.string().max(CURSOR_MAX_LEN).optional(),
   },
   outputSchema: {
     items: z.array(z.object({

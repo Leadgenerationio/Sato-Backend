@@ -8,6 +8,7 @@ import { creatives } from '../db/schema/creatives.js';
 import { landingPages } from '../db/schema/landing-pages.js';
 import { toSpecPlatform } from '../utils/platform-names.js';
 import { ApiError } from '../utils/api-error.js';
+import { decodeCursor, encodeCursor, UUID_RE } from '../utils/cursor.js';
 import { campaignVisible, resolveCampaignRef, trafficSourceAccountsSql } from './ad-account-rules.service.js';
 import { campaignInScope, clientColumnInScope } from './key-client-scope.service.js';
 
@@ -19,23 +20,20 @@ import { campaignInScope, clientColumnInScope } from './key-client-scope.service
 export interface Page<T> { items: T[]; nextCursor: string | null }
 
 const MAX_LIMIT = 100;
-function pageArgs(limit: number | undefined, cursor: string | undefined): { limit: number; offset: number } {
-  const lim = Math.min(Math.max(limit ?? 25, 1), MAX_LIMIT);
-  let offset = 0;
-  if (cursor) {
-    try {
-      const o = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { o?: unknown };
-      // isSafeInteger, not isInteger: 1e300 is an integer but no Postgres OFFSET.
-      if (typeof o.o !== 'number' || o.o < 0 || !Number.isSafeInteger(o.o)) throw new Error('bad');
-      offset = o.o;
-    } catch {
-      throw new ApiError('validation_failed', 'cursor is not valid.', { fields: [{ field: 'cursor', message: 'Use the nextCursor from the previous page, unchanged' }] });
-    }
-  }
-  return { limit: lim, offset };
-}
-const nextCursorOf = (offset: number, limit: number, got: number): string | null =>
-  got > limit ? Buffer.from(JSON.stringify({ o: offset + limit })).toString('base64url') : null;
+const clampLimit = (limit: number | undefined): number => Math.min(Math.max(limit ?? 25, 1), MAX_LIMIT);
+
+// Keyset pagination by (name, id): the cursor is the name and id of the last row sent, so the next page starts right
+// after it. Unlike a row offset, a client/campaign added or linked between pages can't make the next page skip or
+// repeat rows — the same reason list_assets moved off offsets (issue #114). Both lists order by (name asc, id asc) and
+// name is NOT NULL, so the sort key is never null and the tuple compares cleanly. The cursor can be up to ~name+id
+// long, so the tools accept a cursor up to CURSOR_MAX_LEN (list_clients/list_campaigns .tool.ts).
+interface NameCursor { k: string; i: string }
+const parseNameCursor = (cursor: string | undefined): NameCursor | null =>
+  decodeCursor(cursor, (raw) => {
+    const c = raw as Partial<NameCursor>;
+    return typeof c.k === 'string' && c.k.length <= 300 && typeof c.i === 'string' && UUID_RE.test(c.i) ? (c as NameCursor) : null;
+  });
+const encodeNameCursor = (name: string, id: string): string => encodeCursor({ k: name, i: id } satisfies NameCursor);
 
 const like = (q: string) => `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
@@ -44,24 +42,27 @@ const like = (q: string) => `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 export interface ClientListItem { clientId: string; name: string; status: string | null; currency: string | null; country: string | null; adAccountCount: number }
 
 export async function listClients(businessId: string, f: { q?: string; status?: (typeof clientStatusEnum.enumValues)[number]; limit?: number; cursor?: string }): Promise<Page<ClientListItem>> {
-  const { limit, offset } = pageArgs(f.limit, f.cursor);
+  const limit = clampLimit(f.limit);
+  const after = parseNameCursor(f.cursor);
   const where: SQL[] = [eq(clients.businessId, businessId)];
   const inScope = clientColumnInScope(clients.id); // a key limited to some clients lists only those
   if (inScope) where.push(inScope);
   if (f.q) where.push(ilike(clients.companyName, like(f.q)));
   if (f.status) where.push(eq(clients.status, f.status));
+  if (after) where.push(sql`(${clients.companyName}, ${clients.id}) > (${after.k}, ${after.i}::uuid)`);
   const rows = await db
     .select({ clientId: clients.id, name: clients.companyName, status: clients.status, currency: clients.currency, country: clients.addressCountry })
-    .from(clients).where(and(...where)).orderBy(asc(clients.companyName), asc(clients.id)).limit(limit + 1).offset(offset);
+    .from(clients).where(and(...where)).orderBy(asc(clients.companyName), asc(clients.id)).limit(limit + 1);
   const page = rows.slice(0, limit);
   const counts = page.length
     ? await db.select({ clientId: clientAdAccounts.clientId, n: sql<number>`count(*)::int` }).from(clientAdAccounts)
         .where(inArray(clientAdAccounts.clientId, page.map((r) => r.clientId))).groupBy(clientAdAccounts.clientId)
     : [];
   const countOf = new Map(counts.map((c) => [c.clientId, c.n]));
+  const last = page[page.length - 1];
   return {
     items: page.map((r) => ({ ...r, status: r.status ?? null, currency: r.currency ?? null, country: r.country ?? null, adAccountCount: countOf.get(r.clientId) ?? 0 })),
-    nextCursor: nextCursorOf(offset, limit, rows.length),
+    nextCursor: rows.length > limit && last ? encodeNameCursor(last.name, last.clientId) : null,
   };
 }
 
@@ -101,7 +102,8 @@ export async function getClient(businessId: string, clientId: string): Promise<C
 export interface CampaignListItem extends CampaignRef { currency: string | null; linkedClientIds: string[] }
 
 export async function listCampaignsForMcp(businessId: string, f: { clientId?: string; status?: string; vertical?: string; q?: string; limit?: number; cursor?: string }): Promise<Page<CampaignListItem>> {
-  const { limit, offset } = pageArgs(f.limit, f.cursor);
+  const limit = clampLimit(f.limit);
+  const after = parseNameCursor(f.cursor);
   if (f.clientId) {
     // A wrong ID is not_found, not an empty page that looks like "no campaigns".
     const [c] = await db.select({ id: clients.id }).from(clients).where(and(eq(clients.id, f.clientId), eq(clients.businessId, businessId))).limit(1);
@@ -115,21 +117,23 @@ export async function listCampaignsForMcp(businessId: string, f: { clientId?: st
   if (f.status) where.push(sql`lower(${campaigns.status}) = lower(${f.status})`);
   if (f.vertical) where.push(ilike(campaigns.vertical, like(f.vertical)));
   if (f.q) where.push(or(ilike(campaigns.name, like(f.q)), eq(campaigns.leadbyteCampaignId, f.q))!);
+  if (after) where.push(sql`(${campaigns.name}, ${campaigns.id}) > (${after.k}, ${after.i}::uuid)`);
   const rows = await db
     .select({ campaignId: campaigns.id, leadbyteId: campaigns.leadbyteCampaignId, name: campaigns.name, vertical: campaigns.vertical, status: campaigns.status, currency: campaigns.currency })
-    .from(campaigns).where(and(...where)).orderBy(asc(campaigns.name), asc(campaigns.id)).limit(limit + 1).offset(offset);
+    .from(campaigns).where(and(...where)).orderBy(asc(campaigns.name), asc(campaigns.id)).limit(limit + 1);
   const page = rows.slice(0, limit);
   const links = page.length
     ? await db.select({ campaignId: clientCampaigns.campaignId, clientId: clientCampaigns.clientId }).from(clientCampaigns)
         .innerJoin(clients, eq(clients.id, clientCampaigns.clientId))
         .where(and(inArray(clientCampaigns.campaignId, page.map((r) => r.campaignId)), eq(clients.businessId, businessId)))
     : [];
+  const last = page[page.length - 1];
   return {
     items: page.map((r) => ({
       campaignId: r.campaignId, leadbyteId: r.leadbyteId ?? null, name: r.name, vertical: r.vertical ?? null, status: r.status ?? null, currency: r.currency ?? null,
       linkedClientIds: links.filter((l) => l.campaignId === r.campaignId).map((l) => l.clientId),
     })),
-    nextCursor: nextCursorOf(offset, limit, rows.length),
+    nextCursor: rows.length > limit && last ? encodeNameCursor(last.name, last.campaignId) : null,
   };
 }
 

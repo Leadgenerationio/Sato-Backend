@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import app from '../index.js';
 import { db } from '../config/database.js';
 import { businesses } from '../db/schema/businesses.js';
@@ -107,6 +107,26 @@ describe('list_clients', () => {
     expect(p2.structuredContent.nextCursor).toBeNull();
     const seen = [...p1.structuredContent.items, ...p2.structuredContent.items].map((c: { clientId: string }) => c.clientId);
     expect(new Set(seen).size).toBe(3);
+  });
+  it('keyset paging never skips or repeats a client when one is added between pages', async () => {
+    // Five clients that sort A..E; the cursor is (name, id), so paging continues right after the last row sent.
+    const q = `Yash PAGE ${tag}`;
+    const names = ['A', 'B', 'C', 'D', 'E'].map((x) => `${q} ${x}`);
+    await db.insert(clients).values(names.map((companyName) => ({ businessId: BIZ, companyName, status: 'active' as const })));
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let guard = 0; guard < 12; guard++) {
+      const p: { structuredContent: { items: { name: string }[]; nextCursor: string | null } } =
+        await call(key, 'list_clients', { q, limit: 2, ...(cursor ? { cursor } : {}) });
+      for (const c of p.structuredContent.items) seen.push(c.name);
+      cursor = p.structuredContent.nextCursor;
+      // After the first page, insert a client that sorts before every other: a row OFFSET would now shift the window
+      // and skip the next unseen client; a keyset cursor is anchored to the last name sent, so it is unaffected.
+      if (seen.length === 2) await db.insert(clients).values({ businessId: BIZ, companyName: `${q} 0-first`, status: 'active' });
+      if (!cursor) break;
+    }
+    for (const n of names) expect(seen.filter((s) => s === n)).toHaveLength(1); // every original seen exactly once
+    await db.delete(clients).where(and(eq(clients.businessId, BIZ), sql`${clients.companyName} like ${`${q}%`}`)); // this test's own rows only
   });
   it('a bad cursor is validation_failed; a key without clients:read is refused', async () => {
     const bad = await call(key, 'list_clients', { cursor: 'not-a-cursor' });

@@ -67,8 +67,11 @@ if (!rawBase) fail('Set STATO_BASE_URL (the backend origin, e.g. https://sato-ba
 let baseUrl: URL;
 try { baseUrl = new URL(rawBase); } catch { fail('STATO_BASE_URL is not a valid URL.'); }
 if (!/^https?:$/.test(baseUrl.protocol)) fail('STATO_BASE_URL must be http or https.');
-const host = baseUrl.hostname.toLowerCase();
-const hostAllowed = host.includes('staging') || host === 'localhost' || host === '127.0.0.1' || (process.env.ALLOW_HOST ?? '').toLowerCase() === host;
+const host = baseUrl.hostname.toLowerCase().replace(/^\[|\]$/g, ''); // strip IPv6 [..] brackets so ::1 compares
+const isLocal = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+// "staging" must be its own label (…-staging., staging.…), not merely a substring of a production host name.
+const isStaging = /(^|[.-])staging([.-]|$)/.test(host);
+const hostAllowed = isStaging || isLocal || (process.env.ALLOW_HOST ?? '').toLowerCase() === host;
 if (!hostAllowed) fail(`Refusing to run against "${host}": this harness writes data. Only staging/localhost hosts run by default; set ALLOW_HOST=${host} if you really mean this host (never production).`);
 const BASE = baseUrl.origin;
 const EMAIL = process.env.STATO_EMAIL ?? '';
@@ -101,6 +104,9 @@ const digits = (s: string) => s.replace(/^act_/i, '').replace(/-/g, '');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const sha256 = (b: Buffer | Uint8Array) => createHash('sha256').update(b).digest('hex');
 const SECRET_PATTERNS = [/stk_[A-Za-z0-9_-]+/g, /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g];
+// Only redact a password long enough to be unambiguous: blanking a 1-3 char password would replace those characters
+// everywhere in the output and corrupt the evidence. The password is only ever sent in the login body, never echoed
+// into an observed string, so a very short one going unredacted is harmless.
 const secrets = new Set<string>(PASSWORD.length >= 6 ? [PASSWORD] : []);
 function redact(s: string): string {
   let out = s;

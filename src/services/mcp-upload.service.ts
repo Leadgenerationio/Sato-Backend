@@ -8,7 +8,7 @@ import { toSpecPlatform } from '../utils/platform-names.js';
 import { toApiError } from '../utils/to-api-error.js';
 import { upsertCopyCreative } from './creative-copy.service.js';
 import { env } from '../config/env.js';
-import { AppError } from '../utils/errors.js';
+import { AppError, MediaSourceError } from '../utils/errors.js';
 import { startUrlUpload } from './mcp-url-uploads.service.js';
 import { ApiError, accountClientMismatch, accountNotLinked } from '../utils/api-error.js';
 import { normalisePlatform } from './ad-account-links.service.js';
@@ -155,7 +155,7 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
   let up: Awaited<ReturnType<typeof upsertPlatformCreative>>;
   // Claimed in the database, so it holds across API instances too.
   const lockId = replayOf ? null : uploadRow?.id ?? null;
-  if (lockId && !(await claimUploadForFiling(lockId))) {
+  if (lockId && !(await claimUploadForFiling(lockId, caller.businessId))) {
     throw new ApiError('rate_limited', 'This upload is being filed by another call, or was just used.', { retryable: true, details: { retryAfter: 2 }, hint: 'Wait a few seconds, then repeat the same call with the same arguments.' });
   }
   try {
@@ -169,10 +169,12 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
       platformCreativeId, mediaType: verified?.mediaType ?? (input.mediaType as 'image' | 'video'), sourceUrl: input.sourceUrl, r2Key: uploadRow?.r2Key, verified, headline: input.headline, bodyText: input.bodyText,
       landingPageUrl: input.landingPageUrl, name: input.name, uploadedBy: caller.userId,
     });
-    if (uploadRow && !replayOf) await linkUploadToCreative(uploadRow.id, up.creative.id);
+    if (uploadRow && !replayOf) await linkUploadToCreative(uploadRow.id, up.creative.id, caller.businessId);
   } catch (err) {
-    // A sourceUrl bigger than the 50 MB direct limit: copy it in the background (up to 1 GB) and tell the caller to poll.
-    if (input.sourceUrl && err instanceof AppError && err.statusCode === 413) {
+    // A sourceUrl bigger than the 50 MB direct limit: copy it in the background (up to 1 GB) and tell the caller to
+    // poll. A MediaSourceError 413 is the image-over-30-MB refusal, NOT a >50 MB file — don't start a doomed copy for
+    // it; let toApiError return a clean file_too_large.
+    if (input.sourceUrl && err instanceof AppError && !(err instanceof MediaSourceError) && err.statusCode === 413) {
       const started = await startUrlUpload(caller, input.sourceUrl);
       throw new ApiError('upload_incomplete', 'This file is bigger than 50 MB, so Stato is copying it from the URL in the background.', {
         retryable: true,
@@ -182,7 +184,7 @@ export async function uploadAssetFromUrl(caller: Caller, input: UploadAssetInput
     }
     toApiError(err);
   } finally {
-    if (lockId) await releaseUploadClaim(lockId).catch(() => {});
+    if (lockId) await releaseUploadClaim(lockId, caller.businessId).catch(() => {});
   }
   const { creative, created } = up;
 

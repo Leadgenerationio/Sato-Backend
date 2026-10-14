@@ -6,6 +6,9 @@ export function toApiError(err: unknown): never {
   if (err instanceof ApiError) throw err;
   if (err instanceof AppError) {
     const m = err.message;
+    if (err instanceof MediaSourceError && err.reason === 'file_too_large') {
+      throw new ApiError('file_too_large', m, { hint: 'Images are up to 30 MB — resize it, or send a video (up to 50 MB this way, larger via create_upload).' });
+    }
     if (err instanceof MediaSourceError && err.reason === 'unsupported_type') {
       throw new ApiError('unsupported_type', m, { hint: 'Send a jpg, png, webp or gif image, or an mp4 or mov video.' });
     }

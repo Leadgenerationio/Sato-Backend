@@ -14,7 +14,7 @@ export class AppError extends Error {
  * map it to a spec code without matching on the message text.
  */
 export class MediaSourceError extends AppError {
-  constructor(statusCode: number, message: string, public readonly reason: 'source_unreachable' | 'unsupported_type') {
+  constructor(statusCode: number, message: string, public readonly reason: 'source_unreachable' | 'unsupported_type' | 'file_too_large') {
     super(statusCode, message);
     Object.setPrototypeOf(this, MediaSourceError.prototype);
   }
