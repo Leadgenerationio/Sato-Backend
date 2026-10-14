@@ -49,6 +49,15 @@ export interface AdAccountRow {
   campaigns: Array<{ campaignId: string; campaignName: string }>;
 }
 
+// The order list_ad_accounts shows and pages in: unlinked first (they need attention), then by 30-day spend, then a
+// stable (platform, accountId) tie-break. Exported as a sort key + comparator so the list_ad_accounts cursor resumes
+// on the exact same order the service sorted by — if these ever diverged, paging would skip or repeat rows.
+export interface AdAccountSortKey { linked: boolean; spend: number; platform: string; accountId: string }
+export const adAccountSortKey = (r: { link: unknown; spend: number; platform: string; accountId: string }): AdAccountSortKey =>
+  ({ linked: Boolean(r.link), spend: r.spend, platform: r.platform, accountId: r.accountId });
+export const compareAdAccountSortKey = (a: AdAccountSortKey, b: AdAccountSortKey): number =>
+  (a.linked ? 1 : 0) - (b.linked ? 1 : 0) || b.spend - a.spend || a.platform.localeCompare(b.platform) || a.accountId.localeCompare(b.accountId);
+
 export interface AdAccountList {
   windowDays: number;
   accounts: AdAccountRow[];
@@ -251,11 +260,7 @@ export async function listAdAccounts(requester: AuthPayload, windowDays = 30, fi
     }
     return true;
   });
-  const accounts = filtered.sort((a, b) => {
-    const au = a.link ? 1 : 0;
-    const bu = b.link ? 1 : 0;
-    return au - bu || b.spend - a.spend || a.platform.localeCompare(b.platform) || a.accountId.localeCompare(b.accountId);
-  });
+  const accounts = filtered.sort((a, b) => compareAdAccountSortKey(adAccountSortKey(a), adAccountSortKey(b)));
   const unlinked = accounts.filter((a) => !a.link);
   return {
     windowDays: days,

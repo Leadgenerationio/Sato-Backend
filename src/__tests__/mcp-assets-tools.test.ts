@@ -247,4 +247,26 @@ describe('list_ad_accounts', () => {
     expect((await call(key, 'list_ad_accounts', { cursor: 'nope' })).structuredContent.code).toBe('validation_failed');
     expect((await call(readKey, 'list_ad_accounts')).structuredContent.code).toBe('insufficient_scope');
   });
+  it('keyset paging never skips or repeats an account when one is added between pages', async () => {
+    const [cPage] = await db.insert(clients).values({ businessId: BIZ, companyName: `Yash Test PG ${tag}`, status: 'active' }).returning();
+    const q = `91${tag}`; // isolates this test's accounts from the rest of the suite
+    const ids = ['01', '02', '03'].map((n) => `${q}${n}`);
+    for (const [i, accId] of ids.entries()) {
+      await request(app).post(`/api/v1/clients/${cPage!.id}/ad-accounts`).set('X-API-Key', key).send({ platform: 'meta', accountId: `act_${accId}`, accountName: `PG ${i}` }).expect(201);
+    }
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let guard = 0; guard < 12; guard++) {
+      const p = await call(key, 'list_ad_accounts', { q, limit: 1, ...(cursor ? { cursor } : {}) });
+      for (const a of p.structuredContent.items) seen.push(a.accountId);
+      cursor = p.structuredContent.nextCursor;
+      // After the first page, add an account that sorts before every other: a row offset would now shift the window
+      // and repeat/skip a row; the keyset cursor is anchored to the last account sent, so it's unaffected.
+      if (seen.length === 1) await request(app).post(`/api/v1/clients/${cPage!.id}/ad-accounts`).set('X-API-Key', key).send({ platform: 'meta', accountId: `act_${q}00`, accountName: 'PG inserted' }).expect(201);
+      if (!cursor) break;
+    }
+    for (const id of ids) expect(seen.filter((s) => s === id)).toHaveLength(1); // each original seen exactly once
+    await db.delete(clientAdAccounts).where(eq(clientAdAccounts.clientId, cPage!.id));
+    await db.delete(clients).where(eq(clients.id, cPage!.id));
+  });
 });
