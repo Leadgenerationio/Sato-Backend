@@ -1,8 +1,18 @@
 import { z } from 'zod';
 import { defineTool } from '../types.js';
-import { listAdAccounts } from '../../services/ad-account-links.service.js';
+import { listAdAccounts, type AdAccountRow } from '../../services/ad-account-links.service.js';
 import { toSpecPlatform } from '../../utils/platform-names.js';
 import { decodeCursor, encodeCursor, CURSOR_MAX_LEN } from '../../utils/cursor.js';
+
+// Every campaign the account feeds: the one it is linked to (link_ad_account's campaignId) first, then the campaigns whose
+// LeadByte traffic sources list it, without repeats. Before, only the traffic-source ones were listed, so an account linked
+// with a campaign showed campaignName filled but campaigns empty (Sam, staging test 15 Oct).
+function campaignsOf(a: AdAccountRow): Array<{ campaignId: string; campaignName: string }> {
+  const out: Array<{ campaignId: string; campaignName: string }> = [];
+  if (a.link?.campaignId && a.link.campaignName) out.push({ campaignId: a.link.campaignId, campaignName: a.link.campaignName });
+  for (const c of a.campaigns) if (!out.some((o) => o.campaignId === c.campaignId)) out.push(c);
+  return out;
+}
 
 export default defineTool({
   name: 'list_ad_accounts',
@@ -53,7 +63,7 @@ export default defineTool({
       data: {
         items: page.map((a) => ({
           platform: toSpecPlatform(a.platform), accountId: a.accountId, accountName: a.accountName, clientId: a.link?.clientId ?? null, clientName: a.link?.clientName ?? null,
-          campaignId: a.link?.campaignId ?? null, campaignName: a.link?.campaignName ?? null, campaigns: a.campaigns, spend30d: a.spend, currency: a.currency,
+          campaignId: a.link?.campaignId ?? null, campaignName: a.link?.campaignName ?? null, campaigns: campaignsOf(a), spend30d: a.spend, currency: a.currency,
         })),
         nextCursor: hasMore && last ? encodeCursor({ p: last.platform, a: last.accountId }) : null,
         summary: { total: all.summary.total, linked: all.summary.linked, unlinked: all.summary.unlinked },

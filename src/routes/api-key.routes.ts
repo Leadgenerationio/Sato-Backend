@@ -44,6 +44,8 @@ export const activityQuerySchema = z.object({
   outcome: z.enum(['ok', 'error']).optional(),
   errorCode: z.string().trim().min(1).max(60).optional(),
   creativeId: uuidShape().optional(),
+  // 'false' hides MCP connection steps (initialize, tools/list); omitted or 'true' keeps every row.
+  includeConnection: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
   limit: z.coerce.number().int().min(1).max(ACTIVITY_MAX_LIMIT).optional(),

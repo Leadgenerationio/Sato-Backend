@@ -93,6 +93,7 @@ See [mcp-tools.md](./mcp-tools.md) for all of them with scope and inputs. It is 
 - **One account can feed several campaigns.** If it does and you send no `campaignId`, the call fails and lists them. Do not guess.
 - **No duplicates.** The same file for the same client is one asset (`result: duplicate` with the existing ID). The same ad (platform + `adId`) is one ad link.
 - **Nothing is deleted.** Archive hides an asset; the file stays.
+- **`null` means not set.** Sending `null` for an optional input is the same as leaving it out.
 
 ## Sending files
 
@@ -102,7 +103,7 @@ See [mcp-tools.md](./mcp-tools.md) for all of them with scope and inputs. It is 
 | Videos from 50 MB to 1 GB, public URL | `upload_asset` with `sourceUrl` answers `upload_incomplete` with an `uploadId`. Stato copies the file in the background. Call `complete_upload` with that `uploadId` until `status` is `ready`, then call `upload_asset` again with the `uploadId` |
 | Any file you hold, up to 30 MB (images) or 4 GB (videos) | `create_upload` (it says single `uploadUrl` or a list of parts), `PUT` the bytes, `complete_upload`, then `upload_asset` with the `uploadId` |
 
-The file type is read from the first bytes, not the name: an `.exe` renamed `.mp4` is refused. A `sourceUrl` must be a public address; Stato follows up to 3 redirects and checks every hop. Videos get a poster and a duration in the background (`fileStatus` goes from `processing` to `ready`).
+The file type is read from the first bytes, not the name: an `.exe` renamed `.mp4` is refused. A `sourceUrl` must be a public address; Stato follows up to 3 redirects and checks every hop. Videos get a poster and a duration in the background (`fileStatus` goes from `processing` to `ready`). Thumbnails are made a moment after upload too: `upload_asset` answers `thumbnailStatus: pending` with `thumbnailUrl` null, and `get_asset` returns the link once it is `ready`.
 
 `get_asset` returns a signed download link that lasts 60 minutes by default (up to 24 hours with `downloadUrlMinutes`), with the right content type, so Meta or TikTok can fetch it through your ad-platform tool.
 
@@ -116,7 +117,7 @@ A tool error comes back with `isError: true` and a body:
   "fields": [], "retryable": false, "requestId": "..." }
 ```
 
-Codes: `unauthorized`, `insufficient_scope`, `not_found`, `validation_failed`, `account_not_linked`, `account_client_mismatch`, `campaign_client_mismatch`, `move_requires_confirm`, `duplicate`, `file_too_large`, `unsupported_type`, `source_unreachable`, `upload_incomplete`, `rate_limited`, `internal_error`. Read `hint`: it says what to do next. `retryable: true` means repeating the same call can work.
+Codes: `unauthorized`, `insufficient_scope`, `not_found`, `validation_failed`, `account_not_linked`, `account_client_mismatch`, `campaign_client_mismatch`, `move_requires_confirm`, `duplicate`, `file_too_large`, `unsupported_type`, `source_unreachable`, `upload_incomplete`, `rate_limited`, `internal_error`. Read `hint`: it says what to do next. `retryable: true` means repeating the same call can work; `false` means it never will as sent (for example a `sourceUrl` at a private or internal address), so change the input.
 
 ## Limits
 

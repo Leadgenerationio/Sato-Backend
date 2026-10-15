@@ -20,6 +20,11 @@ export interface ActivityFilters {
   errorCode?: string;
   /** Only calls that touched this creative (records_touched, GIN index 0057). */
   creativeId?: string;
+  /**
+   * false: leave out MCP connection steps (initialize, notifications/initialized, tools/list — an MCP row with no tool),
+   * which a client sends before its tool calls. They are still logged; the portal hides them by default. Default: included.
+   */
+  includeConnection?: boolean;
   from?: Date;
   to?: Date;
   limit?: number;
@@ -83,6 +88,7 @@ function activityWhere(businessId: string, f: ActivityFilters): SQL[] {
   if (f.keyId) where.push(eq(apiAuditLog.apiKeyId, f.keyId));
   if (f.tool) where.push(eq(apiAuditLog.tool, f.tool));
   if (f.transport) where.push(eq(apiAuditLog.transport, f.transport));
+  if (f.includeConnection === false) where.push(sql`not (${apiAuditLog.transport} = 'mcp' and ${apiAuditLog.tool} is null)`);
   if (f.outcome === 'ok') where.push(isNull(apiAuditLog.errorCode));
   if (f.outcome === 'error') where.push(isNotNull(apiAuditLog.errorCode));
   if (f.errorCode) where.push(eq(apiAuditLog.errorCode, f.errorCode));

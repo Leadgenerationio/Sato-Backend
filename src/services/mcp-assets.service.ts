@@ -138,7 +138,7 @@ export interface AssetDetail {
     creativeId: string; name: string; mediaType: string | null; contentType: string | null; sizeBytes: number | null; width: number | null; height: number | null;
     durationSeconds: number | null; sha256: string | null; fileStatus: string; approvalStatus: string; section: string; headline: string | null; bodyText: string | null;
     tags: string[]; source: string; clientId: string | null; clientName: string | null; campaignId: string | null; campaignName: string | null;
-    archivedAt: string | null; createdAt: string | null; thumbnailUrl: string | null;
+    archivedAt: string | null; createdAt: string | null; thumbnailUrl: string | null; thumbnailStatus: ThumbnailStatus;
   };
   downloadUrl: string | null;
   expiresAt: string | null;
@@ -146,6 +146,18 @@ export interface AssetDetail {
   landingPage: { id: string; url: string; title: string | null } | null;
   /** The latest API-key calls that touched this asset in the last 90 days, newest first (at most 10). */
   history: Array<{ at: string; tool: string | null; by: string | null; transport: string; result: string }>;
+}
+
+/**
+ * Whether an asset's poster/thumbnail can be fetched yet. Thumbnails are made in the background a moment after the file is
+ * filed, so a fresh upload answers 'pending' with thumbnailUrl null; get_asset then returns it. 'none' is an asset that
+ * never gets one (copy-only, or its file failed processing).
+ */
+export type ThumbnailStatus = 'ready' | 'pending' | 'none';
+export function thumbnailStatusOf(a: { thumbnailUrl: string | null; mediaType: string | null; fileStatus: string }): ThumbnailStatus {
+  if (a.thumbnailUrl) return 'ready';
+  if ((a.mediaType === 'image' || a.mediaType === 'video') && a.fileStatus !== 'failed') return 'pending';
+  return 'none';
 }
 
 /** A signed link (1 hour) to the poster or thumbnail of an asset, or null while none exists. Signed when the answer is made, never stored. */
@@ -186,6 +198,7 @@ export async function getAsset(businessId: string, creativeId: string, downloadU
       fileStatus: cr.fileStatus, approvalStatus: cr.status, section: cr.section, headline: cr.headline ?? null, bodyText: cr.bodyText ?? null,
       tags: cr.tags, source: cr.source, clientId: cr.clientId ?? null, clientName: r.clientName ?? null, campaignId: cr.campaignId ?? null,
       campaignName: r.campaignName ?? null, archivedAt: cr.archivedAt ? cr.archivedAt.toISOString() : null, createdAt: cr.createdAt ? cr.createdAt.toISOString() : null, thumbnailUrl,
+      thumbnailStatus: thumbnailStatusOf({ thumbnailUrl, mediaType: cr.type ?? null, fileStatus: cr.fileStatus }),
     },
     downloadUrl,
     expiresAt,

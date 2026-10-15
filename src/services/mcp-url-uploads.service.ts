@@ -4,7 +4,7 @@ import { db } from '../config/database.js';
 import { uploads } from '../db/schema/uploads.js';
 import { abortMultipart, completeMultipart, createMultipart, uploadPart, type CompletedPart } from '../integrations/r2/r2-multipart.js';
 import { isR2Configured } from '../integrations/r2/r2-client.js';
-import { isGenericBinary, openPublicUrl, type RemoteMediaDeps } from '../utils/remote-media.js';
+import { httpStatusError, isGenericBinary, openPublicUrl, type RemoteMediaDeps } from '../utils/remote-media.js';
 import { MediaSourceError } from '../utils/errors.js';
 import { IMAGE_MAX_BYTES, SNIFF_BYTES, sniffMedia } from '../utils/sniff-media.js';
 import { ApiError } from '../utils/api-error.js';
@@ -46,7 +46,7 @@ export async function startUrlUpload(caller: Caller, sourceUrl: string, deps: Re
 
   const { res, finalUrl } = await openPublicUrl(sourceUrl, deps);
   await res.body?.cancel().catch(() => {});
-  if (!res.ok) throw new MediaSourceError(422, `Could not download sourceUrl (HTTP ${res.status})`, 'source_unreachable');
+  if (!res.ok) throw httpStatusError(res.status);
   const type = (res.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase();
   if (type && !type.startsWith('image/') && !type.startsWith('video/') && !isGenericBinary(type)) {
     throw new MediaSourceError(422, `sourceUrl must be an image or video, got "${type}"`, 'unsupported_type');

@@ -1,7 +1,7 @@
 import { Router, type Router as RouterType, type Request, type Response, type NextFunction } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { apiKeyOrJwt, apiKeyRateLimit } from '../middleware/api-key.middleware.js';
-import { createStatoMcpServer, rejectInvalidToolCall } from '../mcp/server.js';
+import { createStatoMcpServer, dropNullOptionalArgs, rejectInvalidToolCall } from '../mcp/server.js';
 import { getTools } from '../mcp/tools/registry.js';
 import type { ToolContext } from '../mcp/types.js';
 import { realUserId } from '../services/ad-account-rules.service.js';
@@ -58,6 +58,7 @@ mcpRoutes.post('/', async (req: Request, res: Response) => {
     return jsonRpcError(res, 400, 'Batch requests are not supported. Send one JSON-RPC message per POST.');
   }
   const tools = await getTools();
+  dropNullOptionalArgs(tools, req.body);
   const invalid = rejectInvalidToolCall(tools, req.body, ctx.requestId || null);
   if (invalid) {
     const { errorCode, args, ...reply } = invalid;

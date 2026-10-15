@@ -14,7 +14,8 @@ export class AppError extends Error {
  * map it to a spec code without matching on the message text.
  */
 export class MediaSourceError extends AppError {
-  constructor(statusCode: number, message: string, public readonly reason: 'source_unreachable' | 'unsupported_type' | 'file_too_large') {
+  /** `retryable` is false when repeating the same call can never work (a blocked or malformed address); undefined = the code's default. */
+  constructor(statusCode: number, message: string, public readonly reason: 'source_unreachable' | 'unsupported_type' | 'file_too_large', public readonly retryable?: boolean) {
     super(statusCode, message);
     Object.setPrototypeOf(this, MediaSourceError.prototype);
   }
