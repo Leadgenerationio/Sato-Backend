@@ -32,7 +32,7 @@ export type CreativeStatus =
  * Do NOT run `drizzle-kit push` on a database that has it: push sees an index the schema does not declare and drops it.
  * Generated migrations (auto-migrate) are unaffected.
  */
-export { CREATIVE_CLIENT_SHA_INDEX } from '../creative-index.js';
+export { CREATIVE_CLIENT_SHA_INDEX, CREATIVE_PLATFORM_CREATIVE_INDEX } from '../creative-index.js';
 
 export const creatives = pgTable('creatives', {
   id: uuid('id').primaryKey().defaultRandom(),

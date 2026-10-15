@@ -8,7 +8,7 @@ import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { AppError, MediaSourceError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
-import { isCreativeShaRace } from '../utils/pg-errors.js';
+import { isCreativeShaRace, isPlatformCreativeRace } from '../utils/pg-errors.js';
 import { canonicalizePlatform, normaliseAccountId } from '../utils/catchr-platform.js';
 import { normaliseLandingUrl } from '../utils/landing-url.js';
 import { fetchRemoteMedia, mediaTypeOf, MAX_MEDIA_BYTES, type RemoteMediaDeps } from '../utils/remote-media.js';
@@ -689,6 +689,22 @@ export async function upsertPlatformCreative(
       lastSeen: now,
     }).returning();
   } catch (err) {
+    // A concurrent sync filed the same (platform, platform_creative_id) first, so the unique index refused this insert.
+    // Return that creative as a duplicate instead of a 500 — but only when it belongs to this request's client (or is
+    // unclaimed) and to this business, never another client's creative (that is the cross-client case the pre-check guards).
+    if (isPlatformCreativeRace(err) && input.platformCreativeId) {
+      const [winner] = await db.select().from(creatives)
+        .where(and(eq(creatives.platform, input.platform), eq(creatives.platformCreativeId, input.platformCreativeId), eq(creatives.isDeleted, false)));
+      if (winner && (winner.clientId === clientId || winner.clientId === null) && (await creativeBelongsToBusiness(winner, businessId))) {
+        logger.warn({ creativeId: winner.id, platform: input.platform }, 'A concurrent sync filed the same platform creative id first; returning it as a duplicate');
+        if (r2Key && r2Key !== winner.r2Key) {
+          const holders = await db.select({ id: creatives.id }).from(creatives).where(eq(creatives.r2Key, r2Key));
+          if (holders.length === 0) deleteFile('creatives', r2Key).catch((e: unknown) => logger.warn({ err: e, r2Key }, 'Could not delete the file of a creative that lost a race'));
+        }
+        return { creative: winner, created: false };
+      }
+      throw err;
+    }
     // The unique index on (client, file hash) refused a second live creative for the same file: a request for the same file
     // got there first. Return that one as a duplicate instead of failing.
     // Only OUR index counts: a violation of some other unique index must not be answered with a lookalike creative.

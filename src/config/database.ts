@@ -12,8 +12,20 @@ if (env.NODE_ENV === 'production' && !connectionString) {
   throw new Error('DATABASE_URL must be set in production');
 }
 
+// Bound the pool and put a ceiling on every connection: an unbounded pool can exhaust the database's connection limit
+// under a burst, and a hung query with no statement_timeout holds its connection forever. Defaults are conservative and
+// overridable per-environment; statement_timeout is generous (60s) so heavy reports still finish — raise it if needed.
+const num = (name: string, fallback: number): number => {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+};
 const client = connectionString
-  ? postgres(connectionString)
+  ? postgres(connectionString, {
+      max: num('DB_POOL_MAX', 10),
+      idle_timeout: num('DB_IDLE_TIMEOUT_S', 20),
+      connect_timeout: num('DB_CONNECT_TIMEOUT_S', 10),
+      connection: { statement_timeout: num('DB_STATEMENT_TIMEOUT_MS', 60_000) },
+    })
   : (null as unknown as ReturnType<typeof postgres>);
 
 export const db = connectionString

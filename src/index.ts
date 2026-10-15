@@ -202,6 +202,17 @@ async function start() {
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // A stray async throw or rejected promise outside a request/worker try would otherwise crash (or, for a rejection on
+  // newer Node, terminate) the process with no structured log. Log it so it's traceable; for a truly uncaught
+  // exception the process state is undefined, so drain and exit and let Railway restart a clean instance.
+  process.on('unhandledRejection', (reason) => {
+    logger.error({ err: reason }, 'Unhandled promise rejection');
+  });
+  process.on('uncaughtException', (err) => {
+    logger.fatal({ err }, 'Uncaught exception — draining and exiting');
+    shutdown('uncaughtException');
+  });
 }
 
 start();
