@@ -85,7 +85,8 @@ After seeding, the following demo accounts are available:
 | `pnpm typecheck` | Type-check without emitting |
 | `pnpm db:generate` | Generate Drizzle migration files |
 | `pnpm db:push` | Push schema directly to database |
-| `pnpm db:migrate` | Run pending migrations |
+| `pnpm db:migrate` | Apply all pending migrations (idempotent `auto-migrate`; the deploy's path). Errors if `DATABASE_URL` is unset |
+| `pnpm db:migrate:journal` | Drizzle-kit's journal-based migrator (legacy — the journal stops at 0007) |
 | `pnpm db:studio` | Open Drizzle Studio (DB browser) |
 | `pnpm db:seed` | Seed default users |
 | `pnpm worker` | Start BullMQ background worker |

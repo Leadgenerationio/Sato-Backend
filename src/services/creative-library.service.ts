@@ -474,7 +474,7 @@ function enqueueThumbnail(creativeId: string): void {
  * existing row instead of adding a copy.
  */
 export async function upsertPlatformCreative(
-  input: UpsertPlatformCreativeInput, deps: RemoteMediaDeps = {},
+  input: UpsertPlatformCreativeInput, deps: RemoteMediaDeps = {}, afterRace = false,
 ): Promise<{ creative: CreativeRow; created: boolean }> {
   const { businessId } = input;
   let clientId = input.clientId ?? null;
@@ -690,18 +690,15 @@ export async function upsertPlatformCreative(
     }).returning();
   } catch (err) {
     // A concurrent sync filed the same (platform, platform_creative_id) first, so the unique index refused this insert.
-    // Return that creative as a duplicate instead of a 500 — but only when it belongs to this request's client (or is
-    // unclaimed) and to this business, never another client's creative (that is the cross-client case the pre-check guards).
-    if (isPlatformCreativeRace(err) && input.platformCreativeId) {
-      const [winner] = await db.select().from(creatives)
-        .where(and(eq(creatives.platform, input.platform), eq(creatives.platformCreativeId, input.platformCreativeId), eq(creatives.isDeleted, false)));
-      if (winner && (winner.clientId === clientId || winner.clientId === null) && (await creativeBelongsToBusiness(winner, businessId))) {
-        logger.warn({ creativeId: winner.id, platform: input.platform }, 'A concurrent sync filed the same platform creative id first; returning it as a duplicate');
-        if (r2Key && r2Key !== winner.r2Key) {
-          const holders = await db.select({ id: creatives.id }).from(creatives).where(eq(creatives.r2Key, r2Key));
-          if (holders.length === 0) deleteFile('creatives', r2Key).catch((e: unknown) => logger.warn({ err: e, r2Key }, 'Could not delete the file of a creative that lost a race'));
-        }
-        return { creative: winner, created: false };
+    // Re-run once: the winner is now committed, so the pre-check at the top finds it and this call takes the exact same
+    // path a non-racing request would — patching the sent fields (headline, landing page, name…), claiming an unclaimed
+    // row, or answering 409 for another client/business, and matching the index (which has no is_deleted predicate).
+    // That keeps the outcome identical regardless of timing. Bounded to one retry so a pathological run of races can't
+    // recurse forever.
+    if (isPlatformCreativeRace(err)) {
+      if (!afterRace) {
+        logger.warn({ platform: input.platform, platformCreativeId: input.platformCreativeId }, 'A concurrent sync filed the same platform creative id first; re-running the upsert once');
+        return upsertPlatformCreative(input, deps, true);
       }
       throw err;
     }

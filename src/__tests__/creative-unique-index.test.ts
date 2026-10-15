@@ -216,6 +216,7 @@ describe('the code survives the index: a request that loses the race gets the ex
     const cB = (await db.insert(clients).values({ businessId: BIZ, companyName: `Yash Test PCID ${tag}`, status: 'active' }).returning())[0]!.id;
     const pcid = `pcid-race-${tag}`;
     let loser!: ReturnType<typeof upsertPlatformCreative>;
+    let blocked = false;
     const warn = vi.spyOn(logger, 'warn');
     try {
       await sql.begin(async (tx) => {
@@ -228,10 +229,13 @@ describe('the code survives the index: a request that loses the race gets the ex
         const [{ pid: winnerPid }] = await tx`select pg_backend_pid() as pid`;
         for (let i = 0; i < 100; i++) {
           const waiting = await sql`select 1 from pg_stat_activity where ${winnerPid} = any(pg_blocking_pids(pid))`;
-          if (waiting.length) break;
+          if (waiting.length) { blocked = true; break; }
           await new Promise((r) => setTimeout(r, 50));
         }
       });
+      // Fail clearly if the loser never reached its blocked INSERT (slow CI) rather than letting the raced assertion
+      // below flake: without a real block there is no race to handle.
+      expect(blocked).toBe(true);
       const result = await loser;
       const raced = warn.mock.calls.some((c) => String(c[1] ?? c[0]).includes('concurrent sync filed the same platform creative id first'));
       expect(raced).toBe(true); // it took the race-loser path, not a raw 500 or the normal existing-row path
