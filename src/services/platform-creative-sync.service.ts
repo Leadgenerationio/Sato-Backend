@@ -15,7 +15,7 @@ import { clientAdAccounts, type ClientAdAccountRow } from '../db/schema/client-a
 import { adAccountSyncState } from '../db/schema/ad-account-sync-state.js';
 import { clients } from '../db/schema/clients.js';
 import { logger } from '../utils/logger.js';
-import { AppError, NotFoundError } from '../utils/errors.js';
+import { AppError, MediaSourceError, NotFoundError } from '../utils/errors.js';
 import type { AuthPayload } from '../types/index.js';
 import {
   metaConfigured, listAds, getVideo, getImagesByHash, redactToken,
@@ -103,6 +103,16 @@ export interface AccountSyncResult {
 
 const running = new Set<string>();
 
+/**
+ * A refusal that will repeat on every run with the same input (a 4xx from the library), as opposed to a passing failure.
+ * Media download errors never count: the next run re-reads the ads and gets fresh CDN links, so an expired link (403) or a
+ * slow CDN can pass then.
+ */
+function isPermanentError(err: unknown): boolean {
+  if (err instanceof MediaSourceError) return false;
+  return err instanceof AppError && err.statusCode >= 400 && err.statusCode < 500 && err.statusCode !== 408 && err.statusCode !== 429;
+}
+
 /** Overlap between runs so an ad edited during a run is picked up next time. */
 const CURSOR_OVERLAP_MS = 10 * 60_000;
 
@@ -178,19 +188,23 @@ export async function syncLinkedAccount(link: ClientAdAccountRow, deps: SyncDeps
     }
 
     let firstError: string | undefined;
+    let retryable = 0;
     for (const input of inputs) {
       try {
-        const { created } = await upsert(input);
+        const { created } = await upsert({ ...input, followAccountLink: true });
         if (created) result.created++; else result.updated++;
       } catch (err) {
         result.failed++;
+        if (!isPermanentError(err)) retryable++;
         firstError ??= redactToken(err instanceof Error ? err.message : String(err));
       }
     }
 
-    // A creative that failed to save must be retried: keep the old cursor so
-    // the next run asks the platform for the same window again.
-    const cursorSince = result.failed > 0 ? (state?.cursorSince ?? null) : new Date(startedAt.getTime() - CURSOR_OVERLAP_MS);
+    // A creative that failed for a passing reason (network, storage, a 5xx) must be retried: keep the old cursor so the
+    // next run asks the platform for the same window again. A permanent refusal (a 4xx: wrong business, a conflict) would
+    // fail the same way every run and pin the account to that window forever, so it is reported but does not hold the
+    // cursor back.
+    const cursorSince = retryable > 0 ? (state?.cursorSince ?? null) : new Date(startedAt.getTime() - CURSOR_OVERLAP_MS);
     const lastError = result.failed > 0 ? `${result.failed} of ${inputs.length} creatives could not be saved: ${firstError}` : null;
     await saveState(link.id, {
       lastRunAt: startedAt,
