@@ -3,7 +3,7 @@ import { defineTool } from '../types.js';
 import { adLinkOut } from '../schemas.js';
 import { ApiError } from '../../utils/api-error.js';
 import { uuidShape } from '../../utils/zod-helpers.js';
-import { thumbnailStatusOf, thumbnailUrlFor } from '../../services/mcp-assets.service.js';
+import { thumbnailFor, thumbnailStatusOf } from '../../services/mcp-assets.service.js';
 import { env } from '../../config/env.js';
 import { uploadAssetFromUrl } from '../../services/mcp-upload.service.js';
 import { withIdempotency } from '../../services/tool-idempotency.service.js';
@@ -51,7 +51,7 @@ export default defineTool({
     fileStatus: z.string(),
     approvalStatus: z.string(),
     thumbnailUrl: z.string().nullable().describe('A signed link to the poster or thumbnail, or null while it is still being made (see thumbnailStatus).'),
-    thumbnailStatus: z.enum(['ready', 'pending', 'none']).describe('pending: the poster/thumbnail is made in the background a moment after upload; call get_asset shortly to get thumbnailUrl. none: this asset has none (copy-only, or the file failed).'),
+    thumbnailStatus: z.enum(['ready', 'pending', 'none']).describe('pending: the poster/thumbnail is still being made (file processing, or filed in the last few minutes); call get_asset shortly to get thumbnailUrl. none: none is coming (copy-only, the file failed, or none could be made); do not keep asking.'),
     portalUrl: z.string().describe('The asset in the Stato portal.'),
     adLink: adLinkOut.nullable(),
     adLinkResult: z.enum(['created', 'updated', 'unchanged', 'duplicate']).nullable().describe('duplicate: the ad already runs another asset. This asset is saved; nothing was linked.'),
@@ -76,10 +76,10 @@ export default defineTool({
       : out.result === 'duplicate' ? `That file is already in Stato for this client: asset ${out.creativeId}. Nothing new was added.`
       : `Updated asset ${out.creativeId}.`;
     const note = out.adLinkResult === 'duplicate' ? ` That ad already runs another asset (${out.adLink?.creativeId}), so the ad was not linked; unlink it first if it changed asset.` : '';
-    const thumbnailUrl = await thumbnailUrlFor(out.creativeId);
+    const { thumbnailUrl, createdAt } = await thumbnailFor(out.creativeId);
     return {
       summary: summary + note,
-      data: { ...out, thumbnailUrl, thumbnailStatus: thumbnailStatusOf({ thumbnailUrl, mediaType: out.mediaType, fileStatus: out.fileStatus }), portalUrl: out.portalUrl ?? `${env.FRONTEND_URL.replace(/\/$/, '')}/creatives?creative=${out.creativeId}`, replayed },
+      data: { ...out, thumbnailUrl, thumbnailStatus: thumbnailStatusOf({ thumbnailUrl, mediaType: out.mediaType, fileStatus: out.fileStatus, createdAt }), portalUrl: out.portalUrl ?? `${env.FRONTEND_URL.replace(/\/$/, '')}/creatives?creative=${out.creativeId}`, replayed },
       audit: { after: { creativeId: out.creativeId, result: out.result, replayed }, recordsTouched: [{ type: 'creative', id: out.creativeId }, ...(request.uploadId ? [{ type: 'upload', id: request.uploadId }] : [])] },
     };
   },

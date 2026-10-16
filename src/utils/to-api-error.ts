@@ -16,9 +16,9 @@ export function toApiError(err: unknown): never {
       // A blocked or malformed address can never work, so it says retryable: false; a source that is down or busy keeps the default (true).
       throw new ApiError('source_unreachable', m, {
         retryable: err.retryable,
-        hint: err.retryable === false
+        hint: err.hint ?? (err.retryable === false
           ? 'This address can never be used: sourceUrl must be a public http(s) address that serves the file. Private and internal addresses are blocked. Send a different URL.'
-          : 'The source could not be reached right now. Check that sourceUrl is a public http(s) address that serves the file, then try again.',
+          : 'The source could not be reached right now. Check that sourceUrl is a public http(s) address that serves the file, then try again.'),
       });
     }
     if (err.statusCode === 401) throw new ApiError('unauthorized', m);

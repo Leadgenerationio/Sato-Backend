@@ -125,6 +125,14 @@ describe('source_unreachable is retryable only when it can pass later (Sam: bloc
     expect(httpStatusError(429).retryable).toBe(true);
     expect(httpStatusError(408).retryable).toBe(true);
   });
+  it('an HTTP error names the status in its hint, not the private-address one (Hari, #126)', () => {
+    const hintOf = (status: number) => { try { toApiError(httpStatusError(status)); } catch (e) { return (e as ApiError).hint ?? ''; } return ''; };
+    expect(hintOf(404)).toContain('HTTP 404');
+    expect(hintOf(404)).toContain('Check the URL');
+    expect(hintOf(403)).toContain('HTTP 403');
+    expect(hintOf(503)).toContain('try again');
+    for (const s of [404, 403, 503, 400]) expect(hintOf(s)).not.toContain('Private and internal');
+  });
   it('a source that is down or slow keeps the default retryable: true', async () => {
     const down = await fetchRemoteMedia('https://cdn.example.com/a.png', {
       lookup: publicLookup, fetchImpl: (async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch,
@@ -135,12 +143,21 @@ describe('source_unreachable is retryable only when it can pass later (Sam: bloc
 });
 
 describe('thumbnailStatus says whether a thumbnail is coming (Sam: upload_asset thumbnailUrl empty, get_asset had one later)', () => {
-  it('ready with a link, pending for a fresh image or video, none for copy or a failed file', () => {
-    expect(thumbnailStatusOf({ thumbnailUrl: 'https://x/t.webp', mediaType: 'video', fileStatus: 'ready' })).toBe('ready');
-    expect(thumbnailStatusOf({ thumbnailUrl: null, mediaType: 'image', fileStatus: 'ready' })).toBe('pending');
-    expect(thumbnailStatusOf({ thumbnailUrl: null, mediaType: 'video', fileStatus: 'processing' })).toBe('pending');
-    expect(thumbnailStatusOf({ thumbnailUrl: null, mediaType: 'video', fileStatus: 'failed' })).toBe('none');
-    expect(thumbnailStatusOf({ thumbnailUrl: null, mediaType: null, fileStatus: 'ready' })).toBe('none');
+  const now = new Date('2026-10-16T10:00:00Z');
+  const ago = (min: number) => new Date(now.getTime() - min * 60_000);
+  it('ready with a link; pending while processing or for a few minutes after filing; none for copy or a failed file', () => {
+    expect(thumbnailStatusOf({ thumbnailUrl: 'https://x/t.webp', mediaType: 'video', fileStatus: 'ready', createdAt: ago(60) }, now)).toBe('ready');
+    expect(thumbnailStatusOf({ thumbnailUrl: null, mediaType: 'image', fileStatus: 'ready', createdAt: ago(0.5) }, now)).toBe('pending');
+    expect(thumbnailStatusOf({ thumbnailUrl: null, mediaType: 'video', fileStatus: 'ready', createdAt: ago(1) }, now)).toBe('pending');
+    expect(thumbnailStatusOf({ thumbnailUrl: null, mediaType: 'video', fileStatus: 'processing', createdAt: ago(30) }, now)).toBe('pending');
+    expect(thumbnailStatusOf({ thumbnailUrl: null, mediaType: 'video', fileStatus: 'failed', createdAt: ago(1) }, now)).toBe('none');
+    expect(thumbnailStatusOf({ thumbnailUrl: null, mediaType: null, fileStatus: 'ready', createdAt: ago(1) }, now)).toBe('none');
+  });
+  it('is not pending forever when no thumbnail will be made (Hari, #126): a ready file past the window is none', () => {
+    // No ffmpeg, a poster timeout, a failed image job, or an asset from before thumbnails: ready, old, no thumbnail.
+    expect(thumbnailStatusOf({ thumbnailUrl: null, mediaType: 'image', fileStatus: 'ready', createdAt: ago(6) }, now)).toBe('none');
+    expect(thumbnailStatusOf({ thumbnailUrl: null, mediaType: 'video', fileStatus: 'ready', createdAt: ago(60 * 24 * 30) }, now)).toBe('none');
+    expect(thumbnailStatusOf({ thumbnailUrl: null, mediaType: 'image', fileStatus: 'ready', createdAt: null }, now)).toBe('none');
   });
   it('upload_asset and get_asset declare thumbnailStatus in their output schema', async () => {
     const tools = await getTools();

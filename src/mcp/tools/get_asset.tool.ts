@@ -21,7 +21,7 @@ export default defineTool({
       fileStatus: z.string(), approvalStatus: z.string(), section: z.string(), headline: z.string().nullable(), bodyText: z.string().nullable(),
       tags: z.array(z.string()), source: z.string(), clientId: z.string().nullable(), clientName: z.string().nullable(), campaignId: z.string().nullable(),
       campaignName: z.string().nullable(), archivedAt: z.string().nullable(), createdAt: z.string().nullable(), thumbnailUrl: z.string().nullable(),
-      thumbnailStatus: z.enum(['ready', 'pending', 'none']).describe('pending: the poster/thumbnail is still being made; ask again in a moment. none: this asset has none (copy-only, or the file failed).'),
+      thumbnailStatus: z.enum(['ready', 'pending', 'none']).describe('pending: the poster/thumbnail is still being made (file processing, or filed in the last few minutes); ask again in a moment. none: none is coming (copy-only, the file failed, or none could be made); do not keep asking.'),
     }),
     downloadUrl: z.string().nullable(),
     expiresAt: z.string().nullable(),

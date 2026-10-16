@@ -116,7 +116,14 @@ export async function openPublicUrl(sourceUrl: string, deps: RemoteMediaDeps = {
 /** The source answered with an error status. A 5xx, 429 or 408 can pass on a later try; any other 4xx (404, 403…) will not. */
 export function httpStatusError(status: number): MediaSourceError {
   const retryable = status >= 500 || status === 429 || status === 408;
-  return new MediaSourceError(422, `Could not download sourceUrl (HTTP ${status})`, 'source_unreachable', retryable);
+  const hint = status === 404 || status === 410
+    ? `The source answered HTTP ${status}: there is no file at that link. Check the URL.`
+    : status === 401 || status === 403
+      ? `The source answered HTTP ${status}: it does not allow downloading that link. Send a public link that opens without a login.`
+      : retryable
+        ? `The source answered HTTP ${status}. It may be busy or down; try again in a few minutes.`
+        : `The source answered HTTP ${status}. Check the link opens in a browser without a login.`;
+  return new MediaSourceError(422, `Could not download sourceUrl (HTTP ${status})`, 'source_unreachable', retryable, hint);
 }
 
 export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps = {}): Promise<FetchedMedia> {
