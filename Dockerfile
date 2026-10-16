@@ -43,5 +43,6 @@ EXPOSE 3001
 # The internal users are NOT seeded on boot: seed.ts falls back to known default
 # passwords when SEED_*_PASSWORD is unset, so running it on every start could
 # create an Owner login with a guessable password. Seed a new environment once,
-# by hand, with the SEED_* passwords set (pnpm db:seed).
+# by hand, with the SEED_* passwords set: inside the container
+# `node dist/db/seed.js`, or from a checkout `pnpm db:seed` with DATABASE_URL set.
 CMD ["sh", "-c", "pnpm db:auto-migrate && node dist/index.js"]
