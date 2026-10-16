@@ -940,16 +940,17 @@ async function test17(t: TestRun) {
   await t.check('list_ad_accounts lists the linked campaign in campaigns', async () => {
     if (!fx.campaignId) return blocked(`no test campaign (${fx.campaignNote})`);
     const r = await bot().call('list_ad_accounts', { clientId: fx.clientA, limit: 50 });
-    const a = ((r.sc.items ?? []) as any[]).find((x) => x.accountId === META.a);
+    const a = ((r.sc.items ?? []) as any[]).find((x) => x.accountId === digits(META.a)); // stored as digits, act_ removed (test 4)
     const ids = (a?.campaigns ?? []).map((c: any) => c.campaignId);
-    return pass(!r.isError && a?.campaignId === fx.campaignId && ids[0] === fx.campaignId, `${code(r)}; ${META.a}: campaignId ${a?.campaignId ?? 'none'}, campaigns [${ids.join(', ')}]`);
+    return pass(!r.isError && a?.campaignId === fx.campaignId && ids[0] === fx.campaignId, `${code(r)}; ${a ? `${META.a}: campaignId ${a.campaignId ?? 'none'}, campaigns [${ids.join(', ')}]` : `${META.a} not in the ${(r.sc.items ?? []).length} accounts listed`}`);
   });
   await t.check('upload_asset and get_asset return thumbnailStatus', async () => {
     const a = await ensureSmall();
     const again = await bot().call('upload_asset', a.uploadArgs);
     const got = await bot().call('get_asset', { creativeId: a.creativeId });
+    const c = got.sc.creative ?? {}; // get_asset nests the asset under creative
     const ok = (s: unknown) => s === 'ready' || s === 'pending' || s === 'none';
-    return pass(ok(again.sc.thumbnailStatus) && ok(got.sc.thumbnailStatus) && (got.sc.thumbnailStatus === 'ready') === Boolean(got.sc.thumbnailUrl), `upload_asset ${code(again)} thumbnailStatus ${again.sc.thumbnailStatus}; get_asset ${code(got)} thumbnailStatus ${got.sc.thumbnailStatus}, thumbnailUrl ${got.sc.thumbnailUrl ? 'set' : 'null'}`);
+    return pass(ok(again.sc.thumbnailStatus) && ok(c.thumbnailStatus) && (c.thumbnailStatus === 'ready') === Boolean(c.thumbnailUrl), `upload_asset ${code(again)} thumbnailStatus ${again.sc.thumbnailStatus}; get_asset ${code(got)} thumbnailStatus ${c.thumbnailStatus}, thumbnailUrl ${c.thumbnailUrl ? 'set' : 'null'}`);
   });
   await t.check('Activity with includeConnection=false hides the connection steps; the default keeps them', async () => {
     await sleep(3000); // audit rows are written after each response
