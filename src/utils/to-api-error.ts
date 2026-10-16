@@ -13,7 +13,13 @@ export function toApiError(err: unknown): never {
       throw new ApiError('unsupported_type', m, { hint: 'Send a jpg, png, webp or gif image, or an mp4 or mov video.' });
     }
     if (err instanceof MediaSourceError && err.reason === 'source_unreachable') {
-      throw new ApiError('source_unreachable', m, { hint: 'sourceUrl must be a public http(s) address that serves the file. Private and internal addresses are blocked.' });
+      // A blocked or malformed address can never work, so it says retryable: false; a source that is down or busy keeps the default (true).
+      throw new ApiError('source_unreachable', m, {
+        retryable: err.retryable,
+        hint: err.hint ?? (err.retryable === false
+          ? 'This address can never be used: sourceUrl must be a public http(s) address that serves the file. Private and internal addresses are blocked. Send a different URL.'
+          : 'The source could not be reached right now. Check that sourceUrl is a public http(s) address that serves the file, then try again.'),
+      });
     }
     if (err.statusCode === 401) throw new ApiError('unauthorized', m);
     if (err.statusCode === 403) throw new ApiError('insufficient_scope', m);

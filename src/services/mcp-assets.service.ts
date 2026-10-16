@@ -138,7 +138,7 @@ export interface AssetDetail {
     creativeId: string; name: string; mediaType: string | null; contentType: string | null; sizeBytes: number | null; width: number | null; height: number | null;
     durationSeconds: number | null; sha256: string | null; fileStatus: string; approvalStatus: string; section: string; headline: string | null; bodyText: string | null;
     tags: string[]; source: string; clientId: string | null; clientName: string | null; campaignId: string | null; campaignName: string | null;
-    archivedAt: string | null; createdAt: string | null; thumbnailUrl: string | null;
+    archivedAt: string | null; createdAt: string | null; thumbnailUrl: string | null; thumbnailStatus: ThumbnailStatus;
   };
   downloadUrl: string | null;
   expiresAt: string | null;
@@ -148,10 +148,34 @@ export interface AssetDetail {
   history: Array<{ at: string; tool: string | null; by: string | null; transport: string; result: string }>;
 }
 
-/** A signed link (1 hour) to the poster or thumbnail of an asset, or null while none exists. Signed when the answer is made, never stored. */
-export async function thumbnailUrlFor(creativeId: string): Promise<string | null> {
-  const [r] = await db.select({ key: creatives.thumbnailKey }).from(creatives).where(eq(creatives.id, creativeId));
-  return r?.key ? getSignedDownloadUrl({ folder: 'creatives', key: r.key, expiresInSeconds: 3600 }).catch(() => null) : null;
+/**
+ * Whether an asset's poster/thumbnail can be fetched yet, so a bot knows whether asking get_asset again is worth it.
+ * - ready: thumbnailUrl is set.
+ * - pending: one is still being made — the file is still processing (a direct video upload: poster and duration), or the
+ *   asset was filed in the last THUMBNAIL_PENDING_MINUTES (an image, or a video sent by sourceUrl, is 'ready' at once and
+ *   its thumbnail job runs a moment later).
+ * - none: none is coming — copy-only, the file failed, or the job finished (or never ran: no ffmpeg, a timeout, an asset
+ *   from before thumbnails) without one. Hari's review on #126: 'pending' must not last forever.
+ */
+export type ThumbnailStatus = 'ready' | 'pending' | 'none';
+export const THUMBNAIL_PENDING_MINUTES = 5;
+export function thumbnailStatusOf(
+  a: { thumbnailUrl: string | null; mediaType: string | null; fileStatus: string; createdAt: Date | string | null },
+  now: Date = new Date(),
+): ThumbnailStatus {
+  if (a.thumbnailUrl) return 'ready';
+  if (a.mediaType !== 'image' && a.mediaType !== 'video') return 'none';
+  if (a.fileStatus === 'processing') return 'pending';
+  if (a.fileStatus !== 'ready' || !a.createdAt) return 'none';
+  const ageMs = now.getTime() - new Date(a.createdAt).getTime();
+  return ageMs >= 0 && ageMs < THUMBNAIL_PENDING_MINUTES * 60_000 ? 'pending' : 'none';
+}
+
+/** The asset's poster/thumbnail as a signed link (1 hour, null while none exists; signed when the answer is made, never stored), and when the asset was filed. */
+export async function thumbnailFor(creativeId: string): Promise<{ thumbnailUrl: string | null; createdAt: Date | null }> {
+  const [r] = await db.select({ key: creatives.thumbnailKey, createdAt: creatives.createdAt }).from(creatives).where(eq(creatives.id, creativeId));
+  const thumbnailUrl = r?.key ? await getSignedDownloadUrl({ folder: 'creatives', key: r.key, expiresInSeconds: 3600 }).catch(() => null) : null;
+  return { thumbnailUrl, createdAt: r?.createdAt ?? null };
 }
 
 /** One asset, a signed download link (default 60 minutes, at most 24 hours) and its ad links. */
@@ -186,6 +210,7 @@ export async function getAsset(businessId: string, creativeId: string, downloadU
       fileStatus: cr.fileStatus, approvalStatus: cr.status, section: cr.section, headline: cr.headline ?? null, bodyText: cr.bodyText ?? null,
       tags: cr.tags, source: cr.source, clientId: cr.clientId ?? null, clientName: r.clientName ?? null, campaignId: cr.campaignId ?? null,
       campaignName: r.campaignName ?? null, archivedAt: cr.archivedAt ? cr.archivedAt.toISOString() : null, createdAt: cr.createdAt ? cr.createdAt.toISOString() : null, thumbnailUrl,
+      thumbnailStatus: thumbnailStatusOf({ thumbnailUrl, mediaType: cr.type ?? null, fileStatus: cr.fileStatus, createdAt: cr.createdAt ?? null }),
     },
     downloadUrl,
     expiresAt,

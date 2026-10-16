@@ -84,38 +84,51 @@ export async function openPublicUrl(sourceUrl: string, deps: RemoteMediaDeps = {
   try {
     url = new URL(sourceUrl);
   } catch {
-    throw new MediaSourceError(422, 'sourceUrl is not a valid URL', 'source_unreachable');
+    throw new MediaSourceError(422, 'sourceUrl is not a valid URL', 'source_unreachable', false);
   }
   for (let hop = 0; ; hop++) {
     if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-      throw new MediaSourceError(422, 'sourceUrl must be an http(s) URL', 'source_unreachable');
+      throw new MediaSourceError(422, 'sourceUrl must be an http(s) URL', 'source_unreachable', false);
     }
     const host = url.hostname.replace(/^\[|\]$/g, '');
     const addresses = isIP(host) ? [{ address: host }] : await lookup(host).catch(() => []);
     if (addresses.length === 0) throw new MediaSourceError(422, `Could not resolve ${host}`, 'source_unreachable');
     if (addresses.some((a) => isPrivateAddress(a.address))) {
-      throw new MediaSourceError(422, 'sourceUrl must point to a public address', 'source_unreachable');
+      throw new MediaSourceError(422, 'sourceUrl must point to a public address', 'source_unreachable', false);
     }
     // Some image hosts (Wikimedia, several CDNs) answer 400/403 to requests without a User-Agent: send an honest one.
     const res = await fetchImpl(url, { redirect: 'manual', signal, headers: { 'User-Agent': USER_AGENT, Accept: 'image/*,video/*' } }).catch((err: unknown) => {
       if (String((err as { cause?: { message?: string } })?.cause?.message ?? '').includes('PRIVATE_ADDRESS')) {
-        throw new MediaSourceError(422, 'sourceUrl must point to a public address', 'source_unreachable');
+        throw new MediaSourceError(422, 'sourceUrl must point to a public address', 'source_unreachable', false);
       }
       throw new MediaSourceError(422, `Could not download sourceUrl (${err instanceof Error ? err.message : 'network error'})`, 'source_unreachable');
     });
     if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
-      if (hop >= MAX_REDIRECTS) throw new MediaSourceError(422, `sourceUrl redirects more than ${MAX_REDIRECTS} times`, 'source_unreachable');
+      if (hop >= MAX_REDIRECTS) throw new MediaSourceError(422, `sourceUrl redirects more than ${MAX_REDIRECTS} times`, 'source_unreachable', false);
       await res.body?.cancel().catch(() => {});
-      try { url = new URL(res.headers.get('location')!, url); } catch { throw new MediaSourceError(422, 'sourceUrl redirects to an invalid address', 'source_unreachable'); }
+      try { url = new URL(res.headers.get('location')!, url); } catch { throw new MediaSourceError(422, 'sourceUrl redirects to an invalid address', 'source_unreachable', false); }
       continue;
     }
     return { res, finalUrl: url };
   }
 }
 
+/** The source answered with an error status. A 5xx, 429 or 408 can pass on a later try; any other 4xx (404, 403…) will not. */
+export function httpStatusError(status: number): MediaSourceError {
+  const retryable = status >= 500 || status === 429 || status === 408;
+  const hint = status === 404 || status === 410
+    ? `The source answered HTTP ${status}: there is no file at that link. Check the URL.`
+    : status === 401 || status === 403
+      ? `The source answered HTTP ${status}: it does not allow downloading that link. Send a public link that opens without a login.`
+      : retryable
+        ? `The source answered HTTP ${status}. It may be busy or down; try again in a few minutes.`
+        : `The source answered HTTP ${status}. Check the link opens in a browser without a login.`;
+  return new MediaSourceError(422, `Could not download sourceUrl (HTTP ${status})`, 'source_unreachable', retryable, hint);
+}
+
 export async function fetchRemoteMedia(sourceUrl: string, deps: RemoteMediaDeps = {}): Promise<FetchedMedia> {
   const { res } = await openPublicUrl(sourceUrl, deps);
-  if (!res.ok) throw new MediaSourceError(422, `Could not download sourceUrl (HTTP ${res.status})`, 'source_unreachable');
+  if (!res.ok) throw httpStatusError(res.status);
   const contentType = res.headers.get('content-type') ?? '';
   const mediaType = mediaTypeOf(contentType);
   // Many S3 and CDN links serve media as octet-stream: the first-bytes check below decides the real type.

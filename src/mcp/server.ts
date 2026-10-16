@@ -69,6 +69,33 @@ export function createStatoMcpServer(ctx: ToolContext, tools: StatoTool[], onAud
 }
 
 /**
+ * Many assistants send `null` for an optional input they mean to leave out (Sam's Cursor sent list_campaigns
+ * `{ clientId: null }`). For a top-level field that is optional and does not itself accept null, null means "not set":
+ * drop the key before validation, so the call works as if it had been omitted. A field that accepts null keeps it, and a
+ * required field still fails validation with its usual message. Mutates the message in place (the SDK and the audit
+ * log then see the same arguments) and returns the names it dropped.
+ */
+export function dropNullOptionalArgs(tools: StatoTool[], message: unknown): string[] {
+  const m = message as { method?: string; params?: { name?: unknown; arguments?: unknown } } | null;
+  if (!m || m.method !== 'tools/call' || typeof m.params?.name !== 'string') return [];
+  const args = m.params.arguments;
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return [];
+  const tool = tools.find((t) => t.name === m.params!.name);
+  if (!tool) return [];
+  const dropped: string[] = [];
+  for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
+    if (value !== null) continue;
+    const field = (tool.inputSchema as Record<string, z.ZodType | undefined>)[key];
+    if (!field) continue;
+    if (field.safeParse(undefined).success && !field.safeParse(null).success) {
+      delete (args as Record<string, unknown>)[key];
+      dropped.push(key);
+    }
+  }
+  return dropped;
+}
+
+/**
  * Bad tool input must come back in the shared error shape (code, fields,
  * requestId), not as the SDK's own "MCP error -32602" text. The route calls
  * this before the SDK sees a tools/call; it answers with a JSON-RPC result
