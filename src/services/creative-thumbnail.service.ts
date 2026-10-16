@@ -34,11 +34,19 @@ function run(cmd: string, args: string[]): Promise<{ code: number; stderr: strin
   });
 }
 
+// Stored videos are only ever MP4 or MOV (utils/sniff-media), so ffmpeg reads them with the mov demuxer and nothing else.
+// Left to guess the format from the content, it would accept an HLS or concat playlist stored under a video content type
+// (the presign + r2Key path trusts the declared type) and fetch the addresses listed inside it from the worker: a blind
+// SSRF into the private network. With the format forced, such a file just fails to read (fileStatus failed). The protocol
+// whitelist keeps the input itself to the signed URL (or the temp file).
+const VIDEO_URL_INPUT = ['-f', 'mov', '-protocol_whitelist', 'http,https,tls,tcp'];
+const VIDEO_FILE_INPUT = ['-f', 'mov', '-protocol_whitelist', 'file'];
+
 export async function makeVideoPoster(input: Buffer): Promise<Buffer | null> {
   const dir = await mkdtemp(join(tmpdir(), 'stato-thumb-'));
   try {
     await writeFile(join(dir, 'in'), input);
-    const r = await run('ffmpeg', ['-y', '-ss', '1', '-i', join(dir, 'in'), '-frames:v', '1', '-vf', `scale=${THUMB_WIDTH}:-2`, join(dir, 'out.jpg')]);
+    const r = await run('ffmpeg', ['-y', '-ss', '1', ...VIDEO_FILE_INPUT, '-i', join(dir, 'in'), '-frames:v', '1', '-vf', `scale=${THUMB_WIDTH}:-2`, join(dir, 'out.jpg')]);
     if (r.code !== 0) return null;
     const jpg = await readFile(join(dir, 'out.jpg'));
     return (await makeImageThumbnail(jpg)).thumb;
@@ -81,7 +89,7 @@ function runCapture(cmd: string, args: string[], timeoutMs: number): Promise<Run
 export interface VideoProbe { ok: boolean; missingBinary: boolean; timedOut: boolean; width?: number; height?: number; durationS?: number }
 
 export async function probeVideo(url: string): Promise<VideoProbe> {
-  const r = await runCapture('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height:format=duration', '-of', 'json', url], videoToolTimeoutMs());
+  const r = await runCapture('ffprobe', ['-v', 'error', ...VIDEO_URL_INPUT, '-select_streams', 'v:0', '-show_entries', 'stream=width,height:format=duration', '-of', 'json', url], videoToolTimeoutMs());
   if (r.missing) return { ok: false, missingBinary: true, timedOut: false };
   if (r.timedOut) return { ok: false, missingBinary: false, timedOut: true };
   if (r.code !== 0) return { ok: false, missingBinary: false, timedOut: false };
@@ -100,7 +108,7 @@ export async function posterFromUrl(url: string, durationS?: number): Promise<Bu
   const dir = await mkdtemp(join(tmpdir(), 'stato-poster-'));
   try {
     const seek = durationS && durationS < 2 ? 0 : 1;
-    const r = await runCapture('ffmpeg', ['-y', '-ss', String(seek), '-i', url, '-frames:v', '1', '-vf', `scale=${THUMB_WIDTH}:-2`, join(dir, 'out.jpg')], videoToolTimeoutMs());
+    const r = await runCapture('ffmpeg', ['-y', '-ss', String(seek), ...VIDEO_URL_INPUT, '-i', url, '-frames:v', '1', '-vf', `scale=${THUMB_WIDTH}:-2`, join(dir, 'out.jpg')], videoToolTimeoutMs());
     if (r.code !== 0) return null;
     return (await makeImageThumbnail(await readFile(join(dir, 'out.jpg')))).thumb;
   } catch {
