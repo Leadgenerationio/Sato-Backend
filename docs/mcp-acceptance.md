@@ -1,6 +1,6 @@
 # MCP acceptance harness
 
-`scripts/mcp-acceptance.ts` replays Sam Wynne's 16 MCP acceptance tests against a running Stato backend, the way a bot sees it: the official MCP SDK client (`@modelcontextprotocol/sdk`, Streamable HTTP) at `<base>/mcp` with a Stato API key, and the Owner's REST screens as the reference to compare against. Every check is reported as PASS, FAIL or BLOCKED with what was actually observed, so the run can be repeated by anyone and compared run to run.
+`scripts/mcp-acceptance.ts` replays Sam Wynne's 16 MCP acceptance tests, plus test 17 for the fixes from his 15 Oct staging run (null optional inputs, `retryable` on URL errors, campaigns on `list_ad_accounts`, `thumbnailStatus`, Activity without connection steps), against a running Stato backend, the way a bot sees it: the official MCP SDK client (`@modelcontextprotocol/sdk`, Streamable HTTP) at `<base>/mcp` with a Stato API key, and the Owner's REST screens as the reference to compare against. Every check is reported as PASS, FAIL or BLOCKED with what was actually observed, so the run can be repeated by anyone and compared run to run.
 
 ## Run it
 
@@ -16,7 +16,7 @@ Only some tests: `TESTS=3,5,7,8,10,11,12 pnpm mcp:acceptance`.
 | --- | --- | --- |
 | `STATO_BASE_URL` | yes | Backend origin, without `/api/v1`. |
 | `STATO_EMAIL`, `STATO_PASSWORD` | yes | An **Owner** login (API keys, Activity and webhooks are Owner only). Read from the environment only; never printed or written to the results. |
-| `TESTS` | no | Comma list of test numbers. Default: all 16. |
+| `TESTS` | no | Comma list of test numbers. Default: all 17. |
 | `OUT` | no | Results folder. Default `./acceptance-out/<run tag>/` (gitignored). |
 | `STATO_CAMPAIGN_ID` | no | Stato campaign UUID for test 3. Default: the seeded "MCP TEST" campaign (`MCPTEST-1`, see `scripts/seed-staging-mcp-campaigns.ts`). |
 | `WEBHOOK_URL` | no | Receiver for the `creative.added` check. Default `https://httpbin.org/status/200`. |

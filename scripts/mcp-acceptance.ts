@@ -1,5 +1,5 @@
 /**
- * MCP acceptance harness: replays Sam Wynne's 16 MCP acceptance tests (MCP spec v1.0) against a live Stato backend,
+ * MCP acceptance harness: replays Sam Wynne's 16 MCP acceptance tests (MCP spec v1.0), plus a 17th for the fixes from his 15 Oct staging run, against a live Stato backend,
  * the way a bot sees it: the official MCP SDK client over Streamable HTTP at <base>/mcp with a Stato API key, plus the
  * owner's REST screens (clients, ad accounts, API keys, Activity, webhooks) as the reference to compare against.
  *
@@ -9,7 +9,7 @@
  *   STATO_BASE_URL   backend origin (no /api/v1). Refused unless the host contains "staging", or is localhost/127.0.0.1,
  *                    or ALLOW_HOST is set to exactly that host.
  *   STATO_EMAIL, STATO_PASSWORD   an Owner login (API keys, Activity and webhooks are Owner only).
- *   TESTS            optional, e.g. "3,5,7,8,10,11,12". Default: all 16.
+ *   TESTS            optional, e.g. "3,5,7,8,10,11,12". Default: all 17.
  *   OUT              optional results folder. Default: ./acceptance-out/<run tag>/ (gitignored).
  *   STATO_CAMPAIGN_ID optional Stato campaign UUID for test 3. Default: the "MCP TEST" campaign (scripts/seed-staging-mcp-campaigns.ts).
  *   WEBHOOK_URL      optional receiver for the creative.added check. Default: https://httpbin.org/status/200.
@@ -55,6 +55,7 @@ const TITLES: Record<number, string> = {
   14: 'TikTok 19-digit ID, Google dashes, tik-tok alias',
   15: 'Landing page with utm_ and fbclid twice: one record',
   16: 'Activity log: rows for every tool, bot name, transport, result, records touched, no key text',
+  17: "Sam's 15 Oct fixes: null optional inputs, retryable on URL errors, campaigns on ad accounts, thumbnailStatus, Activity without connection steps",
 };
 
 function fail(msg: string): never {
@@ -79,9 +80,9 @@ const PASSWORD = process.env.STATO_PASSWORD ?? '';
 if (!EMAIL || !PASSWORD) fail('Set STATO_EMAIL and STATO_PASSWORD (an Owner login).');
 
 const SELECTED = (process.env.TESTS ?? '').trim()
-  ? [...new Set((process.env.TESTS ?? '').split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n >= 1 && n <= 16))].sort((a, b) => a - b)
-  : Array.from({ length: 16 }, (_, i) => i + 1);
-if (!SELECTED.length) fail('TESTS lists no test between 1 and 16.');
+  ? [...new Set((process.env.TESTS ?? '').split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n >= 1 && n <= 17))].sort((a, b) => a - b)
+  : Array.from({ length: 17 }, (_, i) => i + 1);
+if (!SELECTED.length) fail('TESTS lists no test between 1 and 17.');
 
 const RUN_STARTED = new Date();
 const TAG = String(Date.now()).slice(-9); // 9 digits: also the stem of every fake platform ID, so a run never collides with another
@@ -407,7 +408,7 @@ async function makeVideo(target: number): Promise<Video> {
   return { file, bytes, sha256: hash.digest('hex'), head: fs.readFileSync(file).subarray(0, 1024), how, real, expectedDurationS };
 }
 
-// ─── The 16 tests ────────────────────────────────────────────────────────────
+// ─── The 17 tests ────────────────────────────────────────────────────────────
 
 async function test1(t: TestRun) {
   await t.check('connect with the official SDK client (Streamable HTTP, Bearer stk_ key)', async () => {
@@ -913,7 +914,55 @@ async function test16(t: TestRun) {
   });
 }
 
-const TESTS: Record<number, (t: TestRun) => Promise<void>> = { 1: test1, 2: test2, 3: test3, 4: test4, 5: test5, 6: test6, 7: test7, 8: test8, 9: test9, 10: test10, 11: test11, 12: test12, 13: test13, 14: test14, 15: test15, 16: test16 };
+/** The five points from Sam's staging run on 15 Oct (fixed in #126 and #94). */
+async function test17(t: TestRun) {
+  await t.check('null on an optional input means "not set" (list_campaigns { clientId: null })', async () => {
+    const r = await bot().call('list_campaigns', { clientId: null, status: null, limit: 5 });
+    return pass(!r.isError && Array.isArray(r.sc.items), `${code(r)}, ${Array.isArray(r.sc.items) ? `${r.sc.items.length} campaigns` : short(r.sc?.message ?? r.text, 120)}`);
+  });
+  await t.check('null on a required input still fails (get_client { clientId: null })', async () => {
+    const r = await bot().call('get_client', { clientId: null });
+    return pass(r.isError, `${code(r)}`);
+  });
+  const fromUrl = (sourceUrl: string) => bot().call('upload_asset', { sourceUrl, mediaType: 'image', platform: 'meta', platformAccountId: META.a, name: `${PREFIX} url error check` }, 60_000);
+  await t.check('a blocked address is retryable: false', async () => {
+    const r = await fromUrl('http://127.0.0.1:5432/x.png');
+    return pass(r.isError && r.sc.retryable === false, `${code(r)}, retryable ${r.sc.retryable}, hint "${short(r.sc.hint, 100)}"`);
+  });
+  await t.check('a 404 source is retryable: false and its hint names the status', async () => {
+    const r = await fromUrl('https://httpbin.org/status/404');
+    return pass(r.isError && r.sc.retryable === false && /404|not found|gone/i.test(String(r.sc.hint)), `${code(r)}, retryable ${r.sc.retryable}, hint "${short(r.sc.hint, 100)}"`);
+  });
+  await t.check('a 503 source is retryable: true', async () => {
+    const r = await fromUrl('https://httpbin.org/status/503');
+    return pass(r.isError && r.sc.retryable === true, `${code(r)}, retryable ${r.sc.retryable}, hint "${short(r.sc.hint, 100)}"`);
+  });
+  await t.check('list_ad_accounts lists the linked campaign in campaigns', async () => {
+    if (!fx.campaignId) return blocked(`no test campaign (${fx.campaignNote})`);
+    const r = await bot().call('list_ad_accounts', { clientId: fx.clientA, limit: 50 });
+    const a = ((r.sc.items ?? []) as any[]).find((x) => x.accountId === digits(META.a)); // stored as digits, act_ removed (test 4)
+    const ids = (a?.campaigns ?? []).map((c: any) => c.campaignId);
+    return pass(!r.isError && a?.campaignId === fx.campaignId && ids[0] === fx.campaignId, `${code(r)}; ${a ? `${META.a}: campaignId ${a.campaignId ?? 'none'}, campaigns [${ids.join(', ')}]` : `${META.a} not in the ${(r.sc.items ?? []).length} accounts listed`}`);
+  });
+  await t.check('upload_asset and get_asset return thumbnailStatus', async () => {
+    const a = await ensureSmall();
+    const again = await bot().call('upload_asset', a.uploadArgs);
+    const got = await bot().call('get_asset', { creativeId: a.creativeId });
+    const c = got.sc.creative ?? {}; // get_asset nests the asset under creative
+    const ok = (s: unknown) => s === 'ready' || s === 'pending' || s === 'none';
+    return pass(ok(again.sc.thumbnailStatus) && ok(c.thumbnailStatus) && (c.thumbnailStatus === 'ready') === Boolean(c.thumbnailUrl), `upload_asset ${code(again)} thumbnailStatus ${again.sc.thumbnailStatus}; get_asset ${code(got)} thumbnailStatus ${c.thumbnailStatus}, thumbnailUrl ${c.thumbnailUrl ? 'set' : 'null'}`);
+  });
+  await t.check('Activity with includeConnection=false hides the connection steps; the default keeps them', async () => {
+    await sleep(3000); // audit rows are written after each response
+    const q = { keyId: fx.mainKey.id, from: since(RUN_STARTED) };
+    const all = await activity(q);
+    const toolsOnly = await activity({ ...q, includeConnection: 'false' });
+    const conn = (rows: any[]) => rows.filter((r) => r.transport === 'mcp' && !r.tool).length;
+    return pass(conn(all) > 0 && conn(toolsOnly) === 0 && toolsOnly.length === all.length - conn(all), `default ${all.length} rows (${conn(all)} connection steps); includeConnection=false ${toolsOnly.length} rows (${conn(toolsOnly)} connection steps)`);
+  });
+}
+
+const TESTS: Record<number, (t: TestRun) => Promise<void>> = { 1: test1, 2: test2, 3: test3, 4: test4, 5: test5, 6: test6, 7: test7, 8: test8, 9: test9, 10: test10, 11: test11, 12: test12, 13: test13, 14: test14, 15: test15, 16: test16, 17: test17 };
 
 // ─── Run ─────────────────────────────────────────────────────────────────────
 
