@@ -41,8 +41,10 @@ function isAlreadyExistsError(err: unknown): boolean {
 async function run(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) {
-    console.warn('[auto-migrate] DATABASE_URL not set — skipping migrations');
-    return;
+    // Fail loudly rather than reporting success while doing nothing — `db:migrate` (aliased to this) must not quietly
+    // exit 0 with no URL and leave a fresh database un-migrated.
+    console.error('[auto-migrate] DATABASE_URL is not set — refusing to run; nothing was migrated');
+    process.exit(1);
   }
 
   const migrationsDir = path.resolve('src/db/migrations');

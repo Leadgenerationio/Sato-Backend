@@ -12,8 +12,16 @@ if (env.NODE_ENV === 'production' && !connectionString) {
   throw new Error('DATABASE_URL must be set in production');
 }
 
+// Bound the pool so a burst can't exhaust the database's connection limit, and fail fast on a dead database instead of
+// hanging on connect. statement_timeout is deliberately NOT set here: this client is imported by backfill scripts and
+// in-process jobs whose long bulk writes/lock-waits would be cancelled, and it breaks against PgBouncer as a startup
+// parameter — set a query ceiling at the role level (ALTER ROLE ... SET statement_timeout) instead.
 const client = connectionString
-  ? postgres(connectionString)
+  ? postgres(connectionString, {
+      max: env.DB_POOL_MAX,
+      idle_timeout: env.DB_IDLE_TIMEOUT_S,
+      connect_timeout: env.DB_CONNECT_TIMEOUT_S,
+    })
   : (null as unknown as ReturnType<typeof postgres>);
 
 export const db = connectionString

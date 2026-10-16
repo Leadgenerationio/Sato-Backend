@@ -3,6 +3,11 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const v = (key: string, fallback = ''): string => process.env[key] || fallback;
+// A non-negative integer env var: parse, require >= min (so 0 can be meaningful, e.g. idle_timeout 0 = disabled), else the default.
+const intEnv = (key: string, def: number, min: number): number => {
+  const n = parseInt(process.env[key] ?? '', 10);
+  return Number.isInteger(n) && n >= min ? n : def;
+};
 
 const NODE_ENV = v('NODE_ENV', 'development');
 const isProd = NODE_ENV === 'production';
@@ -35,6 +40,11 @@ export const env = {
   // Data stores
   DATABASE_URL: v('DATABASE_URL'),
   REDIS_URL: v('REDIS_URL'),
+  // Postgres pool bounds (config/database.ts). Conservative defaults; idle_timeout 0 disables idle-close. No
+  // statement_timeout here — it would also hit backfill scripts and break against PgBouncer; set it at the role level.
+  DB_POOL_MAX: intEnv('DB_POOL_MAX', 10, 1),
+  DB_IDLE_TIMEOUT_S: intEnv('DB_IDLE_TIMEOUT_S', 20, 0),
+  DB_CONNECT_TIMEOUT_S: intEnv('DB_CONNECT_TIMEOUT_S', 10, 1),
 
   // Xero — Custom Connection (server-to-server, client_credentials grant)
   XERO_CLIENT_ID: v('XERO_CLIENT_ID'),

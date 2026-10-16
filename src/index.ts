@@ -162,14 +162,19 @@ async function start() {
   // Stop accepting new connections, drain in-flight requests, close Redis,
   // then exit. Hard-exit after 10s in case a connection refuses to drain.
   let shuttingDown = false;
-  const shutdown = (signal: string) => {
+  let exitCode = 0;
+  const shutdown = (signal: string, code = 0) => {
+    // A crash (code 1) wins over a clean signal, even when a SIGTERM drain is already in progress — the process must
+    // never exit 0 after an uncaught error, which an orchestrator with an on-failure restart policy would read as a
+    // clean stop and leave down.
+    if (code) exitCode = code;
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info({ signal }, 'Received shutdown signal — closing server');
 
     const forceTimer = setTimeout(() => {
       logger.error('Graceful shutdown timed out after 10s — exiting');
-      process.exit(0);
+      process.exit(exitCode);
     }, 10_000);
     forceTimer.unref();
 
@@ -193,15 +198,28 @@ async function start() {
       .then(() => {
         clearTimeout(forceTimer);
         logger.info('Shutdown complete');
-        process.exit(0);
+        process.exit(exitCode);
       })
       .catch((err) => {
         logger.error({ err }, 'Unexpected error during shutdown');
-        process.exit(1);
+        process.exit(exitCode || 1);
       });
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // A stray async throw or rejected promise outside a request/worker try. Node terminates the process on both by
+  // default (uncaughtException always; unhandledRejection since Node 15), so a handler that only logs would silently
+  // keep a possibly-broken instance serving traffic. We log it AND drain-and-exit NON-ZERO, so Railway restarts a
+  // clean instance; if a drain is already running, exitCode is bumped to 1 so it exits non-zero too.
+  process.on('unhandledRejection', (reason) => {
+    logger.error({ err: reason }, 'Unhandled promise rejection — draining and exiting');
+    shutdown('unhandledRejection', 1);
+  });
+  process.on('uncaughtException', (err) => {
+    logger.fatal({ err }, 'Uncaught exception — draining and exiting');
+    shutdown('uncaughtException', 1);
+  });
 }
 
 start();

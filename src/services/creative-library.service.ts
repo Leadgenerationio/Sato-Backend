@@ -8,7 +8,7 @@ import { clientCampaigns } from '../db/schema/client-campaigns.js';
 import { clientAdAccounts } from '../db/schema/client-ad-accounts.js';
 import { AppError, MediaSourceError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
-import { isCreativeShaRace } from '../utils/pg-errors.js';
+import { isCreativeShaRace, isPlatformCreativeRace } from '../utils/pg-errors.js';
 import { canonicalizePlatform, normaliseAccountId } from '../utils/catchr-platform.js';
 import { normaliseLandingUrl } from '../utils/landing-url.js';
 import { fetchRemoteMedia, mediaTypeOf, MAX_MEDIA_BYTES, type RemoteMediaDeps } from '../utils/remote-media.js';
@@ -474,7 +474,7 @@ function enqueueThumbnail(creativeId: string): void {
  * existing row instead of adding a copy.
  */
 export async function upsertPlatformCreative(
-  input: UpsertPlatformCreativeInput, deps: RemoteMediaDeps = {},
+  input: UpsertPlatformCreativeInput, deps: RemoteMediaDeps = {}, afterRace = false,
 ): Promise<{ creative: CreativeRow; created: boolean }> {
   const { businessId } = input;
   let clientId = input.clientId ?? null;
@@ -689,6 +689,19 @@ export async function upsertPlatformCreative(
       lastSeen: now,
     }).returning();
   } catch (err) {
+    // A concurrent sync filed the same (platform, platform_creative_id) first, so the unique index refused this insert.
+    // Re-run once: the winner is now committed, so the pre-check at the top finds it and this call takes the exact same
+    // path a non-racing request would — patching the sent fields (headline, landing page, name…), claiming an unclaimed
+    // row, or answering 409 for another client/business, and matching the index (which has no is_deleted predicate).
+    // That keeps the outcome identical regardless of timing. Bounded to one retry so a pathological run of races can't
+    // recurse forever.
+    if (isPlatformCreativeRace(err)) {
+      if (!afterRace) {
+        logger.warn({ platform: input.platform, platformCreativeId: input.platformCreativeId }, 'A concurrent sync filed the same platform creative id first; re-running the upsert once');
+        return upsertPlatformCreative(input, deps, true);
+      }
+      throw err;
+    }
     // The unique index on (client, file hash) refused a second live creative for the same file: a request for the same file
     // got there first. Return that one as a duplicate instead of failing.
     // Only OUR index counts: a violation of some other unique index must not be answered with a lookalike creative.

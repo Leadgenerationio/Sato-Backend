@@ -1,4 +1,4 @@
-import { CREATIVE_CLIENT_SHA_INDEX } from '../db/schema/creatives.js';
+import { CREATIVE_CLIENT_SHA_INDEX, CREATIVE_PLATFORM_CREATIVE_INDEX } from '../db/schema/creatives.js';
 
 /**
  * A Postgres unique violation (23505). Drizzle wraps the driver error in a
@@ -19,4 +19,9 @@ export function isUniqueViolation(err: unknown): boolean {
 /** A unique violation of OUR creatives (client, file or text hash) index: the sign that the same asset raced in. Any other unique violation is a different problem. */
 export function isCreativeShaRace(err: unknown): boolean {
   return isUniqueViolation(err) && uniqueViolationConstraint(err) === CREATIVE_CLIENT_SHA_INDEX;
+}
+
+/** A unique violation of the (platform, platform_creative_id) index: a concurrent sync filed the same platform creative id first. */
+export function isPlatformCreativeRace(err: unknown): boolean {
+  return isUniqueViolation(err) && uniqueViolationConstraint(err) === CREATIVE_PLATFORM_CREATIVE_INDEX;
 }

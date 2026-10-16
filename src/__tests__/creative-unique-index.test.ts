@@ -13,9 +13,10 @@ import { apiKeys } from '../db/schema/api-keys.js';
 import { logger } from '../utils/logger.js';
 import { ensureUniqueIndex, findDuplicateGroups, indexState, createIndexSql } from '../../scripts/lib/creative-unique-index.js';
 import * as r2 from '../integrations/r2/r2-client.js';
-import { uniqueViolationConstraint } from '../utils/pg-errors.js';
+import { uniqueViolationConstraint, isPlatformCreativeRace, isCreativeShaRace } from '../utils/pg-errors.js';
 import { copyHash, upsertCopyCreative } from '../services/creative-copy.service.js';
-import { CREATIVE_CLIENT_SHA_INDEX } from '../db/schema/creatives.js';
+import { upsertPlatformCreative } from '../services/creative-library.service.js';
+import { CREATIVE_CLIENT_SHA_INDEX, CREATIVE_PLATFORM_CREATIVE_INDEX } from '../db/schema/creatives.js';
 
 // One live creative per (client, file hash): the check script, the index script and the code that survives the index.
 const BIZ = '26d6b2b4-c867-460e-8473-eca2b1ffd232';
@@ -208,6 +209,44 @@ describe('the code survives the index: a request that loses the race gets the ex
     await expect(upsertCopyCreative({ businessId: BIZ, clientId: client, platform: 'meta', platformCreativeId: pid, headline: `Upd two ${tag}` })).rejects.toMatchObject({ statusCode: 409 });
     expect((await db.select().from(creatives).where(eq(creatives.id, a.creative.id)))[0]!.headline).toBe(`Upd one ${tag}`);
   }, 60_000);
+  it('platform creative id: the call that loses a concurrent sync gets the winner back as a duplicate, not a 500', async () => {
+    // A fresh client with no prior creative, so the loser's file can't match an existing one by its hash (the mocked
+    // PNG is shared across tests) — it must take the INSERT path and hit the (platform, platform_creative_id) unique
+    // index (present from migration 0045), which is the race this fix handles.
+    const cB = (await db.insert(clients).values({ businessId: BIZ, companyName: `Yash Test PCID ${tag}`, status: 'active' }).returning())[0]!.id;
+    const pcid = `pcid-race-${tag}`;
+    let loser!: ReturnType<typeof upsertPlatformCreative>;
+    let blocked = false;
+    const warn = vi.spyOn(logger, 'warn');
+    try {
+      await sql.begin(async (tx) => {
+        // Winner inserted but not yet committed: the loser's lookup sees nothing, its INSERT waits on the unique index,
+        // and loses once the winner commits.
+        await tx`insert into creatives (client_id, name, type, section, platform, platform_creative_id, file_status, content_type)
+                 values (${cB}, ${'Winner'}, 'image', 'media', 'meta', ${pcid}, 'ready', 'image/png')`;
+        loser = upsertPlatformCreative({ businessId: BIZ, clientId: cB, platform: 'meta', platformCreativeId: pcid, mediaType: 'image', sourceUrl: `https://93.184.216.34/${tag}/pcid.png`, name: `Loser ${tag}` });
+        loser.catch(() => undefined);
+        const [{ pid: winnerPid }] = await tx`select pg_backend_pid() as pid`;
+        for (let i = 0; i < 100; i++) {
+          const waiting = await sql`select 1 from pg_stat_activity where ${winnerPid} = any(pg_blocking_pids(pid))`;
+          if (waiting.length) { blocked = true; break; }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      });
+      // Fail clearly if the loser never reached its blocked INSERT (slow CI) rather than letting the raced assertion
+      // below flake: without a real block there is no race to handle.
+      expect(blocked).toBe(true);
+      const result = await loser;
+      const raced = warn.mock.calls.some((c) => String(c[1] ?? c[0]).includes('concurrent sync filed the same platform creative id first'));
+      expect(raced).toBe(true); // it took the race-loser path, not a raw 500 or the normal existing-row path
+      expect(result.created).toBe(false);
+      expect(await db.select().from(creatives).where(and(eq(creatives.clientId, cB), eq(creatives.platformCreativeId, pcid)))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+      await db.delete(creatives).where(eq(creatives.clientId, cB));
+      await db.delete(clients).where(eq(clients.id, cB));
+    }
+  }, 60_000);
   it('a violation of some OTHER unique index is not answered as a duplicate (it stays an error)', async (ctx) => {
     // Needs a database where OUR index does not cover the second client below. When the real (unscoped) index is already
     // there, every client is covered by it, so the losers hit OUR index and the question cannot arise: skip, never drop it.
@@ -241,6 +280,18 @@ describe('only our index is answered as a duplicate', () => {
     expect(uniqueViolationConstraint({ cause: { code: '23505', constraint_name: 'b_uq' } })).toBe('b_uq');
     expect(uniqueViolationConstraint(new Error('x'))).toBeUndefined();
     expect(CREATIVE_CLIENT_SHA_INDEX).toBe('creatives_client_sha256_live_uq');
+    expect(CREATIVE_PLATFORM_CREATIVE_INDEX).toBe('creatives_platform_creative_uq');
+  });
+  it('each race predicate only matches a violation of its own index', () => {
+    const sha = { code: '23505', constraint_name: CREATIVE_CLIENT_SHA_INDEX };
+    const pcid = { code: '23505', constraint_name: CREATIVE_PLATFORM_CREATIVE_INDEX };
+    const other = { code: '23505', constraint_name: 'something_else_uq' };
+    expect(isCreativeShaRace(sha)).toBe(true);
+    expect(isCreativeShaRace(pcid)).toBe(false);
+    expect(isPlatformCreativeRace(pcid)).toBe(true);
+    expect(isPlatformCreativeRace(sha)).toBe(false);
+    expect(isPlatformCreativeRace(other)).toBe(false);
+    expect(isPlatformCreativeRace(new Error('nope'))).toBe(false);
   });
   it('a real violation carries the index name', async () => {
     const name = `idxname_${tag}_uq`;
