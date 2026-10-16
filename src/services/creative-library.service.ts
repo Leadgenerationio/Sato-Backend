@@ -53,6 +53,11 @@ export interface UpsertPlatformCreativeInput {
   name?: string;
   /** Internal: who uploaded (JWT callers). */
   uploadedBy?: string | null;
+  /**
+   * Internal, platform sync only: this account's link is the source of truth for the client. A creative this same account
+   * filed under another client (the account was re-linked since) moves with it instead of answering 409.
+   */
+  followAccountLink?: boolean;
   /** Internal: a file uploaded through create_upload and already verified (size, real file type, SHA-256), up to 4 GB. */
   verified?: { sha256: string; sizeBytes: number; contentType: string; mediaType: 'image' | 'video'; fileStatus?: 'processing' | 'ready' };
 }
@@ -497,6 +502,7 @@ export async function upsertPlatformCreative(
 
   // Existing row?
   let existing: CreativeRow | undefined;
+  let movedFromClientId: string | null = null;
   if (input.platformCreativeId) {
     [existing] = await db.select().from(creatives)
       .where(and(eq(creatives.platform, input.platform), eq(creatives.platformCreativeId, input.platformCreativeId)));
@@ -506,7 +512,12 @@ export async function upsertPlatformCreative(
     // The same rule as the copy path (creative-copy.service): another client's creative inside this business is never
     // overwritten here. Moving an asset between clients is update_asset with confirmMove, not a side effect of an upload or a sync.
     if (existing && existing.clientId && existing.clientId !== clientId) { // also when no client was sent: a campaign-only call cannot prove it owns the creative
-      throw new AppError(409, 'This platform creative id is already registered to another client');
+      // The one exception: the sync of the account that filed it, after the account was moved to another client (which
+      // itself needed confirmMove). Without this, every later sync of that account failed on these creatives.
+      const sameAccount = input.followAccountLink && clientId && input.platformAccountId && existing.platformAccountId
+        && existing.platformAccountId === normaliseAccountId(input.platform, input.platformAccountId);
+      if (!sameAccount) throw new AppError(409, 'This platform creative id is already registered to another client');
+      movedFromClientId = existing.clientId;
     }
   }
   // With an r2Key the server hashes the stored object below and dedupes on
@@ -663,6 +674,14 @@ export async function upsertPlatformCreative(
       Object.assign(patch, { r2Key, fileUrl: fileUrl ?? existing.fileUrl, contentType, sizeBytes, sha256, type: mediaType, thumbnailKey: null });
     }
     if (input.name) patch.name = input.name;
+    if (movedFromClientId) {
+      // Moved with its ad account: take the account's campaign (or none), and drop the old client's landing page, as
+      // update_asset does on a move.
+      patch.campaignId = campaignId;
+      if (!landingPageId && existing.landingPageId) patch.landingPageId = null;
+      logger.info({ creativeId: existing.id, fromClientId: movedFromClientId, toClientId: clientId, platformAccountId: fields.platformAccountId },
+        'Platform sync moved a creative with its re-linked ad account');
+    }
     const [row] = await db.update(creatives).set(patch).where(eq(creatives.id, existing.id)).returning();
     const changed = Object.keys(patch).some((k) => !['lastSeen', 'updatedAt'].includes(k));
     if (changed) domainEvents.emit('creative.changed', { businessId, data: { creativeId: row!.id, clientId: row!.clientId, platform: row!.platform } });

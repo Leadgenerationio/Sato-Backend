@@ -8,6 +8,7 @@ import { campaigns } from '../db/schema/campaigns.js';
 import { clientAdAccounts, type ClientAdAccountRow } from '../db/schema/client-ad-accounts.js';
 import { adAccountSyncState } from '../db/schema/ad-account-sync-state.js';
 import { logger } from '../utils/logger.js';
+import { AppError, MediaSourceError } from '../utils/errors.js';
 import { _resetTaboolaTokenCache } from '../integrations/taboola/taboola-client.js';
 import {
   syncAllLinkedAccounts, syncLinkedAccount, requestSyncNow, resolveUpsert,
@@ -188,6 +189,37 @@ describe('syncAllLinkedAccounts', () => {
     const [state] = await db.select().from(adAccountSyncState).where(eq(adAccountSyncState.clientAdAccountId, metaLink.id));
     expect(state.lastError).toBe('1 of 8 creatives could not be saved: storage refused 120210000000005002');
     expect(state.cursorSince).toBeNull();
+  });
+
+  it('a permanent refusal (a 4xx) is reported but does not hold the cursor back; a media error still does', async () => {
+    // A 409 (e.g. a creative registered to another business) fails the same way every run: keeping the old cursor would
+    // pin the account to that window forever. A CDN error can pass next run with a fresh link, so it keeps the window.
+    const at = new Date('2026-09-29T09:00:00Z');
+    const refused: UpsertFn = async (i) => {
+      if (i.platformCreativeId === '120210000000005002') throw new AppError(409, 'This platform creative id is already registered to another business');
+      return { creative: { id: i.platformCreativeId }, created: true };
+    };
+    const r = await syncLinkedAccount(metaLink, { ...deps(refused), now: () => at });
+    expect(r).toMatchObject({ status: 'error', failed: 1 });
+    let [state] = await db.select().from(adAccountSyncState).where(eq(adAccountSyncState.clientAdAccountId, metaLink.id));
+    expect(state.lastError).toContain('registered to another business');
+    expect(state.cursorSince?.getTime()).toBe(at.getTime() - 10 * 60_000);
+
+    await db.delete(adAccountSyncState).where(eq(adAccountSyncState.clientAdAccountId, metaLink.id));
+    const cdn: UpsertFn = async (i) => {
+      if (i.platformCreativeId === '120210000000005002') throw new MediaSourceError(422, 'Could not download sourceUrl (HTTP 403)', 'source_unreachable', false);
+      return { creative: { id: i.platformCreativeId }, created: true };
+    };
+    await syncLinkedAccount(metaLink, { ...deps(cdn), now: () => at });
+    [state] = await db.select().from(adAccountSyncState).where(eq(adAccountSyncState.clientAdAccountId, metaLink.id));
+    expect(state.cursorSince).toBeNull();
+  });
+
+  it('asks the library to move a creative with its re-linked account (followAccountLink)', async () => {
+    const lib = fakeUpsert();
+    await syncLinkedAccount(metaLink, { ...deps(lib.upsert), now: () => new Date('2026-09-29T09:00:00Z') });
+    expect(lib.inputs.length).toBeGreaterThan(0);
+    expect(lib.inputs.every((i) => i.followAccountLink === true)).toBe(true);
   });
 
   it('a platform error on one account is recorded (token redacted) and the other account still syncs', async () => {

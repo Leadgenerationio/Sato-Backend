@@ -29,6 +29,8 @@ export interface PlatformCreativeInput {
   height?: number;
   durationS?: number;
   name?: string;
+  /** Set by the sync: a creative this account filed under another client moves with the re-linked account. */
+  followAccountLink?: boolean;
 }
 
 /** Where the synced creative is filed — always from client_ad_accounts, never names. */
